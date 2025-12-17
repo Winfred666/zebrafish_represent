@@ -1,0 +1,18 @@
+[project]
+name = "zebrafish-represent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ipympl>=0.9.8",
+    "ipywidgets>=8.1.8",
+    "matplotlib>=3.10.8",
+    "numpy>=2.3.5",
+    "pytorch-lightning>=2.6.0",
+    "pyyaml>=6.0.3",
+    "scikit-image>=0.25.2",
+    "tifffile>=2025.12.12",
+    "torch==2.9.*",
+    "tqdm>=4.67.1",
+]

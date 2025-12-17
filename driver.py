@@ -24,58 +24,27 @@ def train(config_path: str):
     Args:
         config_path: Path to configuration YAML file
     """
-    # Load configuration
+    # Load config (load_config returns a normalized dict with defaults applied)
     config = load_config(config_path)
     print("Configuration loaded:")
     print(config)
-    
+
     # Set random seed for reproducibility
-    seed = config.get('seed', 42)
-    L.seed_everything(seed)
-    
-    # Data configuration
-    data_config = config.get('data', {})
-    train_path = data_config.get('train_path', 'data/train.pt')
-    val_path = data_config.get('val_path', 'data/val.pt')
-    batch_size = data_config.get('batch_size', 4)
-    num_workers = data_config.get('num_workers', 4)
-    
-    # Model configuration
-    model_config = config.get('model', {})
-    in_channels = model_config.get('in_channels', 1)
-    out_channels = model_config.get('out_channels', 1)
-    features = model_config.get('features', [64, 128, 256, 512])
-    trilinear = model_config.get('trilinear', False)
-    use_batchnorm = model_config.get('use_batchnorm', True)
-    loss_type = model_config.get('loss_type', 'mse')
-    
-    # Training configuration
-    train_config = config.get('training', {})
-    learning_rate = train_config.get('learning_rate', 1e-4)
-    weight_decay = train_config.get('weight_decay', 1e-5)
-    max_epochs = train_config.get('max_epochs', 100)
-    
-    # Checkpoint configuration
-    checkpoint_config = config.get('checkpoint', {})
-    checkpoint_dir = checkpoint_config.get('dir', 'checkpoints')
-    save_top_k = checkpoint_config.get('save_top_k', 3)
-    
-    # Logging configuration
-    log_config = config.get('logging', {})
-    log_dir = log_config.get('dir', 'logs')
-    experiment_name = log_config.get('experiment_name', 'zebrafish_unet')
-    
+    L.seed_everything(config['seed'])
+
+    data_config = config['data']
+    model_config = config['model']
+    train_config = config['training']
+    trainer_config = config['trainer']
+    checkpoint_config = config['checkpoint']
+    log_config = config['logging']
+
     print(f"\nLoading data from:")
-    print(f"  Train: {train_path}")
-    print(f"  Val: {val_path}")
+    print(f"  Train: {data_config['train_path']}")
+    print(f"  Val: {data_config['val_path']}")
     
     # Create dataloaders
-    dataloaders = create_dataloaders(
-        train_path=train_path,
-        val_path=val_path if Path(val_path).exists() else None,
-        batch_size=batch_size,
-        num_workers=num_workers
-    )
+    dataloaders = create_dataloaders(**data_config)
     
     train_loader = dataloaders['train']
     val_loader = dataloaders.get('val', None)
@@ -87,16 +56,8 @@ def train(config_path: str):
     
     # Initialize model
     print(f"\nInitializing model...")
-    model = FishModule(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        features=features,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        trilinear=trilinear,
-        use_batchnorm=use_batchnorm,
-        loss_type=loss_type
-    )
+    # FishModule expects a flat kwargs dict across model + training.
+    model = FishModule(**{**model_config, **train_config})
     
     print(f"Model parameters: {model.model.get_num_params():,}")
     
@@ -105,13 +66,13 @@ def train(config_path: str):
     
     # Model checkpoint callback
     checkpoint_callback = ModelCheckpoint(
-        dirpath=checkpoint_dir,
-        filename=f'{experiment_name}-{{epoch:02d}}-{{val/loss:.4f}}',
+        dirpath=checkpoint_config['dir'],
+        filename=f"{log_config['experiment_name']}-{{epoch:02d}}-{{val/loss:.4f}}",
         monitor='val/loss' if val_loader else 'train/loss',
         mode='min',
-        save_top_k=save_top_k,
+        save_top_k=checkpoint_config['save_top_k'],
         save_last=True,
-        verbose=True
+        verbose=True,
     )
     callbacks.append(checkpoint_callback)
     
@@ -131,37 +92,33 @@ def train(config_path: str):
     
     # Setup logger
     logger = TensorBoardLogger(
-        save_dir=log_dir,
-        name=experiment_name
+        save_dir=log_config['dir'],
+        name=log_config['experiment_name'],
     )
     
     # Setup trainer
-    trainer_config = config.get('trainer', {})
-    accelerator = trainer_config.get('accelerator', 'auto')
-    devices = trainer_config.get('devices', 'auto')
-    precision = trainer_config.get('precision', '32')
-    gradient_clip_val = trainer_config.get('gradient_clip_val', 0.5)
-    accumulate_grad_batches = trainer_config.get('accumulate_grad_batches', 1)
-    
+    max_epochs = train_config['max_epochs']
+
     print(f"\nTraining configuration:")
     print(f"  Max epochs: {max_epochs}")
-    print(f"  Learning rate: {learning_rate}")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Accelerator: {accelerator}")
-    print(f"  Devices: {devices}")
-    print(f"  Precision: {precision}")
+    print(f"  Learning rate: {train_config['learning_rate']}")
+    print(f"  Batch size: {data_config['batch_size']}")
+    print(f"  Accelerator: {trainer_config['accelerator']}")
+    print(f"  Devices: {trainer_config['devices']}")
+    print(f"  Precision: {trainer_config['precision']}")
     
     trainer = L.Trainer(
         max_epochs=max_epochs,
         callbacks=callbacks,
         logger=logger,
-        accelerator=accelerator,
-        devices=devices,
-        precision=precision,
-        gradient_clip_val=gradient_clip_val,
-        accumulate_grad_batches=accumulate_grad_batches,
-        log_every_n_steps=10,
-        deterministic=train_config.get('deterministic', False)
+        # pass through Trainer kwargs from config (load_config applies defaults)
+        accelerator=trainer_config['accelerator'],
+        devices=trainer_config['devices'],
+        precision=trainer_config['precision'],
+        gradient_clip_val=trainer_config['gradient_clip_val'],
+        accumulate_grad_batches=trainer_config['accumulate_grad_batches'],
+        log_every_n_steps=trainer_config['log_every_n_steps'],
+        deterministic=train_config.get('deterministic', False),
     )
     
     # Train the model

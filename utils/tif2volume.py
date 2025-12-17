@@ -8,6 +8,29 @@ from typing import Tuple, Optional
 import argparse
 
 
+def _try_integer_downscale_factors(
+    scale_factor: Tuple[float, float, float], *, tol: float = 1e-3
+) -> Optional[Tuple[int, int, int]]:
+    """If scale factors correspond to integer downscale (e.g. 0.5 -> factor 2), return factors.
+
+    For power-of-two style downsampling we prefer `downscale_local_mean`, which is
+    typically far more memory-friendly than `transform.resize`.
+    """
+
+    factors: list[int] = []
+    for s in scale_factor:
+        if s <= 0:
+            return None
+        inv = 1.0 / float(s)
+        inv_round = int(round(inv))
+        if abs(inv - inv_round) > tol:
+            return None
+        if inv_round < 1:
+            return None
+        factors.append(inv_round)
+    return tuple(factors)  # type: ignore[return-value]
+
+
 def load_tif_stack(tif_path: str) -> np.ndarray:
     """
     Load a .tif file or stack of .tif files.
@@ -36,21 +59,49 @@ def downsample_volume(volume: np.ndarray,
     Returns:
         Downsampled volume
     """
+    # Keep computations in float32 to reduce memory pressure.
+    # (skimage.resize may upcast internally otherwise)
+    if volume.dtype != np.float32:
+        volume = volume.astype(np.float32, copy=False)
+
+    # Prefer integer-factor downsampling when possible (e.g. 0.5/0.25/0.125 ...)
+    factors = _try_integer_downscale_factors(scale_factor)
+
     if volume.ndim == 3:
         # Grayscale volume
-        output_shape = tuple(int(dim * scale) for dim, scale in zip(volume.shape, scale_factor))
-        downsampled = transform.resize(volume, output_shape, order=order, 
-                                      preserve_range=True, anti_aliasing=True)
+        if factors is not None:
+            # `downscale_local_mean` returns float64 by default for integer inputs;
+            # since we cast to float32 above, it stays float32-ish.
+            downsampled = transform.downscale_local_mean(volume, factors)
+        else:
+            output_shape = tuple(int(dim * scale) for dim, scale in zip(volume.shape, scale_factor))
+            downsampled = transform.resize(
+                volume,
+                output_shape,
+                order=order,
+                preserve_range=True,
+                anti_aliasing=True,
+            )
     elif volume.ndim == 4:
         # Multi-channel volume
-        output_shape = tuple(int(dim * scale) for dim, scale in zip(volume.shape[:3], scale_factor))
-        output_shape = output_shape + (volume.shape[3],)
-        downsampled = transform.resize(volume, output_shape, order=order,
-                                      preserve_range=True, anti_aliasing=True)
+        if factors is not None:
+            # Downscale only spatial dims; keep C untouched.
+            # volume is (D,H,W,C)
+            downsampled = transform.downscale_local_mean(volume, factors + (1,))
+        else:
+            output_shape = tuple(int(dim * scale) for dim, scale in zip(volume.shape[:3], scale_factor))
+            output_shape = output_shape + (volume.shape[3],)
+            downsampled = transform.resize(
+                volume,
+                output_shape,
+                order=order,
+                preserve_range=True,
+                anti_aliasing=True,
+            )
     else:
         raise ValueError(f"Expected 3D or 4D volume, got shape {volume.shape}")
-    
-    return downsampled
+
+    return downsampled.astype(np.float32, copy=False)
 
 
 def normalize_volume(volume: np.ndarray, 

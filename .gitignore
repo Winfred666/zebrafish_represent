@@ -207,11 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 # Project specific
-data/*.npy
-data/*.pt
-data/*.tif
-data/*.tiff
-checkpoints/
-logs/
+/data
+/checkpoints
+/tb_logs
+/results
 *.npy
 *.pt

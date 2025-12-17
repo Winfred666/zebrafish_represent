@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as L
-from typing import Dict, Any, Optional, List
+from typing import Dict, Optional, List
 from pathlib import Path
 import sys
 
