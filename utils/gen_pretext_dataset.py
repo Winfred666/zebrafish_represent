@@ -54,7 +54,7 @@ def random_block_mask(volume_shape: Tuple[int, int, int],
 
 def random_patch_mask(volume_shape: Tuple[int, int, int],
                      mask_ratio: float = 0.3,
-                     patch_size: int = 16) -> np.ndarray:
+                     patch_size: int = 8) -> np.ndarray:
     """
     Generate a random patch-based mask (similar to MAE/SimMIM).
     
@@ -109,7 +109,7 @@ def create_masked_sample(volume: np.ndarray,
     
     Args:
         volume: Input volume array
-        mask_type: Type of mask ("block" or "patch")
+        mask_type: Type of mask ("one big block(harder)" or "lots of small patches(eaiser)")
         mask_ratio: Ratio of volume to mask
         **kwargs: Additional arguments for mask generation
         
@@ -119,15 +119,15 @@ def create_masked_sample(volume: np.ndarray,
             - target: original volume (C, D, H, W)
             - mask: binary mask (1, D, H, W)
     """
+    # Accept:
+    #   - (D,H,W) -> (1,D,H,W)
+    #   - (C,D,H,W) -> unchanged
+    # NOTE: batched arrays (N,C,D,H,W) are handled in `generate_pretext_dataset`.
     if volume.ndim == 3:
-        # Add channel dimension
         volume = volume[np.newaxis, ...]  # (1, D, H, W)
-    elif volume.ndim == 4:
-        # Already has channels, move to first dimension if needed
-        if volume.shape[-1] < volume.shape[0]:
-            # Likely (D, H, W, C), transpose to (C, D, H, W)
-            volume = np.transpose(volume, (3, 0, 1, 2))
-    
+    elif volume.ndim != 4:
+        raise ValueError(f"Expected volume with 3D/4D shape, got {volume.shape}")
+
     _, d, h, w = volume.shape
     
     # Generate mask
@@ -149,7 +149,7 @@ def create_masked_sample(volume: np.ndarray,
     mask = mask[np.newaxis, ...]  # (1, D, H, W)
     
     # Apply mask to volume
-    masked_volume = volume * (1 - mask)
+    masked_volume = volume * (1 - mask) # mask 1 means masked black region
     
     # Convert to torch tensors
     return {
@@ -181,18 +181,28 @@ def generate_pretext_dataset(volume_paths: List[str],
     print(f"Generating pretext dataset from {len(volume_paths)} volumes...")
     
     for volume_path in tqdm(volume_paths):
-        # Load volume
-        volume = np.load(volume_path)
-        
-        # Generate multiple masked samples from same volume
-        for _ in range(samples_per_volume):
-            sample = create_masked_sample(
-                volume,
-                mask_type=mask_type,
-                mask_ratio=mask_ratio,
-                **kwargs
-            )
-            dataset.append(sample)
+        arr = np.load(volume_path)
+
+        # Support both formats:
+        #   - (C,D,H,W) single volume
+        #   - (N,C,D,H,W) batched volumes (e.g. resampled to min or blocks)
+        if arr.ndim == 4:
+            volumes = [arr]
+        elif arr.ndim == 5:
+            volumes = [arr[i] for i in range(arr.shape[0])]
+        else:
+            raise ValueError(f"Unsupported npy shape {arr.shape} in {volume_path}")
+
+        for vol in volumes:
+            # Generate multiple masked samples from same volume
+            for _ in range(samples_per_volume):
+                sample = create_masked_sample(
+                    vol,
+                    mask_type=mask_type,
+                    mask_ratio=mask_ratio,
+                    **kwargs,
+                )
+                dataset.append(sample)
     
     # Save dataset
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +216,8 @@ def split_dataset(volume_dir: str,
                  samples_per_volume: int = 10,
                  mask_type: str = "block",
                  mask_ratio: float = 0.3,
-                 seed: int = 42) -> None:
+                 seed: int = 42,
+                 **kwargs) -> None:
     """
     Split volumes into train and validation datasets.
     
@@ -249,7 +260,8 @@ def split_dataset(volume_dir: str,
             str(output_path / "train.pt"),
             samples_per_volume=samples_per_volume,
             mask_type=mask_type,
-            mask_ratio=mask_ratio
+            mask_ratio=mask_ratio,
+            **kwargs,
         )
     
     if len(val_files) > 0:
@@ -258,7 +270,8 @@ def split_dataset(volume_dir: str,
             str(output_path / "val.pt"),
             samples_per_volume=samples_per_volume,
             mask_type=mask_type,
-            mask_ratio=mask_ratio
+            mask_ratio=mask_ratio,
+            **kwargs,
         )
     
     print("Dataset generation complete!")

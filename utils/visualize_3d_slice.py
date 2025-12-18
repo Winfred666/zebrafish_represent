@@ -345,7 +345,7 @@ def draw_nifti_slices_with_gt(pred_imgs, gt_imgs, mask=None, slice_along_axis='z
         ax.imshow(comparison_image, cmap='viridis', vmin=vmin, vmax=vmax)
         ax.set_title(f"{title}\n(t={time_idx}, {slice_along_axis.upper()} Slice {slice_idx})")
         ax.set_xticks([W//2, W + W//2, 2*W + W//2])
-        ax.set_xticklabels(['GT', 'Pred', 'Error'])
+        ax.set_xticklabels(['Pred','GT', 'Error'])
         ax.set_yticks([])
         fig.canvas.draw_idle()
 
@@ -373,7 +373,7 @@ def visualize_prediction_vs_groundtruth(pred_img, gt_img, vmin=0, vmax=1, mask=N
     # Compute absolute error 
     error_img = np.abs(pred_img - gt_img)
     # Stack images just horizontally, shaped (H, W*3)
-    stacked = np.hstack((gt_img, pred_img, error_img))
+    stacked = np.hstack((pred_img, gt_img, error_img))
     # Clip values for visualization
     stacked = np.clip(stacked, vmin, vmax)
     return stacked

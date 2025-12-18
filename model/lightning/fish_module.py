@@ -224,7 +224,7 @@ def create_dataloaders(train_path: str,
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=2,
             pin_memory=True,
             persistent_workers=num_workers > 0
         )

@@ -213,3 +213,4 @@ __marimo__/
 /results
 *.npy
 *.pt
+/reports

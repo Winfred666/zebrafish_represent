@@ -19,9 +19,11 @@
 
 - Dataset and Results: DO NOT open nor read contents of `data/**/*` or `results/**/*` as they are huge or complicated. Only scan the folder structure and file name when we want to use specific files to run script or set config.
 
+- Virtual python env: DO NOT visit .venv as env is huge.
+
 ## How to run (what’s “real” in this repo)
 
-The project use uv for env and dependency management.
+The project use uv for env and dependency management; If running in commandline, do not use `<< PY` command, use `-c "..."` instead. 
 
 - Training is config-driven, `uv run driver.py --config config/default.yaml`.
 
@@ -32,6 +34,8 @@ The project use uv for env and dependency management.
 ## Patterns to follow when editing
 
 - Keep tensors channel-first and 5D in the network: `(B,C,D,H,W)`; dataset items stay 4D per-sample.
+
+- When manipulate index and coordinates, REMEMBER (D,H,W) == (x, y, z), D->x , H->y , W->z, this always make x in first dim.
 
 - If you change the sample dict schema, update both `utils/gen_pretext_dataset.py` and `PretextDataset/FishModule.compute_loss()`.
 

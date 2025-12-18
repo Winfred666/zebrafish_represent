@@ -92,7 +92,6 @@ def train(config_path: str):
     
     # Setup logger
     logger = TensorBoardLogger(
-        save_dir=log_config['dir'],
         name=log_config['experiment_name'],
     )
     
