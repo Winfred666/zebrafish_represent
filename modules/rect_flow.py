@@ -9,7 +9,7 @@ import torch
 from einops import repeat
 from torch.utils.data import DataLoader
 
-from model.dit3d import DiT3D
+from modules.dit3d import DiT3D
 from utils.dataset import TifVolumeDataset
 from utils.sanitize.runtime_config import DataLoaderRuntimeConfig, RectifiedFlowComputeConfig
 

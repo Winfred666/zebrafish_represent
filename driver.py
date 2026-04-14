@@ -120,8 +120,8 @@ def _load_weights_if_requested(model: "L.LightningModule", ckpt_path: Optional[s
 def _build_framework_components(
     config: "RuntimeConfig",
 ) -> Tuple["L.LightningModule", dict[str, object], str]:
-    from model.ddpm import DDPMModule, create_ddpm_dataloaders
-    from model.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
+    from modules.ddpm import DDPMModule, create_ddpm_dataloaders
+    from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
     from utils.sanitize.runtime_config import DDPMComputeConfig, RectifiedFlowComputeConfig
 
     framework_config = config.framework_config
@@ -161,9 +161,6 @@ def train(config_path: str) -> None:
     _bootstrap_runtime_environment(config_path)
 
     import pytorch_lightning as L
-    import torch
-
-    from utils.sanitize.trainer_config import trainer_uses_cuda
 
     config = load_config(config_path)
     L.seed_everything(config.seed)
@@ -173,7 +170,6 @@ def train(config_path: str) -> None:
     model_config = config.model
     train_config = config.train
     testing_config = config.testing
-    cuda_enabled = trainer_uses_cuda(config.trainer.accelerator) and torch.cuda.is_available()
 
     print("Configuration loaded")
     print(f"  config_path: {Path(config_path).resolve()}")
@@ -186,11 +182,6 @@ def train(config_path: str) -> None:
     model, dataloaders, sample_filename = _build_framework_components(config)
     train_loader = dataloaders["train"]
     val_loader = dataloaders.get("val")
-
-    if data_config.crop_size is None:
-        inferred_size = getattr(train_loader.dataset, "effective_input_size", None)
-        if inferred_size is not None:
-            print(f"[MEMORY_TEST] actual_dhw={list(inferred_size)}")
 
     _load_weights_if_requested(model, config.load_from_ckpt)
 
@@ -214,9 +205,6 @@ def train(config_path: str) -> None:
     print(f"  Precision: {config.trainer.precision}")
     print(f"  Model parameters: {model.model.get_num_params():,}")
 
-    if cuda_enabled:
-        torch.cuda.reset_peak_memory_stats()
-
     resume_ckpt = config.resume_ckpt_path
     if resume_ckpt:
         resume_ckpt = str(Path(resume_ckpt).expanduser().resolve())
@@ -230,13 +218,6 @@ def train(config_path: str) -> None:
             ckpt_path=resume_ckpt,
         )
     except Exception:
-        print(f"[MEMORY_TEST] trainer_global_step={int(trainer.global_step)}")
-        if cuda_enabled:
-            torch.cuda.synchronize()
-            peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-            peak_reserved_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
-            print(f"[MEMORY_TEST] peak_allocated_gb={peak_alloc_gb:.4f}")
-            print(f"[MEMORY_TEST] peak_reserved_gb={peak_reserved_gb:.4f}")
         raise
 
     print("\nTraining complete")
@@ -255,14 +236,6 @@ def train(config_path: str) -> None:
             },
             step=int(trainer.global_step),
         )
-
-    if cuda_enabled:
-        torch.cuda.synchronize()
-        print(f"[MEMORY_TEST] trainer_global_step={int(trainer.global_step)}")
-        peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        peak_reserved_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
-        print(f"[MEMORY_TEST] peak_allocated_gb={peak_alloc_gb:.4f}")
-        print(f"[MEMORY_TEST] peak_reserved_gb={peak_reserved_gb:.4f}")
 
 
 def main() -> None:

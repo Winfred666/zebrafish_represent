@@ -10,7 +10,7 @@ import torch
 from einops import rearrange
 from torch.utils.data import DataLoader
 
-from model.dit3d import DiT3D
+from modules.dit3d import DiT3D
 from utils.dataset import (
     TifDDPMDeterministicNoiseDataset,
     TifDDPMOnTheFlyNoiseDataset,

@@ -3,8 +3,8 @@
 ## Repository Scope
 
 This repository trains a 3D generative representation model for zebrafish microscopy volumes using:
-- 3D DiT backbone (`model/dit3d.py`)
-- Rectified flow or DDPM training modules (`model/rect_flow.py`, `model/ddpm.py`)
+- 3D DiT backbone (`modules/dit3d.py`)
+- Rectified flow or DDPM training modules (`modules/rect_flow.py`, `modules/ddpm.py`)
 - PyTorch Lightning training entrypoint (`driver.py`)
 
 The previous UNet and `model/lightning/*` training paths are stale and must not be reintroduced on `main`.
@@ -21,8 +21,8 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 ## Key Files
 
 - Entrypoint: `driver.py`
-- Model backbone: `model/dit3d.py`
-- Training modules: `model/rect_flow.py`, `model/ddpm.py`
+- Model backbone: `modules/dit3d.py`
+- Training modules: `modules/rect_flow.py`, `modules/ddpm.py`
 - Config loader and defaults: `utils/sanitize/load_config.py`
 - Config schemas: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/trainer_config.py`, `utils/sanitize/runtime_config.py`
 - Dataset package: `utils/dataset/`
@@ -71,6 +71,7 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 - Keep changes config-driven, but place defaults and validation in sanitize models rather than ad hoc normalization helpers
 - Preserve the current DiT-based generative path only
 - Do not reintroduce UNet, masked-pretext, or stale token-compat branches unless explicitly requested
+- For chore, cleanup, or simplification commits, prefer net deletion over net addition. If code must grow, do it by cleanly splitting one large Python file into smaller focused files.
 - Keep code ASCII unless a file already requires Unicode
 - Avoid touching large data artifacts under `data/`, `checkpoints/`, `logs/`, `outputs/`, `result/`
 - `README.md` is guidance and tutorial for beginners to run the repo. Seldom change it unless we really need to modify basic docs or run guidance.
@@ -82,5 +83,5 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 - Supported smoke run: `uv run python driver.py --config config/data/scale_0p0625.yaml`
 
 After changes, at minimum run:
-- `uv run python -m compileall driver.py model utils`
+- `uv run python -m compileall driver.py modules utils`
 - `uv run python -m unittest tests.test_runtime_entry`

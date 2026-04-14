@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from model.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
+from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
 from utils.sanitize.load_config import load_config
 from utils.sanitize.runtime_config import RectifiedFlowComputeConfig
 
@@ -16,6 +16,13 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(config.model.input_size, (4, 4, 4))
         self.assertEqual(config.train.framework, 'rectified_flow')
         self.assertIsInstance(config.framework_config, RectifiedFlowComputeConfig)
+        self.assertEqual(config.framework_config.train_loader.batch_size, config.data.batch_size)
+        self.assertEqual(config.framework_config.train_loader.dataset.data_dir, config.data.train_dir)
+        self.assertEqual(
+            config.framework_config.train_loader.dataset.samples_per_volume,
+            config.data.samples_per_volume_train,
+        )
+        self.assertEqual(config.framework_config.model.in_channels, config.model.in_channels)
 
         dataloaders = create_rectified_flow_dataloaders(config.framework_config)
         batch = next(iter(dataloaders['train']))

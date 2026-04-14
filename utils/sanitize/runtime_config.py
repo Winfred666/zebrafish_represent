@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Any, Dict, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
@@ -46,10 +46,25 @@ class TrainConfig(BaseModel):
     ddpm: DDPMConfig = Field(default_factory=DDPMConfig)
 
 
-class OptimizationConfig(BaseModel):
+class IngestibleConfig(BaseModel):
+    """Base class for derived runtime objects built from sanitized config sources."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    @classmethod
+    def from_sources(cls, *sources: BaseModel | dict[str, Any], **overrides: Any) -> Self:
+        unified_data: dict[str, Any] = {}
+        for source in sources:
+            data = source.model_dump(mode="python") if isinstance(source, BaseModel) else source
+            unified_data.update(data)
+        unified_data.update(overrides)
+        return cls.model_validate(unified_data)
+
+
+class OptimizationConfig(IngestibleConfig):
     """Concrete optimization config injected into training modules."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     learning_rate: float = Field(ge=0.0)
     weight_decay: float = Field(ge=0.0)
@@ -57,10 +72,10 @@ class OptimizationConfig(BaseModel):
     sample_steps: int = Field(ge=1)
 
 
-class ResolvedModelConfig(BaseModel):
+class ResolvedModelConfig(IngestibleConfig):
     """Concrete DiT config injected into the backbone and training modules."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     in_channels: int = Field(ge=1)
     out_channels: int = Field(ge=1)
@@ -73,10 +88,10 @@ class ResolvedModelConfig(BaseModel):
     attention_backend: ResolvedAttentionBackend
 
 
-class VolumeDatasetConfig(BaseModel):
+class VolumeDatasetConfig(IngestibleConfig):
     """Single split dataset config injected into TIF volume datasets."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     data_dir: str
     crop_size: tuple[int, int, int] | None
@@ -100,10 +115,10 @@ class DDPMDatasetConfig(VolumeDatasetConfig):
     noise_dataset_mode: Literal["module", "on_the_fly", "deterministic"]
 
 
-class DataLoaderRuntimeConfig(BaseModel):
+class DataLoaderRuntimeConfig(IngestibleConfig):
     """Concrete dataloader config injected into dataloader builders."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     dataset: VolumeDatasetConfig | DDPMDatasetConfig
     batch_size: int = Field(ge=1)
@@ -113,10 +128,10 @@ class DataLoaderRuntimeConfig(BaseModel):
     persistent_workers: bool
 
 
-class RectifiedFlowComputeConfig(BaseModel):
+class RectifiedFlowComputeConfig(IngestibleConfig):
     """Concrete rectified-flow runtime object injected into modules and dataloaders."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     framework: Literal["rectified_flow"] = "rectified_flow"
     train_loader: DataLoaderRuntimeConfig
@@ -125,10 +140,10 @@ class RectifiedFlowComputeConfig(BaseModel):
     optimization: OptimizationConfig
 
 
-class DDPMComputeConfig(BaseModel):
+class DDPMComputeConfig(IngestibleConfig):
     """Concrete DDPM runtime object injected into modules and dataloaders."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(frozen=True)
 
     framework: Literal["ddpm"] = "ddpm"
     train_loader: DataLoaderRuntimeConfig
@@ -260,115 +275,74 @@ class RuntimeConfig(BaseModel):
         return Path("result/mlflow").expanduser().resolve().as_uri()
 
     def _build_optimization_config(self) -> OptimizationConfig:
-        return OptimizationConfig(
-            learning_rate=self.train.learning_rate,
-            weight_decay=self.train.weight_decay,
-            loss_type=self.train.loss_type,
-            sample_steps=self.train.sample_steps,
-        )
+        return OptimizationConfig.from_sources(self.train)
 
     def _build_resolved_model_config(self) -> ResolvedModelConfig:
-        return ResolvedModelConfig.model_validate(
-            self.model.model_dump(mode="python", exclude={"input_representation"})
+        return ResolvedModelConfig.from_sources(self.model)
+
+    def _dataset_split_source(self, split: Literal["train", "val"]) -> dict[str, Any]:
+        return {
+            "data_dir": getattr(self.data, f"{split}_dir"),
+            "samples_per_volume": getattr(self.data, f"samples_per_volume_{split}"),
+            "max_files": getattr(self.data, f"max_files_{split}"),
+        }
+
+    def _loader_split_source(self, split: Literal["train", "val"]) -> dict[str, Any]:
+        num_workers = self.data.num_workers if split == "train" else max(0, min(self.data.num_workers, 2))
+        return {
+            "num_workers": num_workers,
+            "shuffle": split == "train",
+            "pin_memory": trainer_uses_cuda(self.trainer.accelerator),
+            "persistent_workers": num_workers > 0,
+        }
+
+    def _build_volume_dataset_config(self, split: Literal["train", "val"]) -> VolumeDatasetConfig:
+        return VolumeDatasetConfig.from_sources(
+            self.data,
+            self.model,
+            self._dataset_split_source(split),
         )
 
-    def _build_volume_dataset_config(
-        self,
-        *,
-        data_dir: str,
-        samples_per_volume: int,
-        max_files: int | None,
-    ) -> VolumeDatasetConfig:
-        return VolumeDatasetConfig(
-            data_dir=data_dir,
-            crop_size=self.data.crop_size,
-            samples_per_volume=samples_per_volume,
-            max_files=max_files,
-            scale_factor=self.data.scale_factor,
-            normalize=self.data.normalize,
-            clip_percentile=self.data.clip_percentile,
-            in_channels=self.model.in_channels,
-            pad_to_multiple=self.data.pad_to_multiple,
-        )
-
-    def _build_ddpm_dataset_config(
-        self,
-        *,
-        data_dir: str,
-        samples_per_volume: int,
-        max_files: int | None,
-    ) -> DDPMDatasetConfig:
-        ddpm = self.train.ddpm
-        return DDPMDatasetConfig(
-            data_dir=data_dir,
-            crop_size=self.data.crop_size,
-            samples_per_volume=samples_per_volume,
-            max_files=max_files,
-            scale_factor=self.data.scale_factor,
-            normalize=self.data.normalize,
-            clip_percentile=self.data.clip_percentile,
-            in_channels=self.model.in_channels,
-            pad_to_multiple=self.data.pad_to_multiple,
-            beta_schedule=ddpm.beta_schedule,
-            num_train_timesteps=ddpm.num_train_timesteps,
-            beta_start=ddpm.beta_start,
-            beta_end=ddpm.beta_end,
-            deterministic_noise_seed=ddpm.deterministic_noise_seed,
-            noise_dataset_mode=ddpm.noise_dataset_mode,
+    def _build_ddpm_dataset_config(self, split: Literal["train", "val"]) -> DDPMDatasetConfig:
+        return DDPMDatasetConfig.from_sources(
+            self.data,
+            self.model,
+            self.train.ddpm,
+            self._dataset_split_source(split),
         )
 
     def _build_loader_config(
         self,
         *,
         dataset: VolumeDatasetConfig | DDPMDatasetConfig,
-        num_workers: int,
-        shuffle: bool,
-        pin_memory: bool,
+        split: Literal["train", "val"],
     ) -> DataLoaderRuntimeConfig:
-        return DataLoaderRuntimeConfig(
+        return DataLoaderRuntimeConfig.from_sources(
+            self.data,
+            self._loader_split_source(split),
             dataset=dataset,
-            batch_size=self.data.batch_size,
-            num_workers=num_workers,
-            shuffle=shuffle,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0,
         )
 
     def _build_framework_config(self) -> RectifiedFlowComputeConfig | DDPMComputeConfig:
         optimization = self._build_optimization_config()
         model = self._build_resolved_model_config()
-        pin_memory = trainer_uses_cuda(self.trainer.accelerator)
-
-        train_workers = self.data.num_workers
-        val_workers = max(0, min(self.data.num_workers, 2))
 
         if self.train.framework == "rectified_flow":
-            train_dataset = self._build_volume_dataset_config(
-                data_dir=self.data.train_dir,
-                samples_per_volume=self.data.samples_per_volume_train,
-                max_files=self.data.max_files_train,
-            )
+            train_dataset = self._build_volume_dataset_config("train")
             val_dataset = None
             if self.data.val_dir is not None and self.data.samples_per_volume_val > 0:
-                val_dataset = self._build_volume_dataset_config(
-                    data_dir=self.data.val_dir,
-                    samples_per_volume=self.data.samples_per_volume_val,
-                    max_files=self.data.max_files_val,
-                )
+                val_dataset = self._build_volume_dataset_config("val")
 
-            return RectifiedFlowComputeConfig(
+            return RectifiedFlowComputeConfig.from_sources(
+                self.train,
                 train_loader=self._build_loader_config(
                     dataset=train_dataset,
-                    num_workers=train_workers,
-                    shuffle=True,
-                    pin_memory=pin_memory,
+                    split="train",
                 ),
                 val_loader=(
                     self._build_loader_config(
                         dataset=val_dataset,
-                        num_workers=val_workers,
-                        shuffle=False,
-                        pin_memory=pin_memory,
+                        split="val",
                     )
                     if val_dataset is not None
                     else None
@@ -383,32 +357,21 @@ class RuntimeConfig(BaseModel):
                 f"Got in_channels={self.model.in_channels}, out_channels={self.model.out_channels}."
             )
 
-        train_dataset = self._build_ddpm_dataset_config(
-            data_dir=self.data.train_dir,
-            samples_per_volume=self.data.samples_per_volume_train,
-            max_files=self.data.max_files_train,
-        )
+        train_dataset = self._build_ddpm_dataset_config("train")
         val_dataset = None
         if self.data.val_dir is not None and self.data.samples_per_volume_val > 0:
-            val_dataset = self._build_ddpm_dataset_config(
-                data_dir=self.data.val_dir,
-                samples_per_volume=self.data.samples_per_volume_val,
-                max_files=self.data.max_files_val,
-            )
+            val_dataset = self._build_ddpm_dataset_config("val")
 
-        return DDPMComputeConfig(
+        return DDPMComputeConfig.from_sources(
+            self.train,
             train_loader=self._build_loader_config(
                 dataset=train_dataset,
-                num_workers=train_workers,
-                shuffle=True,
-                pin_memory=pin_memory,
+                split="train",
             ),
             val_loader=(
                 self._build_loader_config(
                     dataset=val_dataset,
-                    num_workers=val_workers,
-                    shuffle=False,
-                    pin_memory=pin_memory,
+                    split="val",
                 )
                 if val_dataset is not None
                 else None

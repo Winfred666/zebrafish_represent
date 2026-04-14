@@ -54,7 +54,7 @@ For most runs, start from `config/data/scale_0p0625.yaml`.
 Run the current supported entrypoint with:
 
 ```bash
-uv run driver.py --config config/data/scale_0p0625.yaml
+uv run python driver.py --config config/data/scale_0p0625.yaml
 ```
 
 ## 5. What the Run Produces
@@ -73,9 +73,9 @@ If `logging.tracking_uri` is not set, the default local backend is under `result
 ```
 
 - `driver.py`: training entrypoint
-- `model/dit3d.py`: 3D DiT backbone
-- `model/rect_flow.py`: rectified flow training module
-- `model/ddpm.py`: DDPM training module
+- `modules/dit3d.py`: 3D DiT backbone
+- `modules/rect_flow.py`: rectified flow training module
+- `modules/ddpm.py`: DDPM training module
 - `utils/sanitize/load_config.py`: config loading
 - `utils/dataset/`: TIF volume dataset code
 - `utils/display/`: MLflow artifact helpers and visualization helpers
