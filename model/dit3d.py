@@ -8,6 +8,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 from utils.sanitize.model_config import ResolvedAttentionBackend
 
@@ -75,9 +76,13 @@ class DiTSelfAttention(nn.Module):
         self.proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, sequence_length, _ = x.shape
-        qkv = self.qkv(x).view(batch_size, sequence_length, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)
+        q, k, v = rearrange(
+            self.qkv(x),
+            "b t (three h d) -> three b t h d",
+            three=3,
+            h=self.num_heads,
+            d=self.head_dim,
+        ).unbind(dim=0)
 
         if self.attention_backend == "flash4":
             attention_output = flash_attn_func(
@@ -89,16 +94,16 @@ class DiTSelfAttention(nn.Module):
             )
         else:
             attention_output = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                v.transpose(1, 2),
+                rearrange(q, "b t h d -> b h t d"),
+                rearrange(k, "b t h d -> b h t d"),
+                rearrange(v, "b t h d -> b h t d"),
                 attn_mask=None,
                 dropout_p=0.0,
                 is_causal=False,
-            ).transpose(1, 2)
+            )
+            attention_output = rearrange(attention_output, "b h t d -> b t h d")
 
-        attention_output = attention_output.reshape(batch_size, sequence_length, self.hidden_size)
-        return self.proj(attention_output)
+        return self.proj(rearrange(attention_output, "b t h d -> b t (h d)"))
 
 
 class DiTBlock3D(nn.Module):
@@ -217,7 +222,7 @@ class DiT3D(nn.Module):
 
     def initialize_weights(self) -> None:
         """Apply DiT-style initialization, including zero-init modulation heads."""
-        nn.init.xavier_uniform_(self.patch_embed.weight.view(self.patch_embed.weight.shape[0], -1))
+        nn.init.xavier_uniform_(rearrange(self.patch_embed.weight, "o i pd ph pw -> o (i pd ph pw)"))
         nn.init.zeros_(self.patch_embed.bias)
         nn.init.normal_(self.pos_embed, std=0.02)
 
@@ -240,12 +245,11 @@ class DiT3D(nn.Module):
 
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Convert `(B, C, D, H, W)` into hidden patch embeddings `(B, T, hidden)`."""
-        tokens = self.patch_embed(x)
-        return tokens.flatten(2).transpose(1, 2)
+        return rearrange(self.patch_embed(x), "b c gd gh gw -> b (gd gh gw) c")
 
     def unpatchify(self, patch_voxels: torch.Tensor) -> torch.Tensor:
         """Convert per-patch voxel predictions back to a full 3D volume."""
-        batch_size, token_count, _ = patch_voxels.shape
+        _, token_count, _ = patch_voxels.shape
         grid_depth, grid_height, grid_width = self.grid_size
         if token_count != grid_depth * grid_height * grid_width:
             raise ValueError(
@@ -253,23 +257,16 @@ class DiT3D(nn.Module):
             )
 
         patch_depth, patch_height, patch_width = self.patch_size
-        x = patch_voxels.view(
-            batch_size,
-            grid_depth,
-            grid_height,
-            grid_width,
-            self.out_channels,
-            patch_depth,
-            patch_height,
-            patch_width,
-        )
-        x = x.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
-        return x.view(
-            batch_size,
-            self.out_channels,
-            grid_depth * patch_depth,
-            grid_height * patch_height,
-            grid_width * patch_width,
+        return rearrange(
+            patch_voxels,
+            "b (gd gh gw) (c pd ph pw) -> b c (gd pd) (gh ph) (gw pw)",
+            gd=grid_depth,
+            gh=grid_height,
+            gw=grid_width,
+            c=self.out_channels,
+            pd=patch_depth,
+            ph=patch_height,
+            pw=patch_width,
         )
 
     def _run_backbone(self, tokens: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:

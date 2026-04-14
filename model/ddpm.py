@@ -7,6 +7,7 @@ from typing import Dict
 
 import pytorch_lightning as L
 import torch
+from einops import rearrange
 from torch.utils.data import DataLoader
 
 from model.dit3d import DiT3D
@@ -170,7 +171,10 @@ class DDPMModule(L.LightningModule):
                 dtype=torch.long,
             )
         else:
-            timesteps = provided_timestep.to(device=clean_volume.device, dtype=torch.long).view(batch_size)
+            timesteps = rearrange(
+                provided_timestep.to(device=clean_volume.device, dtype=torch.long),
+                "... -> (...)",
+            )
 
         if provided_noise is None:
             noise = torch.randn_like(clean_volume)

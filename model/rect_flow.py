@@ -6,6 +6,7 @@ from typing import Dict
 
 import pytorch_lightning as L
 import torch
+from einops import repeat
 from torch.utils.data import DataLoader
 
 from model.dit3d import DiT3D
@@ -56,7 +57,7 @@ class RectifiedFlowModule(L.LightningModule):
         batch_size = target_volume.shape[0]
         source_volume = torch.randn_like(target_volume)
         timesteps = torch.rand(batch_size, device=target_volume.device)
-        timestep_view = timesteps.view(batch_size, 1, 1, 1, 1)
+        timestep_view = repeat(timesteps, "b -> b 1 1 1 1")
 
         noisy_volume = (1.0 - timestep_view) * source_volume + timestep_view * target_volume
         target_velocity = target_volume - source_volume
