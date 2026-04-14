@@ -1,0 +1,4 @@
+import_config: ../base.yaml
+
+data:
+  scale_factor: [0.0625, 0.0625, 0.0625]
