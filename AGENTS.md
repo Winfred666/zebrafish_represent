@@ -73,6 +73,9 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 - Do not reintroduce UNet, masked-pretext, or stale token-compat branches unless explicitly requested
 - Keep code ASCII unless a file already requires Unicode
 - Avoid touching large data artifacts under `data/`, `checkpoints/`, `logs/`, `outputs/`, `result/`
+- `README.md` is guidance and tutorial for beginners to run the repo. Seldom change it unless we really need to modify basic docs or run guidance.
+- Do not use `README.md` as a work log or feature history document.
+- If we need to record past working history such as frequent feature changes, what was verified, or what bug was fixed, write it to `result/work_log/yyyy_mm_dd.md`.
 
 ## Run and Validation
 

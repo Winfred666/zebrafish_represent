@@ -191,6 +191,8 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+.serena/
+
 # PyPI configuration file
 .pypirc
 
@@ -209,8 +211,11 @@ __marimo__/
 # Project specific
 /data
 /checkpoints
+/.github
+/logs
 /tb_logs
-/results
+/result
 *.npy
 *.pt
 /reports
+/feat
