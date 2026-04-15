@@ -11,7 +11,7 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 
 ## Canonical Training Flow
 
-1. Read the split training config via `utils/sanitize/runtime_factory.py`.
+1. Read the split training config in `driver.py`.
 2. Load the four runtime sections from `config/data/*.yaml`, `config/model/*.yaml`, `config/framework/*.yaml`, and `config/wrapper/*.yaml`.
 3. Sanitize all section config with Pydantic before constructing any runtime object.
 4. Build typed derived params from sanitized config and inject those params into datasets, modules, and driver helpers.
@@ -23,7 +23,8 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 - Entrypoint: `driver.py`
 - Model backbone: `modules/dit3d.py`
 - Training modules: `modules/rect_flow.py`, `modules/ddpm.py`
-- Runtime factory and config loading: `utils/sanitize/runtime_factory.py`
+- Driver config loading and runtime orchestration: `driver.py`
+- Runtime builders: `utils/sanitize/runtime_factory.py`
 - Config schemas: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/framework_config.py`, `utils/sanitize/wrapper_config.py`
 - Param fan-out classes: `utils/sanitize/param_class.py`
 - Path helpers: `utils/path_io.py`
@@ -62,6 +63,7 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 
 - Use MLflow through Lightning `MLFlowLogger`
 - Tracking settings should come from config or environment
+- Metric and image artifact keys must use underscore-separated names like `val_loss` or `sample_mean`. Never use slash-separated names like `val/loss`.
 - `.env` is local-only and must not be committed
 
 ## Environment and Package Management

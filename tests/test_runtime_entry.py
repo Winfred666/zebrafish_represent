@@ -6,20 +6,21 @@ from pathlib import Path
 
 import torch
 
+import driver
 from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
 from utils.sanitize.param_class import RectifiedFlowParams
-from utils.sanitize.runtime_factory import build_framework_runtime, load_split_configs, sanitize_split_configs
+from utils.sanitize.runtime_factory import build_framework_runtime
 
 
 class RuntimeEntryTest(unittest.TestCase):
     def test_scale_entry_loads_and_builds_volume_module(self) -> None:
-        _, data_config, model_config, framework_config, wrapper_config = load_split_configs(
+        _, data_config, model_config, framework_config, wrapper_config = driver.load_split_configs(
             data_config_path="config/data/scale_0p0625.yaml",
             model_config_path="config/model/base.yaml",
             framework_config_path="config/framework/base.yaml",
             wrapper_config_path="config/wrapper/base.yaml",
         )
-        configs = sanitize_split_configs(
+        configs = driver.sanitize_split_configs(
             data_config=data_config,
             model_config=model_config,
             framework_config=framework_config,
@@ -49,7 +50,7 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(tuple(output.shape), (1, 1, 4, 4, 4))
 
     def test_wrapper_rejects_missing_resume_checkpoint(self) -> None:
-        _, data_config, model_config, framework_config, wrapper_config = load_split_configs(
+        _, data_config, model_config, framework_config, wrapper_config = driver.load_split_configs(
             data_config_path="config/data/scale_0p0625.yaml",
             model_config_path="config/model/base.yaml",
             framework_config_path="config/framework/base.yaml",
@@ -58,11 +59,29 @@ class RuntimeEntryTest(unittest.TestCase):
         wrapper_with_missing_resume = dict(wrapper_config)
         wrapper_with_missing_resume["resume_ckpt_path"] = str(Path(tempfile.gettempdir()) / "missing-resume.ckpt")
         with self.assertRaises(FileNotFoundError):
-            sanitize_split_configs(
+            driver.sanitize_split_configs(
                 data_config=data_config,
                 model_config=model_config,
                 framework_config=framework_config,
                 wrapper_config=wrapper_with_missing_resume,
+            )
+
+    def test_wrapper_rejects_slash_separated_monitor_name(self) -> None:
+        _, data_config, model_config, framework_config, wrapper_config = driver.load_split_configs(
+            data_config_path="config/data/scale_0p0625.yaml",
+            model_config_path="config/model/base.yaml",
+            framework_config_path="config/framework/base.yaml",
+            wrapper_config_path="config/wrapper/base.yaml",
+        )
+        wrapper_with_invalid_monitor = dict(wrapper_config)
+        wrapper_with_invalid_monitor["checkpoint"] = dict(wrapper_config["checkpoint"])
+        wrapper_with_invalid_monitor["checkpoint"]["monitor"] = "val/loss"
+        with self.assertRaises(ValueError):
+            driver.sanitize_split_configs(
+                data_config=data_config,
+                model_config=model_config,
+                framework_config=framework_config,
+                wrapper_config=wrapper_with_invalid_monitor,
             )
 
 

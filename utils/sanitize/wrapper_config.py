@@ -47,6 +47,26 @@ def trainer_uses_cuda(accelerator: str) -> bool:
     return str(accelerator).strip().lower() in CUDA_ACCELERATORS
 
 
+def align_torch_cuda_runtime(accelerator: str) -> None:
+    """Hide a broken CUDA runtime when sanitize resolved the run to CPU."""
+    if trainer_uses_cuda(accelerator):
+        return
+    if not torch.cuda.is_available() or _cuda_runtime_available():
+        return
+
+    torch.cuda.is_available = lambda: False  # type: ignore[assignment]
+    torch.cuda.device_count = lambda: 0  # type: ignore[assignment]
+
+
+def _validate_logged_name(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if "/" in normalized:
+        raise ValueError(f"{field_name} must use underscore-separated names like 'val_loss', not slash-separated names.")
+    return normalized
+
+
 class WrapperConfig(BaseModel):
     """Validated wrapper config covering trainer, logging, callbacks, and run metadata."""
 
@@ -174,11 +194,16 @@ class CheckpointConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    monitor: str = "val/loss"
+    monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     save_top_k: int = 1
     save_last: bool = True
     filename: str = "epoch{epoch:03d}-step{step:06d}"
+
+    @field_validator("monitor")
+    @classmethod
+    def _validate_monitor(cls, value: str) -> str:
+        return _validate_logged_name(value, "checkpoint.monitor")
 
 
 class EarlyStoppingConfig(BaseModel):
@@ -187,12 +212,17 @@ class EarlyStoppingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    monitor: str = "val/loss"
+    monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     patience: int = Field(default=5, ge=0)
     min_delta: float = Field(default=1.0e-5, ge=0.0)
     strict: bool = False
     check_finite: bool = True
+
+    @field_validator("monitor")
+    @classmethod
+    def _validate_monitor(cls, value: str) -> str:
+        return _validate_logged_name(value, "early_stopping.monitor")
 
 
 class TestingConfig(BaseModel):

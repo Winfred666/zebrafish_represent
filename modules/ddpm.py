@@ -205,9 +205,9 @@ class DDPMModule(L.LightningModule):
             provided_noise=batch.get("noise"),
             provided_noisy=batch.get("noisy"),
         )
-        self.log("train/loss", losses["loss"], on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
-        self.log("train/target_abs", losses["target_abs"], on_step=False, on_epoch=True)
+        self.log("train_loss", losses["loss"], on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
+        self.log("train_target_abs", losses["target_abs"], on_step=False, on_epoch=True)
         return losses["loss"]
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -218,8 +218,8 @@ class DDPMModule(L.LightningModule):
             provided_noise=batch.get("noise"),
             provided_noisy=batch.get("noisy"),
         )
-        self.log("val/loss", losses["loss"], on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
+        self.log("val_loss", losses["loss"], on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
         return losses["loss"]
 
     def configure_optimizers(self):

@@ -78,10 +78,11 @@ If `logging.tracking_uri` is not set, the default local backend is under `result
 
 ```text
 - `driver.py`: training entrypoint
+- `driver.py`: split-config loading and training orchestration
 - `modules/dit3d.py`: 3D DiT backbone
 - `modules/rect_flow.py`: rectified flow training module
 - `modules/ddpm.py`: DDPM training module
-- `utils/sanitize/runtime_factory.py`: split-config loading and runtime builders
+- `utils/sanitize/runtime_factory.py`: shared runtime builders
 - `utils/sanitize/param_class.py`: typed params injected into datasets/modules
 - `utils/dataset/`: TIF volume dataset code
 - `utils/display/`: MLflow artifact helpers and visualization helpers

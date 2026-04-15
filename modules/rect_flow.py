@@ -73,16 +73,16 @@ class RectifiedFlowModule(L.LightningModule):
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
         losses = self._rectified_flow_loss(batch["target"])
-        self.log("train/loss", losses["loss"], on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/pred_velocity_abs", losses["pred_velocity_abs"], on_step=False, on_epoch=True)
-        self.log("train/target_velocity_abs", losses["target_velocity_abs"], on_step=False, on_epoch=True)
+        self.log("train_loss", losses["loss"], on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_pred_velocity_abs", losses["pred_velocity_abs"], on_step=False, on_epoch=True)
+        self.log("train_target_velocity_abs", losses["target_velocity_abs"], on_step=False, on_epoch=True)
         return losses["loss"]
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
         losses = self._rectified_flow_loss(batch["target"])
-        self.log("val/loss", losses["loss"], on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/pred_velocity_abs", losses["pred_velocity_abs"], on_step=False, on_epoch=True)
+        self.log("val_loss", losses["loss"], on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_pred_velocity_abs", losses["pred_velocity_abs"], on_step=False, on_epoch=True)
         return losses["loss"]
 
     def configure_optimizers(self):

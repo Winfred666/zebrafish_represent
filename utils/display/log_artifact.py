@@ -106,6 +106,8 @@ def log_image_artifact(
     image_key_str = str(image_key).strip()
     if not image_key_str:
         raise ValueError("image_key must be a non-empty string")
+    if "/" in image_key_str:
+        raise ValueError("image_key must use underscore-separated names like 'val_projection', not slash-separated names.")
 
     logger.experiment.log_image(
         run_id=logger.run_id,
