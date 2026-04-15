@@ -11,10 +11,10 @@ from torch.utils.data import DataLoader
 
 from modules.dit3d import DiT3D
 from utils.dataset import TifVolumeDataset
-from utils.sanitize.runtime_config import DataLoaderRuntimeConfig, RectifiedFlowComputeConfig
+from utils.sanitize.param_class import DataLoaderParams, RectifiedFlowParams
 
 
-def _build_volume_dataloader(loader_config: DataLoaderRuntimeConfig) -> DataLoader:
+def _build_volume_dataloader(loader_config: DataLoaderParams) -> DataLoader:
     dataset = TifVolumeDataset(loader_config.dataset)
     return DataLoader(
         dataset,
@@ -26,7 +26,7 @@ def _build_volume_dataloader(loader_config: DataLoaderRuntimeConfig) -> DataLoad
     )
 
 
-def create_rectified_flow_dataloaders(config: RectifiedFlowComputeConfig) -> Dict[str, DataLoader]:
+def create_rectified_flow_dataloaders(config: RectifiedFlowParams) -> Dict[str, DataLoader]:
     """Build rectified-flow dataloaders from one validated runtime object."""
     dataloaders: Dict[str, DataLoader] = {
         "train": _build_volume_dataloader(config.train_loader),
@@ -39,7 +39,7 @@ def create_rectified_flow_dataloaders(config: RectifiedFlowComputeConfig) -> Dic
 class RectifiedFlowModule(L.LightningModule):
     """Rectified-flow objective over a 3D DiT backbone."""
 
-    def __init__(self, config: RectifiedFlowComputeConfig):
+    def __init__(self, config: RectifiedFlowParams):
         super().__init__()
         self.config = config
         self.save_hyperparameters(config.model_dump(mode="python"))

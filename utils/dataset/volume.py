@@ -7,13 +7,13 @@ from typing import Dict
 import torch
 
 from utils.dataset.base import BaseTifVolumeDataset
-from utils.sanitize.runtime_config import VolumeDatasetConfig
+from utils.sanitize.param_class import VolumeDatasetParams
 
 
 class TifVolumeDataset(BaseTifVolumeDataset):
     """Random-crop dataset over microscopy TIF/TIFF volumes."""
 
-    def __init__(self, config: VolumeDatasetConfig):
+    def __init__(self, config: VolumeDatasetParams):
         super().__init__(config)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:

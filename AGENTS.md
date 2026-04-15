@@ -11,10 +11,10 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 
 ## Canonical Training Flow
 
-1. Read training config via `utils/sanitize/load_config.py`.
-2. Load the base runtime config from `config/base.yaml` or an import-based override such as `config/data/scale_0p0625.yaml`.
-3. Sanitize all config with Pydantic before constructing any runtime object.
-4. Build typed derived objects from sanitized config and inject those objects into datasets, modules, and driver helpers.
+1. Read the split training config via `utils/sanitize/runtime_factory.py`.
+2. Load the four runtime sections from `config/data/*.yaml`, `config/model/*.yaml`, `config/framework/*.yaml`, and `config/wrapper/*.yaml`.
+3. Sanitize all section config with Pydantic before constructing any runtime object.
+4. Build typed derived params from sanitized config and inject those params into datasets, modules, and driver helpers.
 5. Load `.tif/.tiff` volumes directly from `data.train_dir` using `process_tif_to_array`.
 6. Train the selected framework and log metrics and artifacts through MLflow.
 
@@ -23,13 +23,18 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 - Entrypoint: `driver.py`
 - Model backbone: `modules/dit3d.py`
 - Training modules: `modules/rect_flow.py`, `modules/ddpm.py`
-- Config loader and defaults: `utils/sanitize/load_config.py`
-- Config schemas: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/trainer_config.py`, `utils/sanitize/runtime_config.py`
+- Runtime factory and config loading: `utils/sanitize/runtime_factory.py`
+- Config schemas: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/framework_config.py`, `utils/sanitize/wrapper_config.py`
+- Param fan-out classes: `utils/sanitize/param_class.py`
+- Path helpers: `utils/path_io.py`
 - Dataset package: `utils/dataset/`
 - Display and artifact helpers: `utils/display/`
 - Supported configs:
-  - `config/base.yaml`
+  - `config/data/base.yaml`
   - `config/data/scale_0p0625.yaml`
+  - `config/model/base.yaml`
+  - `config/framework/base.yaml`
+  - `config/wrapper/base.yaml`
 
 ## Architecture Rules
 
@@ -80,7 +85,7 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 
 ## Run and Validation
 
-- Supported smoke run: `uv run python driver.py --config config/data/scale_0p0625.yaml`
+- Supported smoke run: `uv run python driver.py --data-config config/data/scale_0p0625.yaml --model-config config/model/base.yaml --framework-config config/framework/base.yaml --wrapper-config config/wrapper/base.yaml`
 
 After changes, at minimum run:
 - `uv run python -m compileall driver.py modules utils`

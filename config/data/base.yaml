@@ -1,0 +1,13 @@
+train_dir: tests/fixtures/tif
+val_dir: null
+batch_size: 1
+num_workers: 0
+crop_size: [4, 4, 4]
+samples_per_volume_train: 1
+samples_per_volume_val: 0
+max_files_train: 1
+max_files_val: 0
+scale_factor: [1.0, 1.0, 1.0]
+normalize: true
+clip_percentile: [1.0, 99.0]
+pad_to_multiple: null

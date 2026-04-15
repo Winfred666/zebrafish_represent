@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from utils.dataset.base import BaseTifVolumeDataset
-from utils.sanitize.runtime_config import DDPMDatasetConfig
+from utils.sanitize.param_class import DDPMDatasetParams
 
 
 def build_numpy_beta_schedule(
@@ -38,7 +38,7 @@ def build_numpy_beta_schedule(
 class TifNoisyVolumeDataset(BaseTifVolumeDataset):
     """Base class for TIF datasets that emit DDPM-noised volumes."""
 
-    def __init__(self, config: DDPMDatasetConfig):
+    def __init__(self, config: DDPMDatasetParams):
         self.ddpm_config = config
         super().__init__(config)
 

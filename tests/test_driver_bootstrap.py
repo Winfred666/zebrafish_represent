@@ -1,41 +1,45 @@
 from __future__ import annotations
 
-import os
-import tempfile
-import textwrap
 import unittest
 from pathlib import Path
-from unittest import mock
 
 import driver
 
 
-class DriverBootstrapTest(unittest.TestCase):
-    def test_auto_probe_failure_masks_cuda(self) -> None:
-        config_path = Path("config/data/scale_0p0625.yaml")
-        with mock.patch("driver._probe_cuda_runtime", return_value=False):
-            with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0"}, clear=False):
-                accelerator = driver._bootstrap_runtime_environment(config_path)
-                self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "")
+class DriverCliTest(unittest.TestCase):
+    def test_parse_args_accepts_four_split_configs(self) -> None:
+        args = driver.parse_args(
+            [
+                "--data-config",
+                "config/data/scale_0p0625.yaml",
+                "--model-config",
+                "config/model/base.yaml",
+                "--framework-config",
+                "config/framework/base.yaml",
+                "--wrapper-config",
+                "config/wrapper/base.yaml",
+            ]
+        )
+        self.assertEqual(args.data_config, "config/data/scale_0p0625.yaml")
+        self.assertEqual(args.model_config, "config/model/base.yaml")
+        self.assertEqual(args.framework_config, "config/framework/base.yaml")
+        self.assertEqual(args.wrapper_config, "config/wrapper/base.yaml")
 
-        self.assertEqual(accelerator, "auto")
-
-    def test_explicit_gpu_requires_usable_cuda(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "gpu.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
-                    trainer:
-                      accelerator: gpu
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
+    def test_main_rejects_missing_config_file(self) -> None:
+        with self.assertRaises(SystemExit) as context:
+            driver.main(
+                [
+                    "--data-config",
+                    "config/data/scale_0p0625.yaml",
+                    "--model-config",
+                    "config/model/base.yaml",
+                    "--framework-config",
+                    "config/framework/base.yaml",
+                    "--wrapper-config",
+                    str(Path("config/wrapper/missing.yaml")),
+                ]
             )
-            with mock.patch("driver._probe_cuda_runtime", return_value=False):
-                with self.assertRaisesRegex(RuntimeError, "requires a usable CUDA runtime"):
-                    driver._bootstrap_runtime_environment(config_path)
+        self.assertEqual(context.exception.code, 1)
 
 
 if __name__ == "__main__":

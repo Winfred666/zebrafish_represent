@@ -34,27 +34,33 @@ Prepare a directory that contains your `.tif` or `.tiff` volumes.
 Then point the config to that directory:
 
 ```yaml
-data:
-  train_dir: /path/to/your/tif_folder
+train_dir: /path/to/your/tif_folder
 ```
 
 There is also a tiny fixture under `tests/fixtures/tif/` for smoke testing.
 
 ## 3. Main Configs
 
-The supported config surface is intentionally small:
+The supported config surface is intentionally split into four small files:
 
-- `config/base.yaml`: base training config
-- `config/data/scale_0p0625.yaml`: runnable dataset entry config that imports `base.yaml`
+- `config/data/base.yaml`: base data config
+- `config/data/scale_0p0625.yaml`: runnable data override that imports `config/data/base.yaml`
+- `config/model/base.yaml`: base DiT model config
+- `config/framework/base.yaml`: base framework and loss config
+- `config/wrapper/base.yaml`: trainer, logging, checkpoint, early-stopping, and testing config
 
-For most runs, start from `config/data/scale_0p0625.yaml`.
+For most runs, start from those four files and override only the section you need.
 
 ## 4. Run Training
 
 Run the current supported entrypoint with:
 
 ```bash
-uv run python driver.py --config config/data/scale_0p0625.yaml
+uv run python driver.py \
+  --data-config config/data/scale_0p0625.yaml \
+  --model-config config/model/base.yaml \
+  --framework-config config/framework/base.yaml \
+  --wrapper-config config/wrapper/base.yaml
 ```
 
 ## 5. What the Run Produces
@@ -70,14 +76,13 @@ If `logging.tracking_uri` is not set, the default local backend is under `result
 
 ## 6. File Structure
 
-```
-
+```text
 - `driver.py`: training entrypoint
 - `modules/dit3d.py`: 3D DiT backbone
 - `modules/rect_flow.py`: rectified flow training module
 - `modules/ddpm.py`: DDPM training module
-- `utils/sanitize/load_config.py`: config loading
+- `utils/sanitize/runtime_factory.py`: split-config loading and runtime builders
+- `utils/sanitize/param_class.py`: typed params injected into datasets/modules
 - `utils/dataset/`: TIF volume dataset code
 - `utils/display/`: MLflow artifact helpers and visualization helpers
-
 ```

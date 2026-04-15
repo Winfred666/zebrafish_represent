@@ -9,14 +9,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.sanitize.runtime_config import VolumeDatasetConfig
+from utils.sanitize.param_class import VolumeDatasetParams
 from utils.tif2volume import process_tif_to_array
 
 
 class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
     """Base dataset that loads TIF/TIFF volumes and samples 3D crops."""
 
-    def __init__(self, config: VolumeDatasetConfig):
+    def __init__(self, config: VolumeDatasetParams):
         self.config = config
         self.data_dir = Path(config.data_dir)
         self.crop_size = config.crop_size

@@ -16,7 +16,7 @@ from utils.dataset import (
     TifDDPMOnTheFlyNoiseDataset,
     TifVolumeDataset,
 )
-from utils.sanitize.runtime_config import DDPMComputeConfig, DataLoaderRuntimeConfig
+from utils.sanitize.param_class import DDPMParams, DataLoaderParams
 
 
 def _build_beta_schedule(
@@ -40,7 +40,7 @@ def _build_beta_schedule(
     raise ValueError(f"Unsupported beta_schedule={beta_schedule!r}. Use one of: linear | cosine")
 
 
-def _build_ddpm_dataloader(loader_config: DataLoaderRuntimeConfig, noise_mode: str) -> DataLoader:
+def _build_ddpm_dataloader(loader_config: DataLoaderParams, noise_mode: str) -> DataLoader:
     if noise_mode == "on_the_fly":
         dataset = TifDDPMOnTheFlyNoiseDataset(loader_config.dataset)
     elif noise_mode == "deterministic":
@@ -58,7 +58,7 @@ def _build_ddpm_dataloader(loader_config: DataLoaderRuntimeConfig, noise_mode: s
     )
 
 
-def create_ddpm_dataloaders(config: DDPMComputeConfig) -> Dict[str, DataLoader]:
+def create_ddpm_dataloaders(config: DDPMParams) -> Dict[str, DataLoader]:
     """Build DDPM dataloaders from one validated runtime object."""
     noise_mode = config.diffusion.noise_dataset_mode
     dataloaders: Dict[str, DataLoader] = {
@@ -72,7 +72,7 @@ def create_ddpm_dataloaders(config: DDPMComputeConfig) -> Dict[str, DataLoader]:
 class DDPMModule(L.LightningModule):
     """DDPM objective over a 3D DiT backbone."""
 
-    def __init__(self, config: DDPMComputeConfig):
+    def __init__(self, config: DDPMParams):
         super().__init__()
         self.config = config
         self.save_hyperparameters(config.model_dump(mode="python"))
