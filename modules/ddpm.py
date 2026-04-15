@@ -7,15 +7,10 @@ from typing import Dict
 
 import pytorch_lightning as L
 import torch
-from einops import rearrange
 from torch.utils.data import DataLoader
 
 from modules.dit3d import DiT3D
-from utils.dataset import (
-    TifDDPMDeterministicNoiseDataset,
-    TifDDPMOnTheFlyNoiseDataset,
-    TifVolumeDataset,
-)
+from utils.dataset import TifVolumeDataset
 from utils.sanitize.param_class import DDPMParams, DataLoaderParams
 
 
@@ -40,14 +35,8 @@ def _build_beta_schedule(
     raise ValueError(f"Unsupported beta_schedule={beta_schedule!r}. Use one of: linear | cosine")
 
 
-def _build_ddpm_dataloader(loader_config: DataLoaderParams, noise_mode: str) -> DataLoader:
-    if noise_mode == "on_the_fly":
-        dataset = TifDDPMOnTheFlyNoiseDataset(loader_config.dataset)
-    elif noise_mode == "deterministic":
-        dataset = TifDDPMDeterministicNoiseDataset(loader_config.dataset)
-    else:
-        dataset = TifVolumeDataset(loader_config.dataset)
-
+def _build_ddpm_dataloader(loader_config: DataLoaderParams) -> DataLoader:
+    dataset = TifVolumeDataset(loader_config.dataset)
     return DataLoader(
         dataset,
         batch_size=loader_config.batch_size,
@@ -60,12 +49,11 @@ def _build_ddpm_dataloader(loader_config: DataLoaderParams, noise_mode: str) -> 
 
 def create_ddpm_dataloaders(config: DDPMParams) -> Dict[str, DataLoader]:
     """Build DDPM dataloaders from one validated runtime object."""
-    noise_mode = config.diffusion.noise_dataset_mode
     dataloaders: Dict[str, DataLoader] = {
-        "train": _build_ddpm_dataloader(config.train_loader, noise_mode),
+        "train": _build_ddpm_dataloader(config.train_loader),
     }
     if config.val_loader is not None:
-        dataloaders["val"] = _build_ddpm_dataloader(config.val_loader, noise_mode)
+        dataloaders["val"] = _build_ddpm_dataloader(config.val_loader)
     return dataloaders
 
 
@@ -154,37 +142,17 @@ class DDPMModule(L.LightningModule):
             return (noisy_volume - alpha * prediction) / sigma
         return sigma * noisy_volume + alpha * prediction
 
-    def _ddpm_loss(
-        self,
-        clean_volume: torch.Tensor,
-        provided_timestep: torch.Tensor | None = None,
-        provided_noise: torch.Tensor | None = None,
-        provided_noisy: torch.Tensor | None = None,
-    ) -> Dict[str, torch.Tensor]:
+    def _ddpm_loss(self, clean_volume: torch.Tensor) -> Dict[str, torch.Tensor]:
         batch_size = clean_volume.shape[0]
-        if provided_timestep is None:
-            timesteps = torch.randint(
-                0,
-                self.config.diffusion.num_train_timesteps,
-                (batch_size,),
-                device=clean_volume.device,
-                dtype=torch.long,
-            )
-        else:
-            timesteps = rearrange(
-                provided_timestep.to(device=clean_volume.device, dtype=torch.long),
-                "... -> (...)",
-            )
-
-        if provided_noise is None:
-            noise = torch.randn_like(clean_volume)
-        else:
-            noise = provided_noise.to(device=clean_volume.device, dtype=clean_volume.dtype)
-
-        if provided_noisy is None:
-            noisy_volume = self._q_sample(clean_volume, timesteps, noise)
-        else:
-            noisy_volume = provided_noisy.to(device=clean_volume.device, dtype=clean_volume.dtype)
+        timesteps = torch.randint(
+            0,
+            self.config.diffusion.num_train_timesteps,
+            (batch_size,),
+            device=clean_volume.device,
+            dtype=torch.long,
+        )
+        noise = torch.randn_like(clean_volume)
+        noisy_volume = self._q_sample(clean_volume, timesteps, noise)
 
         normalized_timesteps = self._normalized_t(timesteps)
         prediction = self(noisy_volume, normalized_timesteps)
@@ -199,12 +167,7 @@ class DDPMModule(L.LightningModule):
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
-        losses = self._ddpm_loss(
-            clean_volume=batch["target"],
-            provided_timestep=batch.get("timestep"),
-            provided_noise=batch.get("noise"),
-            provided_noisy=batch.get("noisy"),
-        )
+        losses = self._ddpm_loss(batch["target"])
         self.log("train_loss", losses["loss"], on_step=True, on_epoch=True, prog_bar=True)
         self.log("train_prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
         self.log("train_target_abs", losses["target_abs"], on_step=False, on_epoch=True)
@@ -212,12 +175,7 @@ class DDPMModule(L.LightningModule):
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
-        losses = self._ddpm_loss(
-            clean_volume=batch["target"],
-            provided_timestep=batch.get("timestep"),
-            provided_noise=batch.get("noise"),
-            provided_noisy=batch.get("noisy"),
-        )
+        losses = self._ddpm_loss(batch["target"])
         self.log("val_loss", losses["loss"], on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_prediction_abs", losses["prediction_abs"], on_step=False, on_epoch=True)
         return losses["loss"]

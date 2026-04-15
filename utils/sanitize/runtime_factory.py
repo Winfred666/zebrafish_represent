@@ -18,7 +18,6 @@ from utils.sanitize.data_config import DataConfig
 from utils.sanitize.framework_config import FrameworkConfig
 from utils.sanitize.model_config import ModelConfig
 from utils.sanitize.param_class import (
-    DDPMDatasetParams,
     DDPMParams,
     DataLoaderParams,
     EarlyStoppingParams,
@@ -205,22 +204,10 @@ def _build_volume_dataset_params(
     )
 
 
-def _build_ddpm_dataset_params(
-    configs: SanitizedConfigBundle,
-    split: Literal["train", "val"],
-) -> DDPMDatasetParams:
-    return DDPMDatasetParams.from_sources(
-        configs.data,
-        configs.model,
-        configs.framework.ddpm,
-        _dataset_split_source(configs.data, split),
-    )
-
-
 def _build_loader_params(
     configs: SanitizedConfigBundle,
     *,
-    dataset: VolumeDatasetParams | DDPMDatasetParams,
+    dataset: VolumeDatasetParams,
     split: Literal["train", "val"],
 ) -> DataLoaderParams:
     return DataLoaderParams.from_sources(
@@ -261,10 +248,10 @@ def build_framework_params(configs: SanitizedConfigBundle) -> RectifiedFlowParam
             optimization=optimization,
         )
 
-    train_dataset = _build_ddpm_dataset_params(configs, "train")
+    train_dataset = _build_volume_dataset_params(configs, "train")
     val_dataset = None
     if configs.data.val_dir is not None and configs.data.samples_per_volume_val > 0:
-        val_dataset = _build_ddpm_dataset_params(configs, "val")
+        val_dataset = _build_volume_dataset_params(configs, "val")
 
     return DDPMParams.from_sources(
         configs.framework,

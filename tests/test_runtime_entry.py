@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 import driver
+from modules.ddpm import DDPMModule, create_ddpm_dataloaders
 from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
 from utils.sanitize.param_class import RectifiedFlowParams
 from utils.sanitize.runtime_factory import build_framework_runtime
@@ -83,6 +84,33 @@ class RuntimeEntryTest(unittest.TestCase):
                 framework_config=framework_config,
                 wrapper_config=wrapper_with_invalid_monitor,
             )
+
+    def test_ddpm_runtime_uses_plain_volume_dataset(self) -> None:
+        _, data_config, model_config, framework_config, wrapper_config = driver.load_split_configs(
+            data_config_path="config/data/scale_0p0625.yaml",
+            model_config_path="config/model/base.yaml",
+            framework_config_path="config/framework/base.yaml",
+            wrapper_config_path="config/wrapper/base.yaml",
+        )
+        framework_config["framework"] = "ddpm"
+        configs = driver.sanitize_split_configs(
+            data_config=data_config,
+            model_config=model_config,
+            framework_config=framework_config,
+            wrapper_config=wrapper_config,
+        )
+
+        built_framework = build_framework_runtime(configs)
+        dataloaders = create_ddpm_dataloaders(built_framework.params)
+        batch = next(iter(dataloaders["train"]))
+        self.assertEqual(set(batch.keys()), {"target"})
+        self.assertEqual(tuple(batch["target"].shape), (1, 1, 4, 4, 4))
+
+        module = DDPMModule(built_framework.params)
+        losses = module._ddpm_loss(batch["target"])
+        self.assertIn("loss", losses)
+        self.assertIn("prediction_abs", losses)
+        self.assertIn("target_abs", losses)
 
 
 if __name__ == '__main__':

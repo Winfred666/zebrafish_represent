@@ -9,5 +9,3 @@ ddpm:
   beta_start: 0.0001
   beta_end: 0.02
   prediction_type: epsilon
-  noise_dataset_mode: module
-  deterministic_noise_seed: 1234

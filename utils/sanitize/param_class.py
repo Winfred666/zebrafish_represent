@@ -69,23 +69,12 @@ class VolumeDatasetParams(IngestibleParams):
     pad_to_multiple: tuple[int, int, int] | None
 
 
-class DDPMDatasetParams(VolumeDatasetParams):
-    """Single split dataset params for DDPM dataset variants."""
-
-    beta_schedule: Literal["linear", "cosine"]
-    num_train_timesteps: int = Field(ge=2)
-    beta_start: float = Field(gt=0.0)
-    beta_end: float = Field(gt=0.0)
-    deterministic_noise_seed: int
-    noise_dataset_mode: Literal["module", "on_the_fly", "deterministic"]
-
-
 class DataLoaderParams(IngestibleParams):
     """Concrete dataloader params injected into dataloader builders."""
 
     model_config = ConfigDict(frozen=True)
 
-    dataset: VolumeDatasetParams | DDPMDatasetParams
+    dataset: VolumeDatasetParams
     batch_size: int = Field(ge=1)
     num_workers: int = Field(ge=0)
     shuffle: bool

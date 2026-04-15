@@ -4,7 +4,6 @@ from utils.sanitize.data_config import DataConfig
 from utils.sanitize.framework_config import DDPMConfig, FrameworkConfig
 from utils.sanitize.model_config import ModelConfig
 from utils.sanitize.param_class import (
-    DDPMDatasetParams,
     DDPMParams,
     DataLoaderParams,
     EarlyStoppingParams,
@@ -54,7 +53,6 @@ __all__ = [
     "OptimizationParams",
     "ResolvedModelParams",
     "VolumeDatasetParams",
-    "DDPMDatasetParams",
     "DataLoaderParams",
     "RectifiedFlowParams",
     "DDPMParams",

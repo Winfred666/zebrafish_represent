@@ -17,8 +17,6 @@ class DDPMConfig(BaseModel):
     beta_start: float = Field(default=1e-4, gt=0.0)
     beta_end: float = Field(default=2e-2, gt=0.0)
     prediction_type: Literal["epsilon", "x0", "v"] = "epsilon"
-    noise_dataset_mode: Literal["module", "on_the_fly", "deterministic"] = "module"
-    deterministic_noise_seed: int = 1234
 
     @model_validator(mode="after")
     def _validate_betas(self) -> "DDPMConfig":
