@@ -9,6 +9,8 @@ import torch
 import driver
 from modules.ddpm import DDPMModule, create_ddpm_dataloaders
 from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
+from utils.dataset import TifVolumePatchDataset
+from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.sanitize.param_class import RectifiedFlowParams
 from utils.sanitize.runtime_factory import build_framework_runtime
 
@@ -111,6 +113,70 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertIn("loss", losses)
         self.assertIn("prediction_abs", losses)
         self.assertIn("target_abs", losses)
+
+    def test_local_denoiser_ddpm_runtime_uses_patch_dataset(self) -> None:
+        _, data_config, _, framework_config, wrapper_config = driver.load_split_configs(
+            data_config_path="config/data/scale_0p0625.yaml",
+            model_config_path="config/model/base.yaml",
+            framework_config_path="config/framework/base.yaml",
+            wrapper_config_path="config/wrapper/base.yaml",
+        )
+        framework_config["framework"] = "ddpm"
+        data_config["dataset_kind"] = "patch"
+        data_config["val_dir"] = "tests/fixtures/tif"
+        data_config["test_dir"] = "tests/fixtures/tif"
+        data_config["samples_per_volume_val"] = 1
+        data_config["samples_per_volume_test"] = 1
+        data_config["max_files_val"] = 1
+        data_config["max_files_test"] = 1
+        model_config = {
+            "backbone": "local_denoiser",
+            "in_channels": 1,
+            "out_channels": 1,
+            "input_size": [4, 4, 4],
+            "patch_size": [2, 2, 2],
+            "hidden_size": 16,
+            "depth": 1,
+            "num_heads": 1,
+            "mlp_ratio": 1.0,
+            "tokenizer": {
+                "patch_size": [2, 2, 2],
+                "stride": [2, 2, 2],
+                "padding": [0, 0, 0],
+            },
+        }
+        configs = driver.sanitize_split_configs(
+            data_config=data_config,
+            model_config=model_config,
+            framework_config=framework_config,
+            wrapper_config=wrapper_config,
+        )
+
+        self.assertEqual(configs.data.dataset_kind, "patch")
+        self.assertEqual(configs.model.backbone, "local_denoiser")
+        self.assertEqual(configs.model.tokenizer.kind, "extract_patches")
+
+        built_framework = build_framework_runtime(configs)
+        dataloaders = create_ddpm_dataloaders(built_framework.params)
+        self.assertIsInstance(dataloaders["train"].dataset, TifVolumePatchDataset)
+
+        batch = next(iter(dataloaders["train"]))
+        self.assertEqual(tuple(batch["target"].shape), (1, 1, 4, 4, 4))
+
+        module = DDPMModule(built_framework.params)
+        output = module(batch["target"], torch.rand(1))
+        self.assertEqual(tuple(output.shape), (1, 1, 4, 4, 4))
+
+    def test_sample_quality_metrics_identical_inputs(self) -> None:
+        volumes = torch.ones(2, 1, 4, 4, 4)
+        metrics = compute_sample_quality_metrics(volumes, volumes)
+
+        self.assertEqual(metrics["generated_count"], 2)
+        self.assertEqual(metrics["reference_count"], 2)
+        self.assertAlmostEqual(float(metrics["fid"]), 0.0, places=6)
+        self.assertAlmostEqual(float(metrics["mmd"]), 0.0, places=6)
+        self.assertAlmostEqual(float(metrics["wasserstein_distance"]), 0.0, places=6)
+        self.assertGreaterEqual(float(metrics["ms_ssim"]), 0.99)
 
 
 if __name__ == '__main__':

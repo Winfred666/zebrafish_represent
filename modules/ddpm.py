@@ -9,8 +9,8 @@ import pytorch_lightning as L
 import torch
 from torch.utils.data import DataLoader
 
-from modules.dit3d import DiT3D
-from utils.dataset import TifVolumeDataset
+from modules.model_factory import build_volume_model
+from utils.dataset import build_tif_dataset
 from utils.sanitize.param_class import DDPMParams, DataLoaderParams
 
 
@@ -36,7 +36,7 @@ def _build_beta_schedule(
 
 
 def _build_ddpm_dataloader(loader_config: DataLoaderParams) -> DataLoader:
-    dataset = TifVolumeDataset(loader_config.dataset)
+    dataset = build_tif_dataset(loader_config.dataset)
     return DataLoader(
         dataset,
         batch_size=loader_config.batch_size,
@@ -65,7 +65,7 @@ class DDPMModule(L.LightningModule):
         self.config = config
         self.save_hyperparameters(config.model_dump(mode="python"))
 
-        self.model = DiT3D(**config.model.model_dump(mode="python"))
+        self.model = build_volume_model(config.model)
         if config.optimization.loss_type == "mse":
             self._loss_fn = lambda delta: delta.pow(2)
         else:

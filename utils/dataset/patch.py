@@ -1,4 +1,4 @@
-"""Plain TIF volume dataset for 3D generative training."""
+"""Patch-aligned TIF volume dataset for patch-based generative training."""
 
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ from utils.dataset.shared import BaseTifVolumeDataset
 from utils.sanitize.param_class import VolumeDatasetParams
 
 
-class TifVolumeDataset(BaseTifVolumeDataset):
-    """Random-crop dataset over microscopy TIF/TIFF volumes."""
+class TifVolumePatchDataset(BaseTifVolumeDataset):
+    """Random crop dataset with patch-grid-aligned crop starts."""
 
     def __init__(self, config: VolumeDatasetParams):
+        if config.crop_size is None:
+            raise ValueError("TifVolumePatchDataset requires crop_size to be configured.")
         super().__init__(config)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:

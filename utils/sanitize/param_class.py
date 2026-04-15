@@ -37,10 +37,11 @@ class OptimizationParams(IngestibleParams):
 
 
 class ResolvedModelParams(IngestibleParams):
-    """Concrete DiT params injected into the backbone and training modules."""
+    """Concrete model params injected into the backbone builder and training modules."""
 
     model_config = ConfigDict(frozen=True)
 
+    backbone: Literal["dit3d", "local_denoiser"] = "dit3d"
     in_channels: int = Field(ge=1)
     out_channels: int = Field(ge=1)
     input_size: tuple[int, int, int]
@@ -49,13 +50,19 @@ class ResolvedModelParams(IngestibleParams):
     depth: int = Field(ge=1)
     num_heads: int = Field(ge=1)
     mlp_ratio: float = Field(gt=0.0)
+    tokenizer_kind: Literal["conv3d", "extract_patches"]
+    tokenizer_patch_size: tuple[int, int, int]
+    tokenizer_stride: tuple[int, int, int]
+    tokenizer_padding: tuple[int, int, int]
+    local_denoiser_swiglu_mlp: bool = True
 
 
 class VolumeDatasetParams(IngestibleParams):
-    """Single split dataset params injected into TIF volume datasets."""
+    """Single split dataset params injected into TIF dataset builders."""
 
     model_config = ConfigDict(frozen=True)
 
+    dataset_kind: Literal["volume", "patch"] = "volume"
     data_dir: str
     crop_size: tuple[int, int, int] | None
     samples_per_volume: int = Field(ge=1)
@@ -65,6 +72,7 @@ class VolumeDatasetParams(IngestibleParams):
     clip_percentile: tuple[float, float]
     in_channels: int = Field(ge=1)
     pad_to_multiple: tuple[int, int, int] | None
+    patch_grid_multiple: tuple[int, int, int] | None = None
 
 
 class DataLoaderParams(IngestibleParams):

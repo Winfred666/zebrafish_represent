@@ -1,0 +1,8 @@
+import_config: base.yaml
+
+logging:
+  experiment: local_denoier
+  tags:
+    job_type: train
+    backbone: local_denoiser
+    dataset_kind: patch

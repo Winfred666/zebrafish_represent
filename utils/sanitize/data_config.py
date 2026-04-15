@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Literal, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -13,15 +13,19 @@ class DataConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    dataset_kind: Literal["volume", "patch"] = "volume"
     train_dir: str = "data"
     val_dir: str | None = None
+    test_dir: str | None = None
     batch_size: int = Field(default=2, ge=1)
     num_workers: int = Field(default=4, ge=0)
     crop_size: Tuple[int, int, int] | None = (32, 64, 64)
     samples_per_volume_train: int = Field(default=32, ge=1)
     samples_per_volume_val: int = Field(default=8, ge=0)
+    samples_per_volume_test: int = Field(default=0, ge=0)
     max_files_train: int | None = None
     max_files_val: int | None = None
+    max_files_test: int | None = None
     scale_factor: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     normalize: bool = True
     clip_percentile: Tuple[float, float] = (1.0, 99.0)
@@ -42,9 +46,9 @@ class DataConfig(BaseModel):
             raise ValueError("data.train_dir must be a non-empty string")
         return cls._to_abs_path(stripped)
 
-    @field_validator("val_dir")
+    @field_validator("val_dir", "test_dir")
     @classmethod
-    def _validate_val_dir(cls, value: str | None) -> str | None:
+    def _validate_optional_dir(cls, value: str | None) -> str | None:
         if value is None:
             return None
         stripped = str(value).strip()
@@ -52,7 +56,7 @@ class DataConfig(BaseModel):
             return None
         return cls._to_abs_path(stripped)
 
-    @field_validator("max_files_train", "max_files_val")
+    @field_validator("max_files_train", "max_files_val", "max_files_test")
     @classmethod
     def _validate_optional_positive_int(cls, value: int | None) -> int | None:
         if value is None:
@@ -92,4 +96,8 @@ class DataConfig(BaseModel):
     def _finalize_optional_paths(self) -> "DataConfig":
         if self.val_dir is not None and not Path(self.val_dir).exists():
             self.val_dir = None
+        if self.test_dir is not None and not Path(self.test_dir).exists():
+            self.test_dir = None
+        if self.dataset_kind == "patch" and self.crop_size is None:
+            raise ValueError("data.dataset_kind='patch' requires data.crop_size to be set.")
         return self

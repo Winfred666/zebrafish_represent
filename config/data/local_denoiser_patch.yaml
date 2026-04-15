@@ -1,0 +1,9 @@
+import_config: base.yaml
+
+dataset_kind: patch
+val_dir: tests/fixtures/tif
+test_dir: tests/fixtures/tif
+samples_per_volume_val: 1
+samples_per_volume_test: 1
+max_files_val: 1
+max_files_test: 1
