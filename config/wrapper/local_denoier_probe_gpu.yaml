@@ -1,0 +1,36 @@
+import_config: base.yaml
+
+logging:
+  experiment: local_denoier
+  tags:
+    job_type: batch_probe
+    backbone: local_denoiser
+    dataset_kind: patch
+    scale: "0.125"
+    dataset: LS-FIS-3dpf
+
+trainer:
+  max_epochs: 1
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 1
+  check_val_every_n_epoch: 1
+  enable_checkpointing: false
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+  accumulate_grad_batches: 1
+  limit_train_batches: 1.0
+  limit_val_batches: 0.0
+
+checkpoint:
+  save_top_k: 0
+  save_last: false
+
+early_stopping:
+  enabled: false
+
+testing:
+  run_sampling_after_fit: false
+  num_samples: 1
+  sample_steps: 4

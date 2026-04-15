@@ -471,15 +471,17 @@ def build_callbacks(
     if not has_validation and monitor.startswith("val_"):
         monitor = "train_loss"
 
-    checkpoint_params = ModelCheckpointParams.from_sources(
-        wrapper_config.checkpoint,
-        dirpath=artifact_manager.checkpoint_dir,
-        monitor=monitor,
-    )
     callbacks: list[Callback] = [
-        ModelCheckpoint(**checkpoint_params.model_dump(mode="python")),
         LearningRateMonitor(logging_interval="epoch"),
     ]
+
+    if wrapper_config.trainer.enable_checkpointing:
+        checkpoint_params = ModelCheckpointParams.from_sources(
+            wrapper_config.checkpoint,
+            dirpath=artifact_manager.checkpoint_dir,
+            monitor=monitor,
+        )
+        callbacks.insert(0, ModelCheckpoint(**checkpoint_params.model_dump(mode="python")))
 
     gpu_callback = build_gpu_memory_callback(
         enabled=wrapper_config.logging.gpu_memory_monitor.enabled,

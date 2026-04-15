@@ -3,16 +3,18 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
 import driver
 from modules.ddpm import DDPMModule, create_ddpm_dataloaders
 from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
+from pytorch_lightning.callbacks import ModelCheckpoint
 from utils.dataset import TifVolumePatchDataset
 from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.sanitize.param_class import RectifiedFlowParams
-from utils.sanitize.runtime_factory import build_framework_runtime
+from utils.sanitize.runtime_factory import build_callbacks, build_framework_runtime
 
 
 class RuntimeEntryTest(unittest.TestCase):
@@ -177,6 +179,30 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["mmd"]), 0.0, places=6)
         self.assertAlmostEqual(float(metrics["wasserstein_distance"]), 0.0, places=6)
         self.assertGreaterEqual(float(metrics["ms_ssim"]), 0.99)
+
+    def test_build_callbacks_skips_model_checkpoint_when_disabled(self) -> None:
+        _, data_config, model_config, framework_config, wrapper_config = driver.load_split_configs(
+            data_config_path="config/data/scale_0p0625.yaml",
+            model_config_path="config/model/base.yaml",
+            framework_config_path="config/framework/base.yaml",
+            wrapper_config_path="config/wrapper/base.yaml",
+        )
+        wrapper_config["trainer"]["enable_checkpointing"] = False
+        wrapper_config["early_stopping"]["enabled"] = False
+        configs = driver.sanitize_split_configs(
+            data_config=data_config,
+            model_config=model_config,
+            framework_config=framework_config,
+            wrapper_config=wrapper_config,
+        )
+
+        callbacks = build_callbacks(
+            configs.wrapper,
+            has_validation=False,
+            artifact_manager=SimpleNamespace(checkpoint_dir="/tmp"),
+        )
+
+        self.assertFalse(any(isinstance(callback, ModelCheckpoint) for callback in callbacks))
 
 
 if __name__ == '__main__':
