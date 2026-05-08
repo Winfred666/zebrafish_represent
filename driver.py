@@ -9,11 +9,11 @@ from typing import Any, Mapping, Sequence
 
 sys.path.append(str(Path(__file__).parent))
 
-from utils.display.log_artifact import prepare_train_artifacts
+from utils.display.log_artifact import prepare_train_artifacts, upload_artifact_manager
 from utils.path_io import load_dotenv, to_abs_path
 from utils.sanitize.data_config import DataConfig
 from utils.sanitize.framework_config import FrameworkConfig
-from utils.sanitize.model_config import ModelConfig, resolve_attention_backend
+from utils.sanitize.model_config import ModelConfig
 from utils.sanitize.runtime_factory import (
     ConfigPaths,
     SanitizedConfigBundle,
@@ -85,12 +85,6 @@ def sanitize_split_configs(
     model = model.model_copy(deep=True)
     framework = framework.model_copy(deep=True)
     wrapper = wrapper.model_copy(deep=True)
-
-    model.attention_backend = resolve_attention_backend(
-        model.attention_backend,
-        cuda_enabled=trainer_uses_cuda(wrapper.trainer.accelerator),
-        precision=wrapper.trainer.precision,
-    )
 
     if data.crop_size is not None and model.input_size != data.crop_size:
         raise ValueError(
@@ -189,6 +183,9 @@ def train(
 
     print("\nTraining complete")
 
+    # Upload staging artifacts to MLflow (configs, checkpoints, samples).
+    upload_artifact_manager(logger, artifact_manager)
+
     if configs.wrapper.testing.run_sampling_after_fit:
         samples = framework.module.sample(  # 15. generate post-fit samples when enabled.
             batch_size=configs.wrapper.testing.num_samples,
@@ -199,6 +196,7 @@ def train(
             f"samples/{framework.sample_filename}",
         )
         print(f"Saved generated samples to: {sample_path}")
+        upload_artifact_manager(logger, artifact_manager)
         logger.log_metrics(  # 17. log sample summary metrics.
             {
                 "sample_min": float(samples.min()),

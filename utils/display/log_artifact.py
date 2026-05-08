@@ -2,30 +2,13 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 import yaml
-
-
-def _artifact_uri_to_local_path(artifact_uri: str) -> Path:
-    """Resolve local filesystem path from an MLflow artifact URI."""
-    uri = str(artifact_uri).strip()
-    if not uri:
-        raise ValueError("artifact_uri is empty.")
-
-    if uri.startswith("file://"):
-        return Path(uri[len("file://") :]).expanduser().resolve()
-
-    if "://" in uri:
-        raise ValueError(
-            f"Unsupported non-local artifact URI '{uri}'. "
-            "This utility supports file URIs and local paths only."
-        )
-
-    return Path(uri).expanduser().resolve()
 
 
 def _logger_artifact_uri(logger: Any) -> str:
@@ -50,7 +33,11 @@ def _logger_artifact_uri(logger: Any) -> str:
 
 @dataclass(frozen=True)
 class ArtifactManager:
-    """Filesystem-backed artifact manager rooted at the MLflow run artifact directory."""
+    """Artifact manager backed by a local staging directory.
+
+    Writes go to a temp dir, then are uploaded to MLflow via ``log_artifact``.
+    This works for both local filesystem and S3/MinIO artifact backends.
+    """
 
     root_dir: Path
     checkpoint_dir: Path
@@ -86,11 +73,47 @@ class ArtifactManager:
         return artifact_path
 
 
+def _ensure_s3_env() -> None:
+    """Ensure S3/MinIO env vars are set so that MLflow can upload artifacts."""
+    import os
+    if "MLFLOW_S3_ENDPOINT_URL" not in os.environ:
+        os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://localhost:43996"
+    if "MLFLOW_S3_IGNORE_TLS" not in os.environ:
+        os.environ["MLFLOW_S3_IGNORE_TLS"] = "true"
+    if "AWS_ACCESS_KEY_ID" not in os.environ:
+        os.environ["AWS_ACCESS_KEY_ID"] = "minioadmin"
+    if "AWS_SECRET_ACCESS_KEY" not in os.environ:
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "minioadmin"
+    if "NO_PROXY" not in os.environ:
+        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+
+
 def prepare_train_artifacts(logger: Any) -> ArtifactManager:
-    """Create artifact manager from the active MLflow run artifact URI."""
+    """Create a staging artifact manager and log the staging root to MLflow.
+
+    Artifacts are written to a temp directory first. After training,
+    call ``upload_artifact_manager(logger, manager)`` to push everything to MLflow.
+    """
+    _ensure_s3_env()
     artifact_uri = _logger_artifact_uri(logger)
-    artifact_root = _artifact_uri_to_local_path(artifact_uri)
-    return ArtifactManager.from_root_dir(artifact_root)
+    staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
+    manager = ArtifactManager.from_root_dir(staging_root)
+
+    # Record where artifacts will ultimately live.
+    import mlflow
+    mlflow.log_text(artifact_uri, "artifact_uri.txt")
+
+    return manager
+
+
+def upload_artifact_manager(logger: Any, manager: ArtifactManager, *, prefix: str = "") -> None:
+    """Upload all artifacts from the staging manager to MLflow."""
+    import mlflow
+    for subdir in ("checkpoints", "configs", "samples"):
+        src = manager.root_dir / subdir
+        if src.exists() and any(src.iterdir()):
+            artifact_subpath = f"{prefix}{subdir}" if prefix else subdir
+            mlflow.log_artifacts(str(src), artifact_path=artifact_subpath)
 
 
 def log_image_artifact(

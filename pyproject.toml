@@ -2,7 +2,7 @@
 name = "zebrafish-represent"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
-description = "Generative prior training with optional FlashAttention-4 acceleration."
+description = "Generative prior training with optional FlashAttention-2 acceleration."
 readme = "README.md"
 
 dependencies = [
@@ -15,32 +15,28 @@ dependencies = [
     "pyyaml==6.0.3",
     "tqdm==4.67.1",
     "einops>=0.7,<1",
-
     # Imaging / data
     "scikit-image==0.25.2",
     "tifffile==2025.12.12",
-
     # Notebook / plotting
     "matplotlib==3.10.8",
     "ipywidgets==8.1.8",
     "ipympl==0.9.8",
     "pyvista==0.46.4",
+    "psycopg2-binary>=2.9.12",
+    "boto3>=1.43.6",
 ]
 
 [project.optional-dependencies]
-# Fast path for Blackwell / Hopper on CUDA 13.
-flash = [
-    "flash-attn-4[cu13]==4.0.0b8",
-    "ninja==1.11.1.4",
-    "packaging==25.0",
-    "psutil==7.1.0",
-]
-
 # Optional quality-of-life extras for development.
 dev = [
     "jupyterlab==4.4.3",
     "ipython==9.2.0",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 # PyTorch CUDA 13.0 wheels live on the dedicated PyTorch index.
 [[tool.uv.index]]

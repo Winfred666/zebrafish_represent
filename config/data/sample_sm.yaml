@@ -1,5 +1,5 @@
-train_dir: tests/fixtures/tif
-val_dir: null
+train_dir: data/raw/sample_sm/train
+val_dir: data/raw/sample_sm/val
 batch_size: 1
 num_workers: 0
 crop_size: [4, 4, 4]

@@ -7,69 +7,9 @@ from typing import Literal, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-AttentionBackend = Literal["auto", "flash4", "sdpa"]
-ResolvedAttentionBackend = Literal["flash4", "sdpa"]
+AttentionBackend = Literal["sdpa"]
+ResolvedAttentionBackend = Literal["sdpa"]
 InputRepresentation = Literal["volume"]
-
-_FLASH4_IMPORT_PATH = "flash_attn.cute.flash_attn_func"
-_FLASH4_PRECISIONS = {
-    "16",
-    "16-mixed",
-    "16-true",
-    "bf16",
-    "bf16-mixed",
-    "bf16-true",
-}
-
-
-def flash4_is_available() -> bool:
-    """Return whether FlashAttention-4 can be imported in this environment."""
-    try:
-        from flash_attn.cute import flash_attn_func  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-def precision_supports_flash4(precision: str | int) -> bool:
-    """Return whether the configured trainer precision can drive FlashAttention-4."""
-    return str(precision).strip().lower() in _FLASH4_PRECISIONS
-
-
-def resolve_attention_backend(
-    requested_backend: AttentionBackend,
-    *,
-    cuda_enabled: bool,
-    precision: str | int,
-) -> ResolvedAttentionBackend:
-    """Resolve the user-facing backend policy into a concrete backend."""
-    if not cuda_enabled:
-        if requested_backend == "flash4":
-            raise ValueError(
-                "model.attention_backend='flash4' requires CUDA, but trainer resolved to a non-CUDA accelerator."
-            )
-        return "sdpa"
-
-    flash4_ready = flash4_is_available()
-    precision_ready = precision_supports_flash4(precision)
-
-    if requested_backend == "flash4":
-        if not flash4_ready:
-            raise ImportError(
-                "model.attention_backend='flash4' requires FlashAttention-4 "
-                f"({_FLASH4_IMPORT_PATH}), but it is not importable."
-            )
-        if not precision_ready:
-            raise ValueError(
-                "model.attention_backend='flash4' requires trainer.precision to be one of "
-                f"{sorted(_FLASH4_PRECISIONS)}, got {precision!r}."
-            )
-        return "flash4"
-
-    if requested_backend == "auto" and flash4_ready and precision_ready:
-        return "flash4"
-
-    return "sdpa"
 
 
 class ModelConfig(BaseModel):
@@ -85,7 +25,6 @@ class ModelConfig(BaseModel):
     depth: int = Field(default=8, ge=1)
     num_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
-    attention_backend: AttentionBackend = "auto"
     input_representation: InputRepresentation = "volume"
 
     @field_validator("input_size", "patch_size")

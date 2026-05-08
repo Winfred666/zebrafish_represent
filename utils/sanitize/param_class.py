@@ -8,7 +8,6 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field
 
 from utils.sanitize.framework_config import DDPMConfig
-from utils.sanitize.model_config import ResolvedAttentionBackend
 
 
 class IngestibleParams(BaseModel):
@@ -50,7 +49,6 @@ class ResolvedModelParams(IngestibleParams):
     depth: int = Field(ge=1)
     num_heads: int = Field(ge=1)
     mlp_ratio: float = Field(gt=0.0)
-    attention_backend: ResolvedAttentionBackend
 
 
 class VolumeDatasetParams(IngestibleParams):

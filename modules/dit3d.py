@@ -10,13 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from utils.sanitize.model_config import ResolvedAttentionBackend
-
-try:
-    from flash_attn.cute import flash_attn_func
-except Exception:
-    flash_attn_func = None
-
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """Apply adaptive layer norm modulation."""
@@ -54,23 +47,18 @@ class TimestepEmbedder(nn.Module):
 
 
 class DiTSelfAttention(nn.Module):
-    """Multi-head self-attention with a concrete backend selected during sanitize."""
+    """Multi-head self-attention via PyTorch scaled dot-product attention."""
 
-    def __init__(self, hidden_size: int, num_heads: int, attention_backend: ResolvedAttentionBackend):
+    def __init__(self, hidden_size: int, num_heads: int):
         super().__init__()
         if hidden_size % num_heads != 0:
             raise ValueError(
                 f"hidden_size={hidden_size} must be divisible by num_heads={num_heads}."
             )
-        if attention_backend == "flash4" and flash_attn_func is None:
-            raise ImportError(
-                "Resolved attention backend is 'flash4', but FlashAttention-4 is not importable."
-            )
 
         self.hidden_size = int(hidden_size)
         self.num_heads = int(num_heads)
         self.head_dim = self.hidden_size // self.num_heads
-        self.attention_backend = attention_backend
 
         self.qkv = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=True)
         self.proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
@@ -84,25 +72,15 @@ class DiTSelfAttention(nn.Module):
             d=self.head_dim,
         ).unbind(dim=0)
 
-        if self.attention_backend == "flash4":
-            attention_output = flash_attn_func(
-                q.contiguous(),
-                k.contiguous(),
-                v.contiguous(),
-                dropout_p=0.0,
-                causal=False,
-            )
-        else:
-            attention_output = F.scaled_dot_product_attention(
-                rearrange(q, "b t h d -> b h t d"),
-                rearrange(k, "b t h d -> b h t d"),
-                rearrange(v, "b t h d -> b h t d"),
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False,
-            )
-            attention_output = rearrange(attention_output, "b h t d -> b t h d")
-
+        attention_output = F.scaled_dot_product_attention(
+            rearrange(q, "b t h d -> b h t d"),
+            rearrange(k, "b t h d -> b h t d"),
+            rearrange(v, "b t h d -> b h t d"),
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        attention_output = rearrange(attention_output, "b h t d -> b t h d")
         return self.proj(rearrange(attention_output, "b t h d -> b t (h d)"))
 
 
@@ -114,14 +92,12 @@ class DiTBlock3D(nn.Module):
         hidden_size: int,
         num_heads: int,
         mlp_ratio: float,
-        attention_backend: ResolvedAttentionBackend,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = DiTSelfAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
-            attention_backend=attention_backend,
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
@@ -177,7 +153,6 @@ class DiT3D(nn.Module):
         depth: int = 8,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
-        attention_backend: ResolvedAttentionBackend = "sdpa",
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -185,7 +160,6 @@ class DiT3D(nn.Module):
         self.input_size = tuple(int(value) for value in input_size)
         self.patch_size = tuple(int(value) for value in patch_size)
         self.hidden_size = int(hidden_size)
-        self.attention_backend = attention_backend
 
         if any(size % patch != 0 for size, patch in zip(self.input_size, self.patch_size)):
             raise ValueError(
@@ -211,7 +185,6 @@ class DiT3D(nn.Module):
                     hidden_size=self.hidden_size,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
-                    attention_backend=self.attention_backend,
                 )
                 for _ in range(depth)
             ]

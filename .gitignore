@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-
+.mcp.json
 # Distribution / packaging
 .Python
 build/
@@ -137,6 +137,7 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+config.env
 .venv
 env/
 venv/
