@@ -33,13 +33,105 @@ Precision is configured in wrapper config: `precision: "32"` (fp32) or `precisio
 - **Backup**: `~/.claude/skills/mlflow-backup-restore/scripts/backup_restore.sh`
 - **Critical**: Set `NO_PROXY=127.0.0.1,localhost` or MLflow calls route through proxy → stale foreign data.
 
+## Config Protocol
+
+Training configuration lives in 4 YAML files (data, model, framework, wrapper).
+The split has no semantic meaning — `runtime_factory.py` merges them at load time.
+Every runtime-object section uses the `class_name` + `params` pattern:
+
+```yaml
+<runtime_object_key>:
+  class_name: <TargetClassNameStr>
+  params:
+    <init_kwarg>: <value>
+```
+
+**Rules:**
+- Config keys directly align with target class `__init__` parameter names. No unpack,
+  renaming, or semantic class derivation during config loading.
+- New training features are added directly to the module class `__init__` + config YAML
+  — no intermediate config model changes needed.
+- Sections that always produce the same class (e.g. `train_dataloader`) may omit
+  `class_name`; the domain sanitize file supplies the default.
+- `runtime.X` dot-notation values denote cross-references resolved during object
+  building (e.g. `model: runtime.model` in framework params, `dataset: runtime.train_dataset`
+  in dataloader params).
+- `utils/sanitize/` is a DECOUPLED config validator + object factory compiler. It
+  never derives semantics from config keys — it only validates and instantiates.
+- Cross-references form a dependency DAG. The compiler resolves them by blind iteration:
+  try to build every pending object; skip any whose `runtime.X` references aren't ready
+  yet; repeat until all objects are built or no forward progress is made.
+
+**Example — four config files:**
+
+data config:
+```yaml
+train_dataset:
+  class_name: TifVolumeDataset
+  params:
+    data_dir: data/raw/sample_sm/train
+    crop_size: [32, 32, 32]
+    samples_per_volume: 32
+    scale_factor: [0.125, 0.125, 0.125]
+    normalize: true
+
+train_dataloader:
+  dataset: runtime.train_dataset
+  batch_size: 1024
+  num_workers: 8
+  shuffle: true
+```
+
+model config:
+```yaml
+model:
+  class_name: DiT3D
+  params:
+    in_channels: 1
+    out_channels: 1
+    input_size: [32, 32, 32]
+    patch_size: [2, 2, 2]
+    hidden_size: 192
+    depth: 2
+    num_heads: 6
+```
+
+framework config:
+```yaml
+framework:
+  class_name: DDPMModule
+  params:
+    model: runtime.model
+    learning_rate: 0.0001
+    loss_type: mse
+    num_train_timesteps: 32
+```
+
+wrapper config:
+```yaml
+seed: 42
+
+trainer:
+  class_name: Trainer
+  params:
+    max_epochs: 1
+    accelerator: auto
+    devices: 1
+
+logging:
+  class_name: MLFlowLogger
+  params:
+    experiment_name: zebrafish_volume_gen
+    tracking_uri: http://172.27.2.100:5000
+```
+
 ## Canonical Training Flow
 
-1. Read the split training config in `driver.py`.
-2. Load the four runtime sections from `config/data/*.yaml`, `config/model/*.yaml`, `config/framework/*.yaml`, and `config/wrapper/*.yaml`.
-3. Sanitize all section config with Pydantic before constructing any runtime object.
-4. Build typed derived params from sanitized config and inject those params into datasets, modules, and driver helpers.
-5. Load `.tif/.tiff` volumes directly from `data.train_dir` using `process_tif_to_array`.
+1. Read the 4 split configs in `driver.py`.
+2. Load and deep-merge all four YAML sections in `runtime_factory.py`.
+3. Validate each section's `params` with its domain Pydantic model.
+4. Mechanically compile objects: resolve `class_name` → import class → `cls(**validated_params)`.
+5. Resolve `runtime.X` cross-references by blind iteration until all objects built.
 6. Train the selected framework and log metrics and artifacts through MLflow.
 
 ## Training on GPU nodes
@@ -64,8 +156,9 @@ GPU availability: `bash ~/.claude/skills/use-gpu/scripts/gpu_check.sh`
 - Training modules: `modules/rect_flow.py`, `modules/ddpm.py`
 - Driver config loading and runtime orchestration: `driver.py`
 - Runtime builders: `utils/sanitize/runtime_factory.py`
-- Config schemas: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/framework_config.py`, `utils/sanitize/wrapper_config.py`
-- Param fan-out classes: `utils/sanitize/param_class.py`
+- Config schema and builders: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/framework_config.py`, `utils/sanitize/wrapper_config.py`
+- Param base class: `utils/sanitize/param_class.py`
+- Runtime compiler: `utils/sanitize/runtime_factory.py`
 - Path helpers: `utils/path_io.py`
 - Dataset package: `utils/dataset/`
 - Display and artifact helpers: `utils/display/`
