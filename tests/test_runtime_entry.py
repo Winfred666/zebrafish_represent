@@ -153,7 +153,7 @@ class RuntimeEntryTest(unittest.TestCase):
     def test_yaml_import_config_chain(self) -> None:
         config = load_yaml_config("config/model/local_denoiser.yaml")
         self.assertEqual(config["model"]["class_name"], "LocalDenoiser3D")
-        self.assertEqual(config["model"]["params"]["hidden_size"], 16)
+        self.assertEqual(config["model"]["params"]["extract_patch_size"], [4, 4, 4])
 
     def test_framework_config_defaults(self) -> None:
         config = load_yaml_config("config/framework/base.yaml")

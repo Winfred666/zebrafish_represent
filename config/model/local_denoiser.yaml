@@ -7,12 +7,7 @@ model:
     out_channels: 1
     input_size: [4, 4, 4]
     patch_size: [2, 2, 2]
-    hidden_size: 16
-    depth: 1
-    num_heads: 1
+    extract_patch_size: [4, 4, 4]
+    extract_stride: [2, 2, 2]
+    extract_padding: [1, 1, 1]
     mlp_ratio: 1.0
-    tokenizer_kind: extract_patches
-    tokenizer_patch_size: [4, 4, 4]
-    tokenizer_stride: [2, 2, 2]
-    tokenizer_padding: [1, 1, 1]
-    swiglu_mlp: true

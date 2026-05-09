@@ -27,7 +27,6 @@ class LocalDenoiser3D(nn.Module):
         extract_stride: tuple[int, int, int],
         extract_padding: tuple[int, int, int],
         mlp_ratio: float = 1.0,
-        swiglu_mlp: bool = True,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -53,7 +52,6 @@ class LocalDenoiser3D(nn.Module):
             patch_volume=patch_volume,
             out_channels=self.out_channels,
             mlp_ratio=mlp_ratio,
-            swiglu_mlp=swiglu_mlp,
         )
         self.decoder = VolumeUnpatchify3D(
             output_size=self.input_size,

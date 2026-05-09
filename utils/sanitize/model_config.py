@@ -54,7 +54,10 @@ class DiT3DParams(IngestibleParams):
 
 
 class LocalDenoiser3DParams(IngestibleParams):
-    """Params for the LocalDenoiser3D (PRDiT) backbone."""
+    """Params for the LocalDenoiser3D (PRDiT) backbone.
+
+    Field names directly match LocalDenoiser3D.__init__ parameters.
+    """
 
     model_config = {"frozen": True}
 
@@ -62,39 +65,32 @@ class LocalDenoiser3DParams(IngestibleParams):
     out_channels: int = Field(ge=1)
     input_size: tuple[int, int, int]
     patch_size: tuple[int, int, int]
-    hidden_size: int = Field(ge=1)
-    depth: int = Field(ge=1)
-    num_heads: int = Field(ge=1)
-    mlp_ratio: float = Field(gt=0.0)
-    tokenizer_kind: Literal["extract_patches"] = "extract_patches"
-    tokenizer_patch_size: tuple[int, int, int]
-    tokenizer_stride: tuple[int, int, int]
-    tokenizer_padding: tuple[int, int, int]
-    swiglu_mlp: bool = True
+    extract_patch_size: tuple[int, int, int]
+    extract_stride: tuple[int, int, int]
+    extract_padding: tuple[int, int, int]
+    mlp_ratio: float = Field(default=1.0, gt=0.0)
 
     @model_validator(mode="after")
     def _validate_grid_alignment(self) -> "LocalDenoiser3DParams":
-        if self.tokenizer_kind != "extract_patches":
-            raise ValueError("LocalDenoiser3D requires tokenizer_kind='extract_patches'")
         if any(s % p != 0 for s, p in zip(self.input_size, self.patch_size)):
             raise ValueError(
                 f"input_size must be divisible by patch_size. "
                 f"Got input_size={self.input_size}, patch_size={self.patch_size}"
             )
-        for axis, (in_sz, out_p, tk_p, tk_s, tk_pad) in enumerate(
-            zip(self.input_size, self.patch_size, self.tokenizer_patch_size,
-                self.tokenizer_stride, self.tokenizer_padding), start=1
+        for axis, (in_sz, out_p, ex_p, ex_s, ex_pad) in enumerate(
+            zip(self.input_size, self.patch_size, self.extract_patch_size,
+                self.extract_stride, self.extract_padding), start=1
         ):
-            numerator = in_sz + 2 * tk_pad - tk_p
+            numerator = in_sz + 2 * ex_pad - ex_p
             if numerator < 0:
-                raise ValueError(f"Tokenizer patch exceeds input size. Axis={axis}")
-            if numerator % tk_s != 0:
-                raise ValueError(f"Tokenizer extraction must land on integer grid. Axis={axis}")
-            actual_grid = (numerator // tk_s) + 1
+                raise ValueError(f"Extract patch exceeds input size. Axis={axis}")
+            if numerator % ex_s != 0:
+                raise ValueError(f"Extract stride must land on integer grid. Axis={axis}")
+            actual_grid = (numerator // ex_s) + 1
             expected_grid = in_sz // out_p
             if actual_grid != expected_grid:
                 raise ValueError(
-                    f"Tokenizer grid must match decoder grid. "
+                    f"Extract grid must match decoder grid. "
                     f"Axis={axis}, actual={actual_grid}, expected={expected_grid}"
                 )
         return self

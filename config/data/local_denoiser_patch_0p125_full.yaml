@@ -4,24 +4,18 @@ train_dataset:
   class_name: TifVolumePatchDataset
   params:
     data_dir: data/raw/sample_sm/train
-    crop_size: [32, 32, 32]
-    samples_per_volume: 32
     scale_factor: [0.125, 0.125, 0.125]
 
 train_dataloader:
   batch_size: 1024
   num_workers: 8
-  shuffle: true
 
 val_dataset:
   class_name: TifVolumePatchDataset
   params:
     data_dir: data/raw/sample_sm/val
-    crop_size: [32, 32, 32]
     samples_per_volume: 0
     scale_factor: [0.125, 0.125, 0.125]
 
 val_dataloader:
   batch_size: 1024
-  num_workers: 2
-  shuffle: false
