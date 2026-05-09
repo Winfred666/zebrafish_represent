@@ -1,88 +1,63 @@
-"""Split-config loading and runtime object builders for training entrypoints."""
+"""Mechanical config compiler: load 4 YAMLs, deep-merge, blind-iterate build with runtime.X resolution."""
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Mapping
+from typing import Any, Callable
 
-import torch
 import yaml
-from pydantic import BaseModel
-from torch.utils.data import DataLoader, Dataset
 
 from utils.display.log_artifact import ArtifactManager, prepare_train_artifacts
 from utils.display.log_gpu import build_gpu_memory_callback
 from utils.path_io import resolve_import_path, to_abs_path
-from utils.sanitize.data_config import DataConfig
-from utils.sanitize.framework_config import FrameworkConfig
-from utils.sanitize.model_config import ModelConfig, resolve_model_config
-from utils.sanitize.param_class import (
-    DDPMParams,
-    DataLoaderParams,
-    EarlyStoppingParams,
-    MLFlowLoggerParams,
-    ModelCheckpointParams,
-    OptimizationParams,
-    RectifiedFlowParams,
-    ResolvedModelParams,
-    VolumeDatasetParams,
-)
-from utils.sanitize.wrapper_config import WrapperConfig, align_torch_cuda_runtime, trainer_uses_cuda
 
-if TYPE_CHECKING:
-    import pytorch_lightning as L
-    from pytorch_lightning.callbacks import Callback
-    from pytorch_lightning.loggers.logger import Logger
+_RUNTIME_REF_PATTERN = re.compile(r"^runtime\.(.+)$")
 
+# ── Data classes ──
 
 @dataclass(frozen=True)
 class ConfigPaths:
-    """Resolved split config file paths."""
-
     data: Path
     model: Path
     framework: Path
     wrapper: Path
 
 
-@dataclass(frozen=True)
-class SanitizedConfigBundle:
-    """Sanitized split config sections."""
-
-    data: DataConfig
-    model: ModelConfig
-    framework: FrameworkConfig
-    wrapper: WrapperConfig
-
-
-@dataclass(frozen=True)
-class BuiltFramework:
-    """Concrete framework objects needed by the driver."""
-
-    params: RectifiedFlowParams | DDPMParams
-    module: "L.LightningModule"
-    train_loader: DataLoader
-    val_loader: DataLoader | None
-    sample_filename: str
-
-
-@dataclass(frozen=True)
+@dataclass
 class TrainingRuntime:
     """Fully built runtime objects for one training run."""
 
     paths: ConfigPaths
-    configs: SanitizedConfigBundle
     runtime_config: dict[str, Any]
-    framework: BuiltFramework
-    logger: "Logger"
-    artifact_manager: ArtifactManager
-    callbacks: list["Callback"]
-    trainer: "L.Trainer"
+    objects: dict[str, Any] = field(default_factory=dict)
+    logger: Any = None
+    artifact_manager: ArtifactManager | None = None
+    callbacks: list = field(default_factory=list)
+    trainer: Any = None
+
+    @property
+    def module(self):
+        return self.objects.get("framework")
+
+    @property
+    def model(self):
+        return self.objects.get("model")
+
+    @property
+    def train_loader(self):
+        return self.objects.get("train_dataloader")
+
+    @property
+    def val_loader(self):
+        return self.objects.get("val_dataloader")
 
 
-def _deep_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+# ── YAML loading ──
+
+def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -92,7 +67,7 @@ def _deep_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
-def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -111,30 +86,28 @@ def _normalize_import_config_value(import_value: Any, config_path: Path) -> list
         for idx, item in enumerate(import_value):
             if not isinstance(item, (str, Path)):
                 raise ValueError(
-                    "import_config list entries must be strings/paths; "
+                    f"import_config list entries must be strings/paths; "
                     f"got {type(item)} at index {idx} in {config_path}"
                 )
             refs.append(item)
         return refs
     raise ValueError(
-        "import_config must be a string path or a list of string paths; "
+        f"import_config must be a string path or a list of string paths; "
         f"got {type(import_value)} in {config_path}"
     )
 
 
-def _load_yaml_config_recursive(path: Path, stack: tuple[Path, ...]) -> Dict[str, Any]:
+def _load_yaml_config_recursive(path: Path, stack: tuple[Path, ...]) -> dict[str, Any]:
     current = path.resolve()
     if current in stack:
-        chain = " -> ".join(path.as_posix() for path in (*stack, current))
+        chain = " -> ".join(p.as_posix() for p in (*stack, current))
         raise ValueError(f"Circular import_config chain detected: {chain}")
-
     loaded = _load_yaml_mapping(current)
     import_value = loaded.pop("import_config", None)
     if import_value is None:
         return loaded
-
     import_refs = _normalize_import_config_value(import_value, current)
-    merged: Dict[str, Any] = {}
+    merged: dict[str, Any] = {}
     for ref in import_refs:
         imported_path = resolve_import_path(ref, parent_config_path=current)
         imported_cfg = _load_yaml_config_recursive(imported_path, stack=(*stack, current))
@@ -142,25 +115,8 @@ def _load_yaml_config_recursive(path: Path, stack: tuple[Path, ...]) -> Dict[str
     return _deep_update(merged, loaded)
 
 
-def load_yaml_config(path: str | Path) -> Dict[str, Any]:
-    """Load YAML with recursive `import_config` support."""
+def load_yaml_config(path: str | Path) -> dict[str, Any]:
     return _load_yaml_config_recursive(path=to_abs_path(path), stack=())
-
-
-def resolve_config_paths(
-    *,
-    data_config_path: str | Path,
-    model_config_path: str | Path,
-    framework_config_path: str | Path,
-    wrapper_config_path: str | Path,
-) -> ConfigPaths:
-    """Resolve split config file paths into absolute paths."""
-    return ConfigPaths(
-        data=to_abs_path(data_config_path),
-        model=to_abs_path(model_config_path),
-        framework=to_abs_path(framework_config_path),
-        wrapper=to_abs_path(wrapper_config_path),
-    )
 
 
 def load_split_configs(
@@ -169,348 +125,264 @@ def load_split_configs(
     model_config_path: str | Path,
     framework_config_path: str | Path,
     wrapper_config_path: str | Path,
-) -> tuple[ConfigPaths, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Load the four split YAML config payloads."""
-    paths = resolve_config_paths(
-        data_config_path=data_config_path,
-        model_config_path=model_config_path,
-        framework_config_path=framework_config_path,
-        wrapper_config_path=wrapper_config_path,
+) -> tuple[ConfigPaths, dict[str, Any]]:
+    """Load the 4 split YAML configs, deep-merge them into one dict."""
+    paths = ConfigPaths(
+        data=to_abs_path(data_config_path),
+        model=to_abs_path(model_config_path),
+        framework=to_abs_path(framework_config_path),
+        wrapper=to_abs_path(wrapper_config_path),
     )
-    return (
-        paths,
-        load_yaml_config(paths.data),
-        load_yaml_config(paths.model),
-        load_yaml_config(paths.framework),
-        load_yaml_config(paths.wrapper),
-    )
+    merged: dict[str, Any] = {}
+    for path in (paths.data, paths.model, paths.framework, paths.wrapper):
+        cfg = load_yaml_config(path)
+        merged = _deep_update(merged, cfg)
+    return paths, merged
 
 
-def sanitize_split_configs(
-    *,
-    data_config: Mapping[str, Any],
-    model_config: Mapping[str, Any],
-    framework_config: Mapping[str, Any],
-    wrapper_config: Mapping[str, Any],
-) -> SanitizedConfigBundle:
-    """Sanitize the split config payloads and resolve cross-section policy."""
-    data = DataConfig.model_validate(dict(data_config))
-    model = ModelConfig.model_validate(dict(model_config))
-    framework = FrameworkConfig.model_validate(dict(framework_config))
-    wrapper = WrapperConfig.model_validate(dict(wrapper_config))
+# ── Cross-reference utilities ──
 
-    data = data.model_copy(deep=True)
-    model = model.model_copy(deep=True)
-    framework = framework.model_copy(deep=True)
-    wrapper = wrapper.model_copy(deep=True)
-
-    model = resolve_model_config(
-        model,
-        cuda_enabled=trainer_uses_cuda(wrapper.trainer.accelerator),
-        precision=wrapper.trainer.precision,
-    )
-
-    if data.crop_size is not None and model.input_size != data.crop_size:
-        raise ValueError(
-            "model.input_size must match data.crop_size when crop_size is provided. "
-            f"Got model.input_size={model.input_size}, data.crop_size={data.crop_size}."
-        )
-
-    if data.crop_size is not None and any(
-        crop % patch != 0 for crop, patch in zip(data.crop_size, model.patch_size)
-    ):
-        raise ValueError(
-            "data.crop_size must be divisible by model.patch_size. "
-            f"Got crop_size={data.crop_size}, patch_size={model.patch_size}."
-        )
-
-    if data.crop_size is None and data.pad_to_multiple is None:
-        data.pad_to_multiple = model.patch_size
-
-    if framework.framework == "ddpm" and model.in_channels != model.out_channels:
-        raise ValueError(
-            "DDPM requires model.in_channels == model.out_channels. "
-            f"Got in_channels={model.in_channels}, out_channels={model.out_channels}."
-        )
-
-    return SanitizedConfigBundle(
-        data=data,
-        model=model,
-        framework=framework,
-        wrapper=wrapper,
-    )
+def _is_runtime_ref(value: Any) -> bool:
+    return isinstance(value, str) and bool(_RUNTIME_REF_PATTERN.match(value))
 
 
-def compose_runtime_config(configs: SanitizedConfigBundle) -> dict[str, Any]:
-    """Compose the split sanitized configs into one runtime dictionary for logging/artifacts."""
-    return {
-        "data": configs.data.model_dump(mode="python"),
-        "model": configs.model.model_dump(mode="python"),
-        "framework": configs.framework.model_dump(mode="python"),
-        "wrapper": configs.wrapper.model_dump(mode="python"),
-    }
+def _extract_ref_path(ref_str: str) -> str:
+    match = _RUNTIME_REF_PATTERN.match(ref_str)
+    if not match:
+        raise ValueError(f"Invalid runtime reference: {ref_str}")
+    return match.group(1)
 
 
-def flatten_for_logging(cfg: SanitizedConfigBundle | BaseModel | Mapping[str, Any], prefix: str = "") -> Dict[str, Any]:
-    """Flatten nested config structures for logger hyper-parameter logging."""
-    if isinstance(cfg, SanitizedConfigBundle):
-        payload: Mapping[str, Any] = compose_runtime_config(cfg)
-    elif isinstance(cfg, BaseModel):
-        payload = cfg.model_dump(mode="python")
-    else:
-        payload = cfg
-
-    flat: Dict[str, Any] = {}
-    for key, value in payload.items():
-        fkey = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, Mapping):
-            flat.update(flatten_for_logging(value, prefix=fkey))
-        elif isinstance(value, (list, tuple)):
-            flat[fkey] = list(value)
+def _resolve_ref(ref_str: str, objects: dict[str, Any]) -> Any:
+    """Resolve a 'runtime.X' or 'runtime.X.Y' string to an actual object."""
+    path = _extract_ref_path(ref_str)
+    parts = path.split(".")
+    current = objects
+    for part in parts:
+        if isinstance(current, dict):
+            if part not in current:
+                raise KeyError(f"Runtime reference '{ref_str}' not found (missing '{part}')")
+            current = current[part]
         else:
-            flat[fkey] = value
-    return flat
+            current = getattr(current, part)
+    return current
 
 
-def _dataset_split_source(data_config: DataConfig, split: Literal["train", "val", "test"]) -> dict[str, Any]:
-    return {
-        "data_dir": getattr(data_config, f"{split}_dir"),
-        "samples_per_volume": getattr(data_config, f"samples_per_volume_{split}"),
-        "max_files": getattr(data_config, f"max_files_{split}"),
-    }
-
-
-def _loader_split_source(
-    data_config: DataConfig,
-    wrapper_config: WrapperConfig,
-    split: Literal["train", "val"],
-) -> dict[str, Any]:
-    num_workers = data_config.num_workers if split == "train" else max(0, min(data_config.num_workers, 2))
-    return {
-        "num_workers": num_workers,
-        "shuffle": split == "train",
-        "pin_memory": trainer_uses_cuda(wrapper_config.trainer.accelerator),
-        "persistent_workers": num_workers > 0,
-    }
-
-
-def _build_optimization_params(configs: SanitizedConfigBundle) -> OptimizationParams:
-    return OptimizationParams.from_sources(configs.framework)
-
-
-def _build_model_params(configs: SanitizedConfigBundle) -> ResolvedModelParams:
-    return ResolvedModelParams.from_sources(
-        configs.model,
-        tokenizer_kind=configs.model.tokenizer.kind,
-        tokenizer_patch_size=configs.model.tokenizer.patch_size,
-        tokenizer_stride=configs.model.tokenizer.stride,
-        tokenizer_padding=configs.model.tokenizer.padding,
-        local_denoiser_swiglu_mlp=configs.model.local_denoiser.swiglu_mlp,
-    )
-
-
-def _build_volume_dataset_params(
-    configs: SanitizedConfigBundle,
-    split: Literal["train", "val", "test"],
-) -> VolumeDatasetParams:
-    return VolumeDatasetParams.from_sources(
-        configs.data,
-        configs.model,
-        _dataset_split_source(configs.data, split),
-        dataset_kind=configs.data.dataset_kind,
-        patch_grid_multiple=configs.model.patch_size,
-    )
-
-
-def _build_loader_params(
-    configs: SanitizedConfigBundle,
-    *,
-    dataset: VolumeDatasetParams,
-    split: Literal["train", "val"],
-) -> DataLoaderParams:
-    return DataLoaderParams.from_sources(
-        configs.data,
-        _loader_split_source(configs.data, configs.wrapper, split),
-        dataset=dataset,
-    )
-
-
-def build_framework_params(configs: SanitizedConfigBundle) -> RectifiedFlowParams | DDPMParams:
-    """Build framework fan-out params from sanitized split configs."""
-    optimization = _build_optimization_params(configs)
-    model = _build_model_params(configs)
-
-    train_dataset = _build_volume_dataset_params(configs, "train")
-    val_dataset = None
-    if configs.data.val_dir is not None and configs.data.samples_per_volume_val > 0:
-        val_dataset = _build_volume_dataset_params(configs, "val")
-
-    if configs.framework.framework == "rectified_flow":
-        return RectifiedFlowParams.from_sources(
-            configs.framework,
-            train_loader=_build_loader_params(
-                configs,
-                dataset=train_dataset,
-                split="train",
-            ),
-            val_loader=(
-                _build_loader_params(
-                    configs,
-                    dataset=val_dataset,
-                    split="val",
-                )
-                if val_dataset is not None
-                else None
-            ),
-            model=model,
-            optimization=optimization,
-        )
-
-    return DDPMParams.from_sources(
-        configs.framework,
-        train_loader=_build_loader_params(
-            configs,
-            dataset=train_dataset,
-            split="train",
-        ),
-        val_loader=(
-            _build_loader_params(
-                configs,
-                dataset=val_dataset,
-                split="val",
-            )
-            if val_dataset is not None
-            else None
-        ),
-        model=model,
-        optimization=optimization,
-        diffusion=configs.framework.ddpm.model_copy(deep=True),
-    )
-
-
-def build_framework_runtime(configs: SanitizedConfigBundle) -> BuiltFramework:
-    """Instantiate the concrete Lightning module and dataloaders for the configured framework."""
-    params = build_framework_params(configs)
-
-    if configs.framework.framework == "rectified_flow":
-        from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
-
-        module = RectifiedFlowModule(params)
-        dataloaders = create_rectified_flow_dataloaders(params)
-        return BuiltFramework(
-            params=params,
-            module=module,
-            train_loader=dataloaders["train"],
-            val_loader=dataloaders.get("val"),
-            sample_filename="rectified_flow_samples.npy",
-        )
-
-    from modules.ddpm import DDPMModule, create_ddpm_dataloaders
-
-    module = DDPMModule(params)
-    dataloaders = create_ddpm_dataloaders(params)
-    return BuiltFramework(
-        params=params,
-        module=module,
-        train_loader=dataloaders["train"],
-        val_loader=dataloaders.get("val"),
-        sample_filename="ddpm_samples.npy",
-    )
-
-
-def build_reference_datasets(configs: SanitizedConfigBundle) -> dict[str, Dataset[Any]]:
-    """Build the validation/test reference datasets used by post-fit sample metrics."""
-    from utils.dataset import build_tif_dataset
-
-    datasets: dict[str, Dataset[Any]] = {}
-    for split in ("val", "test"):
-        split_dir = getattr(configs.data, f"{split}_dir")
-        sample_count = getattr(configs.data, f"samples_per_volume_{split}")
-        if split_dir is None or sample_count <= 0:
-            continue
-        datasets[split] = build_tif_dataset(_build_volume_dataset_params(configs, split))
-    return datasets
-
-
-def collect_reference_targets(configs: SanitizedConfigBundle) -> dict[str, torch.Tensor]:
-    """Collect post-fit reference volumes from the configured val/test splits."""
-    collected: dict[str, torch.Tensor] = {}
-    for split, dataset in build_reference_datasets(configs).items():
-        if len(dataset) == 0:
-            continue
-        collected[split] = torch.stack(
-            [dataset[index]["target"] for index in range(len(dataset))],
-            dim=0,
-        )
-    return collected
-
-
-def build_logger(wrapper_config: WrapperConfig) -> "Logger":
-    """Build the MLflow logger from validated wrapper config."""
+def _ref_is_ready(ref_str: str, objects: dict[str, Any]) -> bool:
+    """Check whether a runtime.X reference can be resolved given current objects."""
     try:
-        from pytorch_lightning.loggers import MLFlowLogger
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        raise ImportError(
-            "MLflow backend selected but `mlflow` is not installed. Install it with `uv add mlflow`."
-        ) from exc
-
-    logger_params = MLFlowLoggerParams.from_sources(wrapper_config.logging)
-    return MLFlowLogger(**logger_params.model_dump(mode="python"))
+        _resolve_ref(ref_str, objects)
+        return True
+    except (KeyError, AttributeError):
+        return False
 
 
-def build_callbacks(
-    wrapper_config: WrapperConfig,
-    *,
-    has_validation: bool,
-    artifact_manager: ArtifactManager,
-) -> list["Callback"]:
-    """Build callbacks from validated wrapper config and MLflow artifact paths."""
-    from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+def _substitute_refs(section: dict[str, Any], objects: dict[str, Any]) -> dict[str, Any]:
+    """Deep-walk a config section, replacing runtime.X strings with actual objects where available."""
 
-    monitor = wrapper_config.checkpoint.monitor
-    if not has_validation and monitor.startswith("val_"):
-        monitor = "train_loss"
+    def _walk(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: _walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_walk(item) for item in obj]
+        if _is_runtime_ref(obj) and _ref_is_ready(obj, objects):
+            return _resolve_ref(obj, objects)
+        return obj
 
-    callbacks: list[Callback] = [
-        LearningRateMonitor(logging_interval="epoch"),
-    ]
-
-    if wrapper_config.trainer.enable_checkpointing:
-        checkpoint_params = ModelCheckpointParams.from_sources(
-            wrapper_config.checkpoint,
-            dirpath=artifact_manager.checkpoint_dir,
-            monitor=monitor,
-        )
-        callbacks.insert(0, ModelCheckpoint(**checkpoint_params.model_dump(mode="python")))
-
-    gpu_callback = build_gpu_memory_callback(
-        enabled=wrapper_config.logging.gpu_memory_monitor.enabled,
-        log_frequency_mins=wrapper_config.logging.gpu_memory_monitor.log_frequency_mins,
-    )
-    if gpu_callback is not None:
-        callbacks.append(gpu_callback)
-
-    if has_validation and wrapper_config.early_stopping.enabled:
-        early_stopping_params = EarlyStoppingParams.from_sources(wrapper_config.early_stopping)
-        callbacks.append(EarlyStopping(**early_stopping_params.model_dump(mode="python")))
-
-    return callbacks
+    return _walk(section)
 
 
-def build_trainer(wrapper_config: WrapperConfig, logger: "Logger", callbacks: list["Callback"]) -> "L.Trainer":
-    """Build Lightning Trainer from validated wrapper config."""
-    import pytorch_lightning as L
+def _any_unresolved_refs(section: dict[str, Any]) -> bool:
+    """Check if a section still contains unresolved runtime.X references."""
 
-    trainer_kwargs = wrapper_config.trainer.model_dump(mode="python")
-    return L.Trainer(
-        logger=logger,
-        callbacks=callbacks,
-        **trainer_kwargs,
-    )
+    def _walk(obj: Any) -> bool:
+        if isinstance(obj, dict):
+            return any(_walk(v) for v in obj.values())
+        if isinstance(obj, list):
+            return any(_walk(item) for item in obj)
+        return _is_runtime_ref(obj)
 
+    return _walk(section)
+
+
+# ── Object builders (domain-dispatched) ──
+
+def _build_dataset(section: dict) -> Any:
+    from utils.sanitize.data_config import VolumeDatasetParams, build_dataset
+
+    params = VolumeDatasetParams.model_validate(section.get("params", {}))
+    return build_dataset(params)
+
+
+def _build_dataloader(section: dict) -> Any:
+    from utils.sanitize.data_config import DataLoaderParams, build_dataloader
+
+    dataset = section.get("dataset")
+    if dataset is None:
+        raise ValueError("dataloader section requires 'dataset' field (may be runtime.X ref)")
+    params = DataLoaderParams.model_validate(section)
+    return build_dataloader(dataset, params)
+
+
+def _build_model(section: dict) -> Any:
+    from utils.sanitize.model_config import build_model
+
+    return build_model(section)
+
+
+def _build_framework(section: dict) -> Any:
+    from utils.sanitize.framework_config import build_framework_module
+
+    return build_framework_module(section)
+
+
+def _build_logger(section: dict) -> Any:
+    from utils.sanitize.wrapper_config import build_logger
+
+    return build_logger(section)
+
+
+def _build_trainer_from_section(section: dict, logger, callbacks: list) -> Any:
+    from utils.sanitize.wrapper_config import build_trainer
+
+    return build_trainer(section, logger=logger, callbacks=callbacks)
+
+
+def _build_checkpoint_cb(section: dict, dirpath: Path, monitor_override: str | None = None):
+    from utils.sanitize.wrapper_config import build_checkpoint_callback
+
+    return build_checkpoint_callback(section, dirpath=dirpath, monitor_override=monitor_override)
+
+
+def _build_early_stopping_cb(section: dict):
+    from utils.sanitize.wrapper_config import build_early_stopping
+
+    return build_early_stopping(section)
+
+
+# ── Build item descriptor ──
+
+@dataclass
+class _BuildItem:
+    key: str
+    section: dict
+    builder: Callable[[dict], Any]
+    dependencies: list[str]  # runtime reference paths this item needs
+
+
+# ── Blind-iteration compiler ──
+
+def _collect_build_items(config: dict[str, Any]) -> list[_BuildItem]:
+    """Scan the merged config and create a build item for each runtime-object section."""
+    items: list[_BuildItem] = []
+
+    # Datasets
+    for key in ("train_dataset", "val_dataset", "test_dataset"):
+        if key in config:
+            section = config[key]
+            deps = _collect_runtime_deps(section)
+            items.append(_BuildItem(key, section, _build_dataset, deps))
+
+    # Model
+    if "model" in config:
+        section = config["model"]
+        deps = _collect_runtime_deps(section)
+        items.append(_BuildItem("model", section, _build_model, deps))
+
+    # Framework
+    if "framework" in config:
+        section = config["framework"]
+        deps = _collect_runtime_deps(section)
+        items.append(_BuildItem("framework", section, _build_framework, deps))
+
+    # Dataloaders
+    for key in ("train_dataloader", "val_dataloader"):
+        if key in config:
+            section = config[key]
+            # The dataloader's dataset ref is its dependency
+            dataset_ref = section.get("dataset")
+            deps = []
+            if _is_runtime_ref(dataset_ref):
+                deps.append(_extract_ref_path(dataset_ref))
+            items.append(_BuildItem(key, section, _build_dataloader, deps))
+
+    return items
+
+
+def _collect_runtime_deps(section: dict[str, Any]) -> list[str]:
+    """Collect all runtime.X reference paths from a config section."""
+
+    deps: list[str] = []
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+        elif _is_runtime_ref(obj):
+            deps.append(_extract_ref_path(obj))
+
+    _walk(section)
+    return deps
+
+
+def _blind_iterate_build(items: list[_BuildItem]) -> dict[str, Any]:
+    """Build objects by blind iteration.
+
+    Each pass tries to build every pending item. If an item's runtime.X
+    dependencies aren't all in `objects` yet, skip it. Repeat until all
+    items are built or no forward progress is made in a full pass.
+    """
+    objects: dict[str, Any] = {}
+    pending = list(items)
+    stuck = False
+
+    while pending:
+        still_pending: list[_BuildItem] = []
+        made_progress = False
+
+        for item in pending:
+            # Check if all dependencies are satisfied
+            deps_ready = all(
+                any(dep == key or dep.startswith(key + ".") for key in objects)
+                for dep in item.dependencies
+            )
+            if not deps_ready:
+                still_pending.append(item)
+                continue
+
+            # Substitute any runtime refs that are ready, then build
+            resolved_section = _substitute_refs(item.section, objects)
+
+            if _any_unresolved_refs(resolved_section):
+                # Some refs still not ready — keep pending, try again next pass
+                still_pending.append(item)
+                continue
+
+            built = item.builder(resolved_section)
+            objects[item.key] = built
+            made_progress = True
+
+        if not made_progress:
+            if stuck:
+                pending_names = [item.key for item in still_pending]
+                raise RuntimeError(
+                    f"Cannot resolve dependencies for: {pending_names}. "
+                    f"Built objects: {list(objects.keys())}. "
+                    f"Check for missing or circular runtime.X references."
+                )
+            stuck = True
+
+        pending = still_pending
+
+    return objects
+
+
+# ── Top-level compiler ──
 
 def set_global_seed(seed: int) -> None:
-    """Seed Lightning and the underlying PyTorch runtime."""
     import pytorch_lightning as L
 
     L.seed_everything(seed)
@@ -518,29 +390,90 @@ def set_global_seed(seed: int) -> None:
 
 def build_training_runtime(
     *,
-    configs: SanitizedConfigBundle,
+    merged_config: dict[str, Any],
     paths: ConfigPaths,
 ) -> TrainingRuntime:
-    """Build the concrete runtime objects used by the driver."""
-    runtime_config = compose_runtime_config(configs)
-    set_global_seed(configs.wrapper.seed)
-    align_torch_cuda_runtime(configs.wrapper.trainer.accelerator)
-    framework = build_framework_runtime(configs)
-    logger = build_logger(configs.wrapper)
-    logger.log_hyperparams(flatten_for_logging(runtime_config))
-    artifact_manager = prepare_train_artifacts(logger)
-    artifact_manager.write_yaml_artifact(runtime_config, "configs/runtime_config.yaml")
-    callbacks = build_callbacks(
-        configs.wrapper,
-        has_validation=(framework.val_loader is not None),
-        artifact_manager=artifact_manager,
-    )
-    trainer = build_trainer(configs.wrapper, logger=logger, callbacks=callbacks)
+    """Mechanically compile a merged config dict into runtime objects.
+
+    Steps:
+    1. Collect all build items with their runtime.X dependencies
+    2. Blind-iterate: build objects whose deps are ready, repeat until done
+    3. Wire up logger, callbacks, and trainer
+    """
+    from utils.sanitize.wrapper_config import align_torch_cuda_runtime, resolve_accelerator
+
+    # Step 1: Collect build items
+    items = _collect_build_items(merged_config)
+
+    # Step 2: Blind-iterate build
+    objects = _blind_iterate_build(items)
+
+    # Step 3: Logger
+    logger = None
+    if "logging" in merged_config:
+        logger = _build_logger(merged_config["logging"])
+
+    # Seed
+    seed = merged_config.get("seed", 42)
+    set_global_seed(seed)
+
+    # Align CUDA
+    trainer_section = merged_config.get("trainer", {})
+    accelerator = trainer_section.get("params", {}).get("accelerator", "auto")
+    accelerator = resolve_accelerator(accelerator)
+    align_torch_cuda_runtime(accelerator)
+
+    # Artifacts
+    artifact_manager = None
+    if logger is not None:
+        logger.log_hyperparams(merged_config)
+        artifact_manager = prepare_train_artifacts(logger)
+
+    # Callbacks
+    callbacks = []
+    from pytorch_lightning.callbacks import LearningRateMonitor
+
+    callbacks.append(LearningRateMonitor(logging_interval="epoch"))
+
+    has_validation = "val_dataloader" in objects and objects["val_dataloader"] is not None
+
+    if "checkpoint" in merged_config and trainer_section.get("params", {}).get("enable_checkpointing", True):
+        monitor = merged_config["checkpoint"].get("params", {}).get("monitor", "val_loss")
+        if not has_validation and monitor.startswith("val_"):
+            monitor = "train_loss"
+        if artifact_manager is not None:
+            ckpt_cb = _build_checkpoint_cb(
+                merged_config["checkpoint"],
+                dirpath=artifact_manager.checkpoint_dir,
+                monitor_override=monitor,
+            )
+            callbacks.insert(0, ckpt_cb)
+
+    # GPU memory monitor
+    logging_section = merged_config.get("logging", {})
+    gpu_monitor = logging_section.get("params", {}).get("gpu_memory_monitor", {})
+    if isinstance(gpu_monitor, dict):
+        gpu_cb = build_gpu_memory_callback(
+            enabled=gpu_monitor.get("enabled", False),
+            log_frequency_mins=gpu_monitor.get("log_frequency_mins", 1.0),
+        )
+        if gpu_cb is not None:
+            callbacks.append(gpu_cb)
+
+    if has_validation and "early_stopping" in merged_config:
+        es_cb = _build_early_stopping_cb(merged_config["early_stopping"])
+        if es_cb is not None:
+            callbacks.append(es_cb)
+
+    # Trainer
+    trainer = None
+    if "trainer" in merged_config:
+        trainer = _build_trainer_from_section(merged_config["trainer"], logger=logger, callbacks=callbacks)
+
     return TrainingRuntime(
         paths=paths,
-        configs=configs,
-        runtime_config=runtime_config,
-        framework=framework,
+        runtime_config=merged_config,
+        objects=objects,
         logger=logger,
         artifact_manager=artifact_manager,
         callbacks=callbacks,
@@ -555,17 +488,11 @@ def build_training_runtime_from_files(
     framework_config_path: str | Path,
     wrapper_config_path: str | Path,
 ) -> TrainingRuntime:
-    """Load, sanitize, and build the full training runtime from split config files."""
-    paths, data_config, model_config, framework_config, wrapper_config = load_split_configs(
+    """Load 4 split YAML configs, deep-merge, and compile the training runtime."""
+    paths, merged_config = load_split_configs(
         data_config_path=data_config_path,
         model_config_path=model_config_path,
         framework_config_path=framework_config_path,
         wrapper_config_path=wrapper_config_path,
     )
-    configs = sanitize_split_configs(
-        data_config=data_config,
-        model_config=model_config,
-        framework_config=framework_config,
-        wrapper_config=wrapper_config,
-    )
-    return build_training_runtime(configs=configs, paths=paths)
+    return build_training_runtime(merged_config=merged_config, paths=paths)
