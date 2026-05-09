@@ -53,6 +53,8 @@ Every runtime-object section uses the `class_name` + `params` pattern:
   — no intermediate config model changes needed.
 - Sections that always produce the same class (e.g. `train_dataloader`) may omit
   `class_name`; the domain sanitize file supplies the default.
+- Dataloader sections (`train_dataloader`, `val_dataloader`) use a flat key
+  structure — all keys are direct `DataLoader` constructor arguments.
 - `runtime.X` dot-notation values denote cross-references resolved during object
   building (e.g. `model: runtime.model` in framework params, `dataset: runtime.train_dataset`
   in dataloader params).
@@ -103,8 +105,23 @@ framework:
   params:
     model: runtime.model
     learning_rate: 0.0001
+    weight_decay: 0.0001
     loss_type: mse
-    num_train_timesteps: 32
+    sample_steps: 4
+    diffusion:
+      num_train_timesteps: 32
+      beta_schedule: linear
+      beta_start: 0.0001
+      beta_end: 0.02
+      prediction_type: epsilon
+
+# Or for rectified flow:
+# framework:
+#   class_name: RectifiedFlowModule
+#   params:
+#     model: runtime.model
+#     learning_rate: 0.0001
+#     ...
 ```
 
 wrapper config:
@@ -128,7 +145,7 @@ logging:
 ## Canonical Training Flow
 
 1. Read the 4 split configs in `driver.py`.
-2. Load and deep-merge all four YAML sections in `runtime_factory.py`.
+2. Load the four YAML configs, resolve `import_config` inheritance, and deep-merge them into a single configuration dictionary in `runtime_factory.py`.
 3. Validate each section's `params` with its domain Pydantic model.
 4. Mechanically compile objects: resolve `class_name` → import class → `cls(**validated_params)`.
 5. Resolve `runtime.X` cross-references by blind iteration until all objects built.
@@ -155,7 +172,6 @@ GPU availability: `bash ~/.claude/skills/use-gpu/scripts/gpu_check.sh`
 - Model backbone: `modules/dit3d.py`
 - Training modules: `modules/rect_flow.py`, `modules/ddpm.py`
 - Driver config loading and runtime orchestration: `driver.py`
-- Runtime builders: `utils/sanitize/runtime_factory.py`
 - Config schema and builders: `utils/sanitize/data_config.py`, `utils/sanitize/model_config.py`, `utils/sanitize/framework_config.py`, `utils/sanitize/wrapper_config.py`
 - Param base class: `utils/sanitize/param_class.py`
 - Runtime compiler: `utils/sanitize/runtime_factory.py`
