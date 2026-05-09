@@ -11,7 +11,6 @@ from typing import Any, Callable
 import yaml
 
 from utils.display.log_artifact import ArtifactManager, prepare_train_artifacts
-from utils.display.log_gpu import build_gpu_memory_callback
 from utils.path_io import resolve_import_path, to_abs_path
 
 _RUNTIME_REF_PATTERN = re.compile(r"^runtime\.(.+)$")
@@ -205,59 +204,34 @@ def _any_unresolved_refs(section: dict[str, Any]) -> bool:
     return _walk(section)
 
 
-# ── Object builders (domain-dispatched) ──
+# ── Builder registry ──
+# Maps merged-config keys to domain build functions.
+# Every builder has signature: (resolved_section: dict) -> object
+# Add new module types here — no other changes needed.
 
-def _build_dataset(section: dict) -> Any:
-    from utils.sanitize.data_config import VolumeDatasetParams, build_dataset
+from utils.sanitize.data_config import build_dataset, build_dataloader
+from utils.sanitize.framework_config import build_framework_module
+from utils.sanitize.model_config import build_model
+from utils.sanitize.wrapper_config import (
+    build_checkpoint_callback,
+    build_early_stopping,
+    build_logger,
+    build_trainer,
+)
 
-    params = VolumeDatasetParams.model_validate(section.get("params", {}))
-    return build_dataset(params)
-
-
-def _build_dataloader(section: dict) -> Any:
-    from utils.sanitize.data_config import DataLoaderParams, build_dataloader
-
-    dataset = section.get("dataset")
-    if dataset is None:
-        raise ValueError("dataloader section requires 'dataset' field (may be runtime.X ref)")
-    params = DataLoaderParams.model_validate(section)
-    return build_dataloader(dataset, params)
-
-
-def _build_model(section: dict) -> Any:
-    from utils.sanitize.model_config import build_model
-
-    return build_model(section)
-
-
-def _build_framework(section: dict) -> Any:
-    from utils.sanitize.framework_config import build_framework_module
-
-    return build_framework_module(section)
-
-
-def _build_logger(section: dict) -> Any:
-    from utils.sanitize.wrapper_config import build_logger
-
-    return build_logger(section)
-
-
-def _build_trainer_from_section(section: dict, logger, callbacks: list) -> Any:
-    from utils.sanitize.wrapper_config import build_trainer
-
-    return build_trainer(section, logger=logger, callbacks=callbacks)
-
-
-def _build_checkpoint_cb(section: dict, dirpath: Path, monitor_override: str | None = None):
-    from utils.sanitize.wrapper_config import build_checkpoint_callback
-
-    return build_checkpoint_callback(section, dirpath=dirpath, monitor_override=monitor_override)
-
-
-def _build_early_stopping_cb(section: dict):
-    from utils.sanitize.wrapper_config import build_early_stopping
-
-    return build_early_stopping(section)
+_BUILDERS: dict[str, Callable[[dict], Any]] = {
+    "train_dataset": build_dataset,
+    "val_dataset": build_dataset,
+    "test_dataset": build_dataset,
+    "model": build_model,
+    "framework": build_framework_module,
+    "train_dataloader": build_dataloader,
+    "val_dataloader": build_dataloader,
+    "logging": build_logger,
+    "trainer": build_trainer,
+    "checkpoint": build_checkpoint_callback,
+    "early_stopping": build_early_stopping,
+}
 
 
 # ── Build item descriptor ──
@@ -267,45 +241,25 @@ class _BuildItem:
     key: str
     section: dict
     builder: Callable[[dict], Any]
-    dependencies: list[str]  # runtime reference paths this item needs
+    dependencies: list[str]
 
 
 # ── Blind-iteration compiler ──
 
 def _collect_build_items(config: dict[str, Any]) -> list[_BuildItem]:
-    """Scan the merged config and create a build item for each runtime-object section."""
+    """Scan the merged config and create a build item for each registered key.
+
+    No if-branches, no special-casing. Every key in `_BUILDERS` that appears
+    in the config gets a build item. Dependencies are discovered automatically
+    by walking the section for `runtime.X` references.
+    """
     items: list[_BuildItem] = []
-
-    # Datasets
-    for key in ("train_dataset", "val_dataset", "test_dataset"):
-        if key in config:
-            section = config[key]
-            deps = _collect_runtime_deps(section)
-            items.append(_BuildItem(key, section, _build_dataset, deps))
-
-    # Model
-    if "model" in config:
-        section = config["model"]
+    for key, builder in _BUILDERS.items():
+        if key not in config:
+            continue
+        section = config[key]
         deps = _collect_runtime_deps(section)
-        items.append(_BuildItem("model", section, _build_model, deps))
-
-    # Framework
-    if "framework" in config:
-        section = config["framework"]
-        deps = _collect_runtime_deps(section)
-        items.append(_BuildItem("framework", section, _build_framework, deps))
-
-    # Dataloaders
-    for key in ("train_dataloader", "val_dataloader"):
-        if key in config:
-            section = config[key]
-            # The dataloader's dataset ref is its dependency
-            dataset_ref = section.get("dataset")
-            deps = []
-            if _is_runtime_ref(dataset_ref):
-                deps.append(_extract_ref_path(dataset_ref))
-            items.append(_BuildItem(key, section, _build_dataloader, deps))
-
+        items.append(_BuildItem(key, section, builder, deps))
     return items
 
 
@@ -395,23 +349,14 @@ def build_training_runtime(
 ) -> TrainingRuntime:
     """Mechanically compile a merged config dict into runtime objects.
 
-    Steps:
-    1. Collect all build items with their runtime.X dependencies
+    1. Collect build items from `_BUILDERS` registry
     2. Blind-iterate: build objects whose deps are ready, repeat until done
-    3. Wire up logger, callbacks, and trainer
+    3. Seed, align CUDA, wire GPU monitor, return TrainingRuntime
     """
     from utils.sanitize.wrapper_config import align_torch_cuda_runtime, resolve_accelerator
 
-    # Step 1: Collect build items
     items = _collect_build_items(merged_config)
-
-    # Step 2: Blind-iterate build
     objects = _blind_iterate_build(items)
-
-    # Step 3: Logger
-    logger = None
-    if "logging" in merged_config:
-        logger = _build_logger(merged_config["logging"])
 
     # Seed
     seed = merged_config.get("seed", 42)
@@ -423,52 +368,29 @@ def build_training_runtime(
     accelerator = resolve_accelerator(accelerator)
     align_torch_cuda_runtime(accelerator)
 
-    # Artifacts
+    # Artifact manager (derived from logger, available for runtime.X refs)
+    logger = objects.get("logging")
     artifact_manager = None
     if logger is not None:
         logger.log_hyperparams(merged_config)
         artifact_manager = prepare_train_artifacts(logger)
 
-    # Callbacks
-    callbacks = []
-    from pytorch_lightning.callbacks import LearningRateMonitor
-
-    callbacks.append(LearningRateMonitor(logging_interval="epoch"))
-
-    has_validation = "val_dataloader" in objects and objects["val_dataloader"] is not None
-
-    if "checkpoint" in merged_config and trainer_section.get("params", {}).get("enable_checkpointing", True):
-        monitor = merged_config["checkpoint"].get("params", {}).get("monitor", "val_loss")
-        if not has_validation and monitor.startswith("val_"):
-            monitor = "train_loss"
-        if artifact_manager is not None:
-            ckpt_cb = _build_checkpoint_cb(
-                merged_config["checkpoint"],
-                dirpath=artifact_manager.checkpoint_dir,
-                monitor_override=monitor,
-            )
-            callbacks.insert(0, ckpt_cb)
-
-    # GPU memory monitor
+    # GPU memory monitor (flat dict in logging.params, not an inline spec)
     logging_section = merged_config.get("logging", {})
     gpu_monitor = logging_section.get("params", {}).get("gpu_memory_monitor", {})
-    if isinstance(gpu_monitor, dict):
+    if isinstance(gpu_monitor, dict) and gpu_monitor.get("enabled"):
+        from utils.display.log_gpu import build_gpu_memory_callback
+
         gpu_cb = build_gpu_memory_callback(
-            enabled=gpu_monitor.get("enabled", False),
+            enabled=True,
             log_frequency_mins=gpu_monitor.get("log_frequency_mins", 1.0),
         )
-        if gpu_cb is not None:
-            callbacks.append(gpu_cb)
+        if gpu_cb is not None and objects.get("trainer") is not None:
+            objects["trainer"].callbacks.append(gpu_cb)
 
-    if has_validation and "early_stopping" in merged_config:
-        es_cb = _build_early_stopping_cb(merged_config["early_stopping"])
-        if es_cb is not None:
-            callbacks.append(es_cb)
-
-    # Trainer
-    trainer = None
-    if "trainer" in merged_config:
-        trainer = _build_trainer_from_section(merged_config["trainer"], logger=logger, callbacks=callbacks)
+    # Extract callbacks from trainer for TrainingRuntime convenience field
+    trainer = objects.get("trainer")
+    callbacks = trainer.callbacks if trainer is not None else []
 
     return TrainingRuntime(
         paths=paths,
