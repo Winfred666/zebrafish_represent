@@ -79,15 +79,28 @@ class DataLoaderParams(IngestibleParams):
     persistent_workers: bool = False
 
 
-def build_dataset(params: VolumeDatasetParams) -> Dataset:
-    """Build a TIF dataset from validated params."""
+def build_dataset(section: dict) -> Dataset:
+    """Build a TIF dataset from a resolved config section.
+
+    The section must have `params` containing VolumeDatasetParams fields.
+    """
     from utils.dataset import build_tif_dataset
 
+    params = VolumeDatasetParams.model_validate(section.get("params", {}))
     return build_tif_dataset(params)
 
 
-def build_dataloader(dataset: Dataset, params: DataLoaderParams) -> DataLoader:
-    """Build a DataLoader from a dataset and validated params."""
+def build_dataloader(section: dict) -> DataLoader:
+    """Build a DataLoader from a resolved config section.
+
+    `section["dataset"]` must be the already-resolved dataset object
+    (substituted from `runtime.X` by the blind-iteration compiler).
+    Other fields are validated as DataLoaderParams.
+    """
+    dataset = section["dataset"]
+    if dataset is None:
+        raise ValueError("dataloader section requires resolved 'dataset' field")
+    params = DataLoaderParams.model_validate(section)
     return DataLoader(
         dataset,
         batch_size=params.batch_size,

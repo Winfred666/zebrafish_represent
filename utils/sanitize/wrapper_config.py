@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from pydantic import Field, field_validator
@@ -75,6 +75,7 @@ class ModelCheckpointParams(IngestibleParams):
 
     model_config = {"frozen": True}
 
+    dirpath: str | None = None
     monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     save_top_k: int = 1
@@ -108,6 +109,72 @@ class EarlyStoppingParams(IngestibleParams):
         return _validate_logged_name(value, "early_stopping.monitor")
 
 
+class LearningRateMonitorParams(IngestibleParams):
+    """Params for LearningRateMonitor callback."""
+
+    model_config = {"frozen": True}
+
+    logging_interval: Literal["epoch", "step"] = "epoch"
+
+
+# ---- Inline spec resolver ----
+
+_CALLBACK_REGISTRY: dict[str, tuple[type, type[IngestibleParams]]] = {
+    "ModelCheckpoint": (None, ModelCheckpointParams),
+    "EarlyStopping": (None, EarlyStoppingParams),
+    "LearningRateMonitor": (None, LearningRateMonitorParams),
+}
+
+
+def _resolve_callback_class(class_name: str):
+    """Lazily import and return a callback class by name."""
+    from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+
+    cls_map = {
+        "ModelCheckpoint": ModelCheckpoint,
+        "EarlyStopping": EarlyStopping,
+        "LearningRateMonitor": LearningRateMonitor,
+    }
+    return cls_map[class_name]
+
+
+def _build_from_spec(spec: dict, registry: dict) -> Any:
+    """Build an object from a `{class_name, params}` spec dict using the given registry.
+
+    Registry maps class_name -> (cls_or_None, param_cls).
+    """
+    class_name = spec.get("class_name")
+    if class_name is None:
+        raise ValueError(f"Inline spec missing 'class_name': {spec}")
+
+    entry = registry.get(class_name)
+    if entry is None:
+        raise ValueError(f"Unknown class_name={class_name!r} in registry. Known: {list(registry)}")
+
+    cls, param_cls = entry
+    if cls is None:
+        cls = _resolve_callback_class(class_name)
+
+    params = param_cls.model_validate(spec.get("params", {}))
+    kwargs = params.model_dump(mode="python")
+    kwargs.pop("class_name", None)
+    return cls(**kwargs)
+
+
+def _resolve_param_value(value: Any, registry: dict) -> Any:
+    """Resolve a single param value.
+
+    If it's an inline `{class_name, params}` dict, build it.
+    If it's a list, resolve each element.
+    Otherwise return as-is (already resolved object from runtime.X substitution).
+    """
+    if isinstance(value, list):
+        return [_resolve_param_value(item, registry) for item in value]
+    if isinstance(value, dict) and "class_name" in value:
+        return _build_from_spec(value, registry)
+    return value
+
+
 class TrainerParams(IngestibleParams):
     """Params for Lightning Trainer."""
 
@@ -139,31 +206,35 @@ class TestingParams(IngestibleParams):
 
 # ---- Builders ----
 
-def build_logger(config: dict):
-    """Build MLflow logger from config dict."""
+def build_logger(section: dict):
+    """Build MLflow logger from a resolved config section."""
     from pytorch_lightning.loggers import MLFlowLogger
 
-    params = MLFlowLoggerParams.model_validate(config.get("params", {}))
+    params = MLFlowLoggerParams.model_validate(section.get("params", {}))
     return MLFlowLogger(**params.model_dump(mode="python"))
 
 
-def build_checkpoint_callback(config: dict, dirpath: Path, monitor_override: str | None = None):
-    """Build ModelCheckpoint from config dict."""
+def build_checkpoint_callback(section: dict):
+    """Build ModelCheckpoint from a resolved config section.
+
+    `section["params"]["dirpath"]` may be a `runtime.X` reference already
+    resolved to a Path object by the compiler.
+    """
     from pytorch_lightning.callbacks import ModelCheckpoint
 
-    params = ModelCheckpointParams.model_validate(config.get("params", {}))
+    params = ModelCheckpointParams.model_validate(section.get("params", {}))
     kwargs = params.model_dump(mode="python")
-    kwargs["dirpath"] = dirpath
-    if monitor_override is not None:
-        kwargs["monitor"] = monitor_override
     return ModelCheckpoint(**kwargs)
 
 
-def build_early_stopping(config: dict):
-    """Build EarlyStopping callback from config dict. Returns None if disabled."""
+def build_early_stopping(section: dict):
+    """Build EarlyStopping callback from a resolved config section.
+
+    Returns None if `params.enabled` is False.
+    """
     from pytorch_lightning.callbacks import EarlyStopping
 
-    params = EarlyStoppingParams.model_validate(config.get("params", {}))
+    params = EarlyStoppingParams.model_validate(section.get("params", {}))
     if not params.enabled:
         return None
     kwargs = params.model_dump(mode="python")
@@ -171,12 +242,29 @@ def build_early_stopping(config: dict):
     return EarlyStopping(**kwargs)
 
 
-def build_trainer(config: dict, logger, callbacks: list):
-    """Build Lightning Trainer from config dict."""
+def build_trainer(section: dict):
+    """Build Lightning Trainer from a resolved config section.
+
+    `section["params"]["callbacks"]` is a list that may contain:
+    - Already-resolved callback objects (from `runtime.X` refs)
+    - Inline `{class_name, params}` dicts to be built on the spot
+    """
     import pytorch_lightning as L
 
-    raw_params = dict(config.get("params", {}))
+    raw_params = dict(section.get("params", {}))
+
+    # Resolve callbacks list — build inline specs, pass through resolved objects
+    raw_callbacks = raw_params.pop("callbacks", [])
+    callbacks = _resolve_param_value(raw_callbacks, _CALLBACK_REGISTRY)
+    # Filter out None (e.g. disabled EarlyStopping)
+    callbacks = [cb for cb in callbacks if cb is not None]
+
+    # Resolve logger
+    logger = raw_params.pop("logger", None)
+
+    # Resolve accelerator policy
     raw_params["accelerator"] = resolve_accelerator(raw_params.get("accelerator", "auto"))
+
     params = TrainerParams.model_validate(raw_params)
     return L.Trainer(
         logger=logger,
