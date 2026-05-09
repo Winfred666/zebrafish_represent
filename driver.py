@@ -13,14 +13,10 @@ sys.path.append(str(Path(__file__).parent))
 
 from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.path_io import load_dotenv
-from utils.sanitize.runtime_factory import (
-    build_training_runtime_from_files,
-    collect_reference_targets,
-)
+from utils.sanitize.runtime_factory import build_training_runtime_from_files
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the split config CLI."""
     parser = argparse.ArgumentParser(description="Train 3D generative framework on zebrafish volumes")
     parser.add_argument("--data-config", type=str, required=True, help="Path to data config YAML file")
     parser.add_argument("--model-config", type=str, required=True, help="Path to model config YAML file")
@@ -29,15 +25,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _collect_reference_targets(runtime) -> dict[str, torch.Tensor]:
+    """Collect reference volumes from val/test datasets for quality metrics."""
+    collected: dict[str, torch.Tensor] = {}
+    for split in ("val", "test"):
+        dataset = runtime.objects.get(f"{split}_dataset")
+        if dataset is None or len(dataset) == 0:
+            continue
+        collected[split] = torch.stack(
+            [dataset[index]["target"] for index in range(len(dataset))],
+            dim=0,
+        )
+    return collected
+
+
 def _log_postfit_sample_metrics(
     *,
     runtime,
     sample_tensor: torch.Tensor,
+    reference_targets: dict[str, torch.Tensor],
 ) -> None:
     sample_array = sample_tensor.detach().cpu().numpy()
     sample_path = runtime.artifact_manager.write_numpy_artifact(
         sample_array,
-        f"samples/{runtime.framework.sample_filename}",
+        "samples/generated_samples.npy",
     )
     print(f"Saved generated samples to: {sample_path}")
 
@@ -51,7 +62,6 @@ def _log_postfit_sample_metrics(
         "sample_summary": metrics_to_log.copy(),
     }
 
-    reference_targets = collect_reference_targets(runtime.configs)
     if reference_targets:
         combined_reference = torch.cat(list(reference_targets.values()), dim=0)
         quality_metrics = compute_sample_quality_metrics(sample_tensor.detach().cpu(), combined_reference)
@@ -79,7 +89,7 @@ def train(
     framework_config_path: str,
     wrapper_config_path: str,
 ) -> None:
-    """Train the configured framework from the four split config files."""
+    """Train from 4 split config files."""
     load_dotenv(".env")
     runtime = build_training_runtime_from_files(
         data_config_path=data_config_path,
@@ -88,53 +98,58 @@ def train(
         wrapper_config_path=wrapper_config_path,
     )
 
+    config = runtime.runtime_config
+
     print("Configuration loaded")
     print(f"  data_config: {runtime.paths.data}")
     print(f"  model_config: {runtime.paths.model}")
     print(f"  framework_config: {runtime.paths.framework}")
     print(f"  wrapper_config: {runtime.paths.wrapper}")
-    print(f"  tracking_uri: {runtime.configs.wrapper.logging.tracking_uri}")
-    print(f"  framework: {runtime.configs.framework.framework}")
-    print(f"  backbone: {runtime.configs.model.backbone}")
-    print(f"  dataset_kind: {runtime.configs.data.dataset_kind}")
-    print(f"  accelerator: {runtime.configs.wrapper.trainer.accelerator}")
-    print(f"[MLFLOW] artifact_root={runtime.artifact_manager.root_dir}")
-    print(f"[MLFLOW] checkpoint_dir={runtime.artifact_manager.checkpoint_dir}")
+    print(f"  framework: {config.get('framework', {}).get('class_name', 'unknown')}")
+    print(f"  backbone: {config.get('model', {}).get('class_name', 'unknown')}")
+    print(f"  dataset: {config.get('train_dataset', {}).get('class_name', 'unknown')}")
+    print(f"  accelerator: {config.get('trainer', {}).get('params', {}).get('accelerator', 'unknown')}")
+
+    if runtime.logger is not None:
+        print(f"[MLFLOW] artifact_root={runtime.artifact_manager.root_dir}")
+        print(f"[MLFLOW] checkpoint_dir={runtime.artifact_manager.checkpoint_dir}")
 
     print("\nTraining configuration:")
-    print(f"  Framework: {runtime.configs.framework.framework}")
+    print(f"  Framework: {config.get('framework', {}).get('class_name', 'unknown')}")
     print(f"  Max epochs: {runtime.trainer.max_epochs}")
-    print(f"  Learning rate: {runtime.configs.framework.learning_rate}")
-    print(f"  Batch size: {runtime.configs.data.batch_size}")
-    print(f"  Crop size: {runtime.configs.data.crop_size}")
-    print(f"  Output patch size: {runtime.configs.model.patch_size}")
-    print(f"  Tokenizer kind: {runtime.configs.model.tokenizer.kind}")
-    print(f"  Tokenizer patch size: {runtime.configs.model.tokenizer.patch_size}")
-    print(f"  Tokenizer stride: {runtime.configs.model.tokenizer.stride}")
+    print(f"  Learning rate: {config.get('framework', {}).get('params', {}).get('learning_rate', 'unknown')}")
+    print(f"  Batch size: {config.get('train_dataloader', {}).get('batch_size', 'unknown')}")
     print(f"  Accelerator: {runtime.trainer.accelerator}")
     print(f"  Devices: {runtime.trainer.num_devices}")
-    print(f"  Precision: {runtime.configs.wrapper.trainer.precision}")
-    print(f"  Model parameters: {runtime.framework.module.model.get_num_params():,}")
 
-    resume_ckpt = runtime.configs.wrapper.resume_ckpt_path
+    framework_module = runtime.objects["framework"]
+    print(f"  Model parameters: {framework_module.model.get_num_params():,}")
+
+    resume_ckpt = config.get("resume_ckpt_path")
     if resume_ckpt:
         print(f"Resuming full trainer state from checkpoint: {resume_ckpt}")
 
     runtime.trainer.fit(
-        runtime.framework.module,
-        train_dataloaders=runtime.framework.train_loader,
-        val_dataloaders=runtime.framework.val_loader,
+        framework_module,
+        train_dataloaders=runtime.train_loader,
+        val_dataloaders=runtime.val_loader,
         ckpt_path=resume_ckpt,
     )
 
     print("\nTraining complete")
 
-    if runtime.configs.wrapper.testing.run_sampling_after_fit:
-        samples = runtime.framework.module.sample(
-            batch_size=runtime.configs.wrapper.testing.num_samples,
-            steps=runtime.configs.wrapper.testing.sample_steps,
+    testing_section = config.get("testing", {})
+    if testing_section.get("run_sampling_after_fit", True):
+        samples = framework_module.sample(
+            batch_size=testing_section.get("num_samples", 1),
+            steps=testing_section.get("sample_steps", 4),
         )
-        _log_postfit_sample_metrics(runtime=runtime, sample_tensor=samples)
+        reference_targets = _collect_reference_targets(runtime)
+        _log_postfit_sample_metrics(
+            runtime=runtime,
+            sample_tensor=samples,
+            reference_targets=reference_targets,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
