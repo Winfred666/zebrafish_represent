@@ -1,16 +1,14 @@
+import_config: base.yaml
+
 train_dataset:
   class_name: TifVolumePatchDataset
   params:
     data_dir: data/raw/sample_sm/train
     crop_size: [32, 32, 32]
     samples_per_volume: 32
-    max_files: null
     scale_factor: [0.125, 0.125, 0.125]
-    normalize: true
-    clip_percentile: [1.0, 99.0]
 
 train_dataloader:
-  dataset: runtime.train_dataset
   batch_size: 1024
   num_workers: 8
   shuffle: true
@@ -21,13 +19,9 @@ val_dataset:
     data_dir: data/raw/sample_sm/val
     crop_size: [32, 32, 32]
     samples_per_volume: 0
-    max_files: null
     scale_factor: [0.125, 0.125, 0.125]
-    normalize: true
-    clip_percentile: [1.0, 99.0]
 
 val_dataloader:
-  dataset: runtime.val_dataset
   batch_size: 1024
   num_workers: 2
   shuffle: false

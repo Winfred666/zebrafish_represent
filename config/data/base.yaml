@@ -1,0 +1,33 @@
+train_dataset:
+  class_name: TifVolumeDataset
+  params:
+    crop_size: [32, 64, 64]
+    samples_per_volume: 32
+    max_files: null
+    scale_factor: [0.5, 0.5, 0.5]
+    normalize: true
+    clip_percentile: [1.0, 99.0]
+    pad_to_multiple: null
+
+train_dataloader:
+  dataset: runtime.train_dataset
+  batch_size: 2
+  num_workers: 4
+  shuffle: true
+
+val_dataset:
+  class_name: TifVolumeDataset
+  params:
+    crop_size: [32, 64, 64]
+    samples_per_volume: 8
+    max_files: null
+    scale_factor: [0.5, 0.5, 0.5]
+    normalize: true
+    clip_percentile: [1.0, 99.0]
+    pad_to_multiple: null
+
+val_dataloader:
+  dataset: runtime.val_dataset
+  batch_size: 2
+  num_workers: 2
+  shuffle: false

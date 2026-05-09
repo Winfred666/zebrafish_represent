@@ -1,3 +1,5 @@
+import_config: base.yaml
+
 train_dataset:
   class_name: TifVolumePatchDataset
   params:
@@ -6,7 +8,6 @@ train_dataset:
     max_files: 1
 
 train_dataloader:
-  dataset: runtime.train_dataset
   shuffle: true
 
 val_dataset:
@@ -17,5 +18,4 @@ val_dataset:
     max_files: 1
 
 val_dataloader:
-  dataset: runtime.val_dataset
   shuffle: false
