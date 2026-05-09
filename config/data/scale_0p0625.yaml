@@ -1,3 +1,0 @@
-import_config: sample_sm.yaml
-
-scale_factor: [0.0625, 0.0625, 0.0625]

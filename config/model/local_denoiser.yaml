@@ -1,16 +1,18 @@
-backbone: local_denoiser
-in_channels: 1
-out_channels: 1
-input_size: [4, 4, 4]
-patch_size: [2, 2, 2]
-hidden_size: 16
-depth: 1
-num_heads: 1
-mlp_ratio: 1.0
-tokenizer:
-  kind: extract_patches
-  patch_size: [4, 4, 4]
-  stride: [2, 2, 2]
-  padding: [1, 1, 1]
-local_denoiser:
-  swiglu_mlp: true
+import_config: base.yaml
+
+model:
+  class_name: LocalDenoiser3D
+  params:
+    in_channels: 1
+    out_channels: 1
+    input_size: [4, 4, 4]
+    patch_size: [2, 2, 2]
+    hidden_size: 16
+    depth: 1
+    num_heads: 1
+    mlp_ratio: 1.0
+    tokenizer_kind: extract_patches
+    tokenizer_patch_size: [4, 4, 4]
+    tokenizer_stride: [2, 2, 2]
+    tokenizer_padding: [1, 1, 1]
+    swiglu_mlp: true

@@ -1,4 +1,0 @@
-import_config: local_denoiser_patch_0p125_full.yaml
-
-max_files_train: 1
-samples_per_volume_train: 1024

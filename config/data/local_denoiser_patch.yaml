@@ -1,9 +1,21 @@
-import_config: base.yaml
+train_dataset:
+  class_name: TifVolumePatchDataset
+  params:
+    data_dir: data/raw/sample_sm/train
+    samples_per_volume: 1
+    max_files: 1
 
-dataset_kind: patch
-val_dir: tests/fixtures/tif
-test_dir: tests/fixtures/tif
-samples_per_volume_val: 1
-samples_per_volume_test: 1
-max_files_val: 1
-max_files_test: 1
+train_dataloader:
+  dataset: runtime.train_dataset
+  shuffle: true
+
+val_dataset:
+  class_name: TifVolumePatchDataset
+  params:
+    data_dir: data/raw/sample_sm/val
+    samples_per_volume: 1
+    max_files: 1
+
+val_dataloader:
+  dataset: runtime.val_dataset
+  shuffle: false

@@ -1,3 +1,15 @@
 import_config: base.yaml
 
-framework: ddpm
+framework:
+  class_name: DDPMModule
+  params:
+    model: runtime.model
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+    loss_type: mse
+    sample_steps: 4
+    num_train_timesteps: 32
+    beta_schedule: linear
+    beta_start: 0.0001
+    beta_end: 0.02
+    prediction_type: epsilon
