@@ -64,6 +64,47 @@ Every runtime-object section uses the `class_name` + `params` pattern:
   try to build every pending object; skip any whose `runtime.X` references aren't ready
   yet; repeat until all objects are built or no forward progress is made.
 
+### Adding a New Module or Config Section
+
+To add a new trainable module or runtime object:
+
+1. **Define its param class** in the appropriate domain file under `utils/sanitize/`
+   (e.g. `MyModuleParams(IngestibleParams)` in `model_config.py`).
+
+2. **Write a builder function** with signature `(section: dict) -> MyModule`:
+   ```python
+   def build_my_module(section: dict) -> MyModule:
+       params = MyModuleParams.model_validate(section.get("params", {}))
+       return MyModule(**params.model_dump(mode="python"))
+   ```
+
+3. **Register it** in `_BUILDERS` dict in `runtime_factory.py`:
+   ```python
+   _BUILDERS = {
+       ...
+       "my_module": build_my_module,
+   }
+   ```
+
+4. **Add YAML config** — any config file can include the new key:
+   ```yaml
+   my_module:
+     class_name: MyModule
+     params:
+       some_param: value
+   ```
+
+If the new module depends on another runtime object, use `runtime.X` in its params:
+```yaml
+my_module:
+  class_name: MyModule
+  params:
+    backbone: runtime.model
+    data_source: runtime.train_dataset
+```
+
+The compiler automatically discovers dependencies and builds in correct order.
+
 **Example — four config files:**
 
 data config:
