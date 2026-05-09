@@ -1,22 +1,20 @@
-"""Pydantic schema for wrapper/runtime-orchestration config."""
+"""Wrapper/runtime-orchestration param classes, validators, and builders."""
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator
 
 from utils.path_io import to_abs_path
-
+from utils.sanitize.param_class import IngestibleParams
 
 CUDA_ACCELERATORS = {"gpu", "cuda"}
 
 
 def _cuda_runtime_available() -> bool:
-    """Return whether CUDA is both visible and usable in this runtime."""
     try:
         if not torch.cuda.is_available():
             return False
@@ -27,33 +25,25 @@ def _cuda_runtime_available() -> bool:
 
 
 def resolve_accelerator(accelerator: str) -> str:
-    """Resolve trainer accelerator policy into a concrete accelerator."""
     normalized = str(accelerator).strip().lower()
     if not normalized:
         raise ValueError("trainer.accelerator must be a non-empty string")
     if normalized == "auto":
         return "gpu" if _cuda_runtime_available() else "cpu"
-    if normalized == "cuda":
-        if not _cuda_runtime_available():
-            raise ValueError("trainer.accelerator='cuda' requires a usable CUDA runtime.")
-        return "gpu"
-    if normalized == "gpu" and not _cuda_runtime_available():
-        raise ValueError("trainer.accelerator='gpu' requires a usable CUDA runtime.")
-    return normalized
+    if normalized in ("cuda", "gpu") and not _cuda_runtime_available():
+        raise ValueError(f"trainer.accelerator='{normalized}' requires a usable CUDA runtime.")
+    return "gpu" if normalized == "cuda" else normalized
 
 
 def trainer_uses_cuda(accelerator: str) -> bool:
-    """Return whether the resolved trainer accelerator is CUDA-backed."""
     return str(accelerator).strip().lower() in CUDA_ACCELERATORS
 
 
 def align_torch_cuda_runtime(accelerator: str) -> None:
-    """Hide a broken CUDA runtime when sanitize resolved the run to CPU."""
     if trainer_uses_cuda(accelerator):
         return
     if not torch.cuda.is_available() or _cuda_runtime_available():
         return
-
     torch.cuda.is_available = lambda: False  # type: ignore[assignment]
     torch.cuda.device_count = lambda: 0  # type: ignore[assignment]
 
@@ -63,142 +53,35 @@ def _validate_logged_name(value: str, field_name: str) -> str:
     if not normalized:
         raise ValueError(f"{field_name} must be a non-empty string")
     if "/" in normalized:
-        raise ValueError(f"{field_name} must use underscore-separated names like 'val_loss', not slash-separated names.")
+        raise ValueError(f"{field_name} must use underscore-separated names, not slashes")
     return normalized
 
 
-class WrapperConfig(BaseModel):
-    """Validated wrapper config covering trainer, logging, callbacks, and run metadata."""
+class MLFlowLoggerParams(IngestibleParams):
+    """Params for MLFlowLogger."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = {"frozen": True}
 
-    seed: int = 42
-    resume_ckpt_path: Path | None = None
-    run_timestamp: str = Field(default_factory=lambda: datetime.utcnow().strftime("%Y%m%d-%H%M%S"))
-
-    logging: "LoggingConfig" = Field(default_factory=lambda: LoggingConfig())
-    trainer: "TrainerConfig" = Field(default_factory=lambda: TrainerConfig())
-    checkpoint: "CheckpointConfig" = Field(default_factory=lambda: CheckpointConfig())
-    early_stopping: "EarlyStoppingConfig" = Field(default_factory=lambda: EarlyStoppingConfig())
-    testing: "TestingConfig" = Field(default_factory=lambda: TestingConfig())
-
-    @field_validator("resume_ckpt_path")
-    @classmethod
-    def _validate_resume_ckpt_path(cls, value: str | Path | None) -> Path | None:
-        if value is None:
-            return None
-        resolved = to_abs_path(value)
-        if not resolved.is_file():
-            raise FileNotFoundError(f"resume_ckpt_path not found: {resolved}")
-        return resolved
-
-    @staticmethod
-    def _default_tracking_uri() -> str:
-        return Path("result/mlflow").expanduser().resolve().as_uri()
-
-    @model_validator(mode="after")
-    def _cross_validate_and_finalize(self) -> "WrapperConfig":
-        self.trainer.accelerator = resolve_accelerator(self.trainer.accelerator)
-
-        if self.logging.run_name is None:
-            self.logging.run_name = f"{self.logging.experiment}-{self.run_timestamp}"
-        if self.logging.tracking_uri is None:
-            self.logging.tracking_uri = self._default_tracking_uri()
-        return self
-    
-
-
-class TrainerConfig(BaseModel):
-    """Validated Lightning Trainer config."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_epochs: int = Field(default=20, ge=1)
-    accelerator: str = "auto"
-    devices: int | str = 1
-    precision: str | int = "32"
-    log_every_n_steps: int = Field(default=10, ge=1)
-    check_val_every_n_epoch: int = Field(default=1, ge=1)
-    enable_checkpointing: bool = True
-    gradient_clip_val: float = Field(default=1.0, ge=0.0)
-    num_sanity_val_steps: int = Field(default=1, ge=0)
-    accumulate_grad_batches: int = Field(default=1, ge=1)
-    limit_train_batches: float = Field(default=1.0, gt=0.0)
-    limit_val_batches: float = Field(default=1.0, ge=0.0)
-
-    @field_validator("accelerator")
-    @classmethod
-    def _validate_accelerator(cls, value: str) -> str:
-        normalized = str(value).strip().lower()
-        if not normalized:
-            raise ValueError("trainer.accelerator must be a non-empty string")
-        return normalized
-
-    @field_validator("precision")
-    @classmethod
-    def _normalize_precision(cls, value: str | int) -> str | int:
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if not normalized:
-                raise ValueError("trainer.precision must be a non-empty string or integer")
-            return normalized
-        return int(value)
-
-
-class GPUMemoryMonitorConfig(BaseModel):
-    """Validated GPU memory callback config."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    log_frequency_mins: float = Field(default=1.0, gt=0.0)
-
-
-class LoggingConfig(BaseModel):
-    """Validated logging section for MLflow."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    backend: Literal["mlflow"] = "mlflow"
-    tracking_uri: str | None = None
-    experiment: str = "zebrafish_volume_gen"
+    experiment_name: str = "zebrafish_volume_gen"
     run_name: str | None = None
-    tags: Dict[str, str] = Field(default_factory=dict)
+    tracking_uri: str | None = None
+    tags: dict[str, str] = Field(default_factory=dict)
     log_model: bool = False
-    gpu_memory_monitor: GPUMemoryMonitorConfig = Field(default_factory=GPUMemoryMonitorConfig)
-
-    @field_validator("experiment")
-    @classmethod
-    def _validate_experiment(cls, value: str) -> str:
-        stripped = str(value).strip()
-        if not stripped:
-            raise ValueError("logging.experiment must be a non-empty string")
-        return stripped
-
-    @field_validator("tracking_uri", "run_name")
-    @classmethod
-    def _normalize_optional_strings(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        stripped = str(value).strip()
-        return stripped or None
-
-    @field_validator("tags")
-    @classmethod
-    def _normalize_tags(cls, value: Dict[str, str]) -> Dict[str, str]:
-        return {str(key): str(val) for key, val in value.items()}
+    gpu_memory_monitor: dict = Field(default_factory=dict)
 
 
-class CheckpointConfig(BaseModel):
-    """Validated checkpoint callback config."""
+class ModelCheckpointParams(IngestibleParams):
+    """Params for ModelCheckpoint callback."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = {"frozen": True}
 
     monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     save_top_k: int = 1
     save_last: bool = True
     filename: str = "epoch{epoch:03d}-step{step:06d}"
+    auto_insert_metric_name: bool = False
+    verbose: bool = True
 
     @field_validator("monitor")
     @classmethod
@@ -206,10 +89,10 @@ class CheckpointConfig(BaseModel):
         return _validate_logged_name(value, "checkpoint.monitor")
 
 
-class EarlyStoppingConfig(BaseModel):
-    """Validated early stopping config."""
+class EarlyStoppingParams(IngestibleParams):
+    """Params for EarlyStopping callback."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = {"frozen": True}
 
     enabled: bool = True
     monitor: str = "val_loss"
@@ -225,11 +108,78 @@ class EarlyStoppingConfig(BaseModel):
         return _validate_logged_name(value, "early_stopping.monitor")
 
 
-class TestingConfig(BaseModel):
-    """Validated post-fit sampling config."""
+class TrainerParams(IngestibleParams):
+    """Params for Lightning Trainer."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = {"frozen": True}
+
+    max_epochs: int = Field(default=20, ge=1)
+    accelerator: str = "auto"
+    devices: int | str = 1
+    precision: str | int = "32"
+    log_every_n_steps: int = Field(default=10, ge=1)
+    check_val_every_n_epoch: int = Field(default=1, ge=1)
+    enable_checkpointing: bool = True
+    gradient_clip_val: float = Field(default=1.0, ge=0.0)
+    num_sanity_val_steps: int = Field(default=1, ge=0)
+    accumulate_grad_batches: int = Field(default=1, ge=1)
+    limit_train_batches: float = Field(default=1.0, gt=0.0)
+    limit_val_batches: float = Field(default=1.0, ge=0.0)
+
+
+class TestingParams(IngestibleParams):
+    """Params for post-fit sampling."""
+
+    model_config = {"frozen": True}
 
     run_sampling_after_fit: bool = True
     num_samples: int = Field(default=2, ge=1)
     sample_steps: int = Field(default=32, ge=1)
+
+
+# ---- Builders ----
+
+def build_logger(config: dict):
+    """Build MLflow logger from config dict."""
+    from pytorch_lightning.loggers import MLFlowLogger
+
+    params = MLFlowLoggerParams.model_validate(config.get("params", {}))
+    return MLFlowLogger(**params.model_dump(mode="python"))
+
+
+def build_checkpoint_callback(config: dict, dirpath: Path, monitor_override: str | None = None):
+    """Build ModelCheckpoint from config dict."""
+    from pytorch_lightning.callbacks import ModelCheckpoint
+
+    params = ModelCheckpointParams.model_validate(config.get("params", {}))
+    kwargs = params.model_dump(mode="python")
+    kwargs["dirpath"] = dirpath
+    if monitor_override is not None:
+        kwargs["monitor"] = monitor_override
+    return ModelCheckpoint(**kwargs)
+
+
+def build_early_stopping(config: dict):
+    """Build EarlyStopping callback from config dict. Returns None if disabled."""
+    from pytorch_lightning.callbacks import EarlyStopping
+
+    params = EarlyStoppingParams.model_validate(config.get("params", {}))
+    if not params.enabled:
+        return None
+    kwargs = params.model_dump(mode="python")
+    kwargs.pop("enabled", None)
+    return EarlyStopping(**kwargs)
+
+
+def build_trainer(config: dict, logger, callbacks: list):
+    """Build Lightning Trainer from config dict."""
+    import pytorch_lightning as L
+
+    raw_params = dict(config.get("params", {}))
+    raw_params["accelerator"] = resolve_accelerator(raw_params.get("accelerator", "auto"))
+    params = TrainerParams.model_validate(raw_params)
+    return L.Trainer(
+        logger=logger,
+        callbacks=callbacks,
+        **params.model_dump(mode="python"),
+    )
