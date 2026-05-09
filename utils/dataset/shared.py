@@ -19,7 +19,7 @@ class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
     def __init__(self, config: VolumeDatasetParams):
         self.config = config
         self.data_dir = Path(config.data_dir)
-        self.dataset_kind = config.dataset_kind
+        self.dataset_kind = config.class_name
         self.crop_size = config.crop_size
         self.samples_per_volume = int(config.samples_per_volume)
         self.scale_factor = config.scale_factor
@@ -117,7 +117,7 @@ class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
         return int(candidates[np.random.randint(0, len(candidates))])
 
     def _sample_start(self, length: int, crop_length: int, axis: int) -> int:
-        if self.dataset_kind == "patch" and self.patch_grid_multiple is not None:
+        if "Patch" in self.dataset_kind and self.patch_grid_multiple is not None:
             multiple = int(self.patch_grid_multiple[axis])
             return self._aligned_start(length, crop_length, multiple)
         return int(np.random.randint(0, length - crop_length + 1))

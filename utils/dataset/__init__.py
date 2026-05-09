@@ -7,7 +7,7 @@ from utils.sanitize.data_config import VolumeDatasetParams
 
 def build_tif_dataset(config: VolumeDatasetParams) -> TifVolumeDataset | TifVolumePatchDataset:
     """Instantiate the configured TIF dataset variant."""
-    if config.dataset_kind == "patch":
+    if config.class_name == "TifVolumePatchDataset":
         return TifVolumePatchDataset(config)
     return TifVolumeDataset(config)
 

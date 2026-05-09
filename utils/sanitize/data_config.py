@@ -8,7 +8,6 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 from torch.utils.data import DataLoader, Dataset
 
-from utils.dataset import build_tif_dataset
 from utils.sanitize.param_class import IngestibleParams
 
 
@@ -27,6 +26,7 @@ class VolumeDatasetParams(IngestibleParams):
     clip_percentile: tuple[float, float] = (1.0, 99.0)
     in_channels: int = Field(default=1, ge=1)
     pad_to_multiple: tuple[int, int, int] | None = None
+    patch_grid_multiple: tuple[int, int, int] | None = None
 
     @field_validator("data_dir")
     @classmethod
@@ -81,6 +81,8 @@ class DataLoaderParams(IngestibleParams):
 
 def build_dataset(params: VolumeDatasetParams) -> Dataset:
     """Build a TIF dataset from validated params."""
+    from utils.dataset import build_tif_dataset
+
     return build_tif_dataset(params)
 
 

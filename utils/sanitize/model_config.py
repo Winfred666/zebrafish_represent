@@ -11,12 +11,6 @@ from modules.local_denoiser import LocalDenoiser3D
 from utils.sanitize.param_class import IngestibleParams
 
 
-def _validate_spatial(name: str, value: tuple[int, int, int]) -> tuple[int, int, int]:
-    if any(dim <= 0 for dim in value):
-        raise ValueError(f"{name} values must be positive")
-    return tuple(int(dim) for dim in value)
-
-
 class DiT3DParams(IngestibleParams):
     """Params for the DiT3D backbone."""
 
