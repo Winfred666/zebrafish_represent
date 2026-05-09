@@ -9,6 +9,8 @@ logging:
       dataset_kind: patch
       scale: "0.125"
       dataset: LS-FIS-3dpf
+    gpu_memory_monitor:
+      enabled: false
 
 trainer:
   params:
@@ -20,15 +22,18 @@ trainer:
     enable_checkpointing: false
     num_sanity_val_steps: 0
     limit_val_batches: 0.0
-
-checkpoint:
-  params:
-    save_top_k: 0
-    save_last: false
-
-early_stopping:
-  params:
-    enabled: false
+    callbacks:
+      - class_name: ModelCheckpoint
+        params:
+          save_top_k: 0
+          save_last: false
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: EarlyStopping
+        params:
+          enabled: false
+      - class_name: LearningRateMonitor
+        params:
+          logging_interval: epoch
 
 testing:
   run_sampling_after_fit: false

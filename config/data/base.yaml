@@ -14,6 +14,8 @@ train_dataloader:
   batch_size: 2
   num_workers: 4
   shuffle: true
+  pin_memory: true
+  persistent_workers: true
 
 val_dataset:
   class_name: TifVolumeDataset
@@ -31,3 +33,5 @@ val_dataloader:
   batch_size: 2
   num_workers: 2
   shuffle: false
+  pin_memory: true
+  persistent_workers: false

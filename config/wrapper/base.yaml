@@ -29,26 +29,28 @@ trainer:
     accumulate_grad_batches: 1
     limit_train_batches: 1.0
     limit_val_batches: 0.0
-
-checkpoint:
-  class_name: ModelCheckpoint
-  params:
-    monitor: train_loss
-    mode: min
-    save_top_k: 1
-    save_last: true
-    filename: "epoch{epoch:03d}-step{step:06d}"
-
-early_stopping:
-  class_name: EarlyStopping
-  params:
-    enabled: false
-    monitor: val_loss
-    mode: min
-    patience: 5
-    min_delta: 1.0e-5
-    strict: false
-    check_finite: true
+    logger: runtime.logging
+    callbacks:
+      - class_name: ModelCheckpoint
+        params:
+          monitor: train_loss
+          mode: min
+          save_top_k: 1
+          save_last: true
+          filename: "epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: EarlyStopping
+        params:
+          enabled: false
+          monitor: val_loss
+          mode: min
+          patience: 5
+          min_delta: 1.0e-5
+          strict: false
+          check_finite: true
+      - class_name: LearningRateMonitor
+        params:
+          logging_interval: epoch
 
 testing:
   run_sampling_after_fit: true
