@@ -7,7 +7,7 @@ from typing import Dict
 import torch
 
 from utils.dataset.shared import BaseTifVolumeDataset
-from utils.sanitize.param_class import VolumeDatasetParams
+from utils.sanitize.data_config import VolumeDatasetParams
 
 
 class TifVolumePatchDataset(BaseTifVolumeDataset):

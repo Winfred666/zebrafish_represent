@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.sanitize.param_class import VolumeDatasetParams
+from utils.sanitize.data_config import VolumeDatasetParams
 from utils.tif2volume import process_tif_to_array
 
 

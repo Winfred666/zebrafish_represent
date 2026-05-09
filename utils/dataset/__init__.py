@@ -2,7 +2,7 @@
 
 from utils.dataset.patch import TifVolumePatchDataset
 from utils.dataset.volume import TifVolumeDataset
-from utils.sanitize.param_class import VolumeDatasetParams
+from utils.sanitize.data_config import VolumeDatasetParams
 
 
 def build_tif_dataset(config: VolumeDatasetParams) -> TifVolumeDataset | TifVolumePatchDataset:

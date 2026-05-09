@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader
 
 from modules.model_factory import build_volume_model
 from utils.dataset import build_tif_dataset
-from utils.sanitize.param_class import DDPMParams, DataLoaderParams
+from utils.sanitize.data_config import DataLoaderParams
+from utils.sanitize.framework_config import DDPMParams
 
 
 def _build_beta_schedule(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from modules.dit3d import DiT3D
 from modules.local_denoiser import LocalDenoiser3D
-from utils.sanitize.param_class import ResolvedModelParams
+from utils.sanitize.model_config import DiT3DParams, LocalDenoiser3DParams
 
 
 def build_volume_model(config: ResolvedModelParams) -> DiT3D | LocalDenoiser3D:
