@@ -32,27 +32,22 @@ class MlpDenoiser(nn.Module):
         patch_volume: int,
         out_channels: int,
         mlp_ratio: float = 1.0,
-        swiglu_mlp: bool = True,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(token_dim, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(token_dim, elementwise_affine=False, eps=1e-6)
         hidden_features = max(1, int(token_dim * mlp_ratio))
 
-        if swiglu_mlp:
-            self.mlp1 = SwiGLUMLP(token_dim, hidden_features)
-            self.mlp2 = SwiGLUMLP(token_dim, hidden_features)
-        else:
-            self.mlp1 = nn.Sequential(
-                nn.Linear(token_dim, hidden_features),
-                nn.GELU(approximate="tanh"),
-                nn.Linear(hidden_features, token_dim),
-            )
-            self.mlp2 = nn.Sequential(
-                nn.Linear(token_dim, hidden_features),
-                nn.GELU(approximate="tanh"),
-                nn.Linear(hidden_features, token_dim),
-            )
+        self.mlp1 = nn.Sequential(
+            nn.Linear(token_dim, hidden_features),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(hidden_features, token_dim),
+        )
+        self.mlp2 = nn.Sequential(
+            nn.Linear(token_dim, hidden_features),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(hidden_features, token_dim),
+        )
 
         self.linear_final = nn.Linear(token_dim, patch_volume * out_channels, bias=True)
         self.ada_ln_modulation = nn.Sequential(

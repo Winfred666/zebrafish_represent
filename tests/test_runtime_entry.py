@@ -6,11 +6,10 @@ import torch
 
 from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.sanitize.runtime_factory import (
-    _BUILDERS,
-    _collect_build_items,
     _collect_runtime_deps,
     _extract_ref_path,
     _is_runtime_ref,
+    build_any_runtime_object,
     load_split_configs,
     load_yaml_config,
 )
@@ -19,40 +18,40 @@ from utils.sanitize.runtime_factory import (
 class RuntimeEntryTest(unittest.TestCase):
     # ── Builder registry ──
 
-    def test_builder_registry_has_expected_keys(self) -> None:
-        """_BUILDERS covers all runtime object types."""
-        expected = {
-            "train_dataset", "val_dataset", "test_dataset",
-            "model", "framework",
-            "train_dataloader", "val_dataloader",
-            "logging", "trainer",
-            "checkpoint", "early_stopping",
+    def test_builder_globals_resolves_expected_classes(self) -> None:
+        """build_any_runtime_object resolves key classes via globals()."""
+        expected_classes = {
+            "DiT3D", "LocalDenoiser3D",
+            "RectifiedFlowModule", "DDPMModule",
+            "MLFlowLogger", "Trainer",
+            "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
+            "IntegratedGPUMemoryMonitor", "ArtifactManager",
+            "TifVolumeDataset", "TifVolumePatchDataset", "DataLoader",
         }
-        self.assertTrue(expected.issubset(set(_BUILDERS.keys())),
-                        f"Missing keys: {expected - set(_BUILDERS.keys())}")
+        import utils.sanitize.runtime_factory as rf
+        available = set(rf.__dict__)
+        missing = expected_classes - available
+        self.assertEqual(len(missing), 0,
+                         f"Classes not in runtime_factory globals: {missing}")
 
-    def test_collect_build_items_no_if_branches(self) -> None:
-        """Every registered key in the merged config produces a build item."""
-        _, merged = load_split_configs(
-            data_config_path="config/data/sample_sm.yaml",
-            model_config_path="config/model/base.yaml",
-            framework_config_path="config/framework/base.yaml",
-            wrapper_config_path="config/wrapper/base.yaml",
-        )
-        items = _collect_build_items(merged)
-        item_keys = {item.key for item in items}
-
-        for key in _BUILDERS:
-            if key in merged:
-                self.assertIn(key, item_keys, f"Missing build item for key: {key}")
+    def test_collect_runtime_deps_handles_non_class_name_sections(self) -> None:
+        """Scalars and dicts without class_name produce empty deps lists."""
+        # Scalar values have no runtime deps
+        self.assertEqual(_collect_runtime_deps(42), [])
+        self.assertEqual(_collect_runtime_deps(None), [])
+        # Dict without runtime refs produces empty list
+        self.assertEqual(_collect_runtime_deps({"key": "value"}), [])
+        # Dict with runtime refs captures them
+        deps = _collect_runtime_deps({"logger": "runtime.logging"})
+        self.assertIn("logging", deps)
 
     # ── Config merge ──
 
     def test_config_load_and_deep_merge(self) -> None:
         """4 configs load and deep-merge into one dict with all expected keys."""
         _, merged = load_split_configs(
-            data_config_path="config/data/sample_sm.yaml",
-            model_config_path="config/model/base.yaml",
+            data_config_path="config/data/base_0125.yaml",
+            model_config_path="config/model/dit.yaml",
             framework_config_path="config/framework/base.yaml",
             wrapper_config_path="config/wrapper/base.yaml",
         )
@@ -64,8 +63,8 @@ class RuntimeEntryTest(unittest.TestCase):
     def test_callbacks_are_inline_in_trainer(self) -> None:
         """Trainer callbacks are inline {class_name, params} specs."""
         _, merged = load_split_configs(
-            data_config_path="config/data/sample_sm.yaml",
-            model_config_path="config/model/base.yaml",
+            data_config_path="config/data/base_0125.yaml",
+            model_config_path="config/model/dit.yaml",
             framework_config_path="config/framework/base.yaml",
             wrapper_config_path="config/wrapper/base.yaml",
         )

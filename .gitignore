@@ -216,6 +216,7 @@ __marimo__/
 /logs
 /tb_logs
 /result
+result/
 *.npy
 *.pt
 /reports

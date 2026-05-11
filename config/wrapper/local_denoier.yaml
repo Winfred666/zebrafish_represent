@@ -3,6 +3,7 @@ import_config: base.yaml
 logging:
   params:
     experiment_name: local_denoier
+    run_name: 
     tags:
       job_type: train
       backbone: local_denoiser

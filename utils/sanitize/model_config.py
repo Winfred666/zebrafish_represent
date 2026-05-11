@@ -6,15 +6,11 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from modules.dit3d import DiT3D
-from modules.local_denoiser import LocalDenoiser3D
 from utils.sanitize.param_class import IngestibleParams
 
 
 class DiT3DParams(IngestibleParams):
     """Params for the DiT3D backbone."""
-
-    model_config = {"frozen": True}
 
     in_channels: int = Field(ge=1)
     out_channels: int = Field(ge=1)
@@ -59,8 +55,6 @@ class LocalDenoiser3DParams(IngestibleParams):
     Field names directly match LocalDenoiser3D.__init__ parameters.
     """
 
-    model_config = {"frozen": True}
-
     in_channels: int = Field(ge=1)
     out_channels: int = Field(ge=1)
     input_size: tuple[int, int, int]
@@ -94,29 +88,3 @@ class LocalDenoiser3DParams(IngestibleParams):
                     f"Axis={axis}, actual={actual_grid}, expected={expected_grid}"
                 )
         return self
-
-
-_MODEL_CLASSES: dict[str, type] = {
-    "DiT3D": DiT3D,
-    "LocalDenoiser3D": LocalDenoiser3D,
-}
-
-_MODEL_PARAM_CLASSES: dict[str, type[IngestibleParams]] = {
-    "DiT3D": DiT3DParams,
-    "LocalDenoiser3D": LocalDenoiser3DParams,
-}
-
-
-def build_model(config: dict) -> DiT3D | LocalDenoiser3D:
-    """Resolve class_name, validate params, instantiate the model."""
-    class_name = config["class_name"]
-    if class_name not in _MODEL_CLASSES:
-        raise ValueError(
-            f"Unknown model class_name={class_name!r}. Expected one of {list(_MODEL_CLASSES)}"
-        )
-    param_class = _MODEL_PARAM_CLASSES[class_name]
-    params = param_class.model_validate(config.get("params", {}))
-    model_cls = _MODEL_CLASSES[class_name]
-    kwargs = params.model_dump(mode="python")
-    kwargs.pop("class_name", None)
-    return model_cls(**kwargs)

@@ -110,6 +110,14 @@ def train(
     print(f"  dataset: {config.get('train_dataset', {}).get('class_name', 'unknown')}")
     print(f"  accelerator: {config.get('trainer', {}).get('params', {}).get('accelerator', 'unknown')}")
 
+    train_ds = runtime.train_loader.dataset if runtime.train_loader is not None else None
+    empty_pct = getattr(train_ds, "empty_filtered_pct", None)
+    if empty_pct is not None:
+        print(
+            f"  empty-crops filtered: {train_ds.empty_filtered_count} "
+            f"({empty_pct:.2f}%)"
+        )
+
     if runtime.logger is not None:
         print(f"[MLFLOW] artifact_root={runtime.artifact_manager.root_dir}")
         print(f"[MLFLOW] checkpoint_dir={runtime.artifact_manager.checkpoint_dir}")
@@ -150,6 +158,9 @@ def train(
             sample_tensor=samples,
             reference_targets=reference_targets,
         )
+
+    if runtime.artifact_manager is not None:
+        runtime.artifact_manager.cleanup_temp_folder()
 
 
 def main(argv: Sequence[str] | None = None) -> None:

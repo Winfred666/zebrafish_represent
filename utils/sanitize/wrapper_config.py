@@ -1,14 +1,13 @@
-"""Wrapper/runtime-orchestration param classes, validators, and builders."""
+"""Wrapper/runtime-orchestration param classes and validators."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Literal
+import os
+from typing import Literal
 
 import torch
 from pydantic import Field, field_validator
 
-from utils.path_io import to_abs_path
 from utils.sanitize.param_class import IngestibleParams
 
 CUDA_ACCELERATORS = {"gpu", "cuda"}
@@ -60,11 +59,9 @@ def _validate_logged_name(value: str, field_name: str) -> str:
 class MLFlowLoggerParams(IngestibleParams):
     """Params for MLFlowLogger."""
 
-    model_config = {"frozen": True}
-
     experiment_name: str = "zebrafish_volume_gen"
     run_name: str | None = None
-    tracking_uri: str | None = None
+    tracking_uri: str | None = Field(default_factory=lambda: os.environ.get("MLFLOW_TRACKING_URI"))
     tags: dict[str, str] = Field(default_factory=dict)
     log_model: bool = False
     gpu_memory_monitor: dict = Field(default_factory=dict)
@@ -72,8 +69,6 @@ class MLFlowLoggerParams(IngestibleParams):
 
 class ModelCheckpointParams(IngestibleParams):
     """Params for ModelCheckpoint callback."""
-
-    model_config = {"frozen": True}
 
     dirpath: str | None = None
     monitor: str = "val_loss"
@@ -91,9 +86,11 @@ class ModelCheckpointParams(IngestibleParams):
 
 
 class EarlyStoppingParams(IngestibleParams):
-    """Params for EarlyStopping callback."""
+    """Params for EarlyStopping callback.
 
-    model_config = {"frozen": True}
+    `enabled` is a project-level switch (not a Lightning parameter).
+    When False the callback is skipped entirely.
+    """
 
     enabled: bool = True
     monitor: str = "val_loss"
@@ -112,73 +109,17 @@ class EarlyStoppingParams(IngestibleParams):
 class LearningRateMonitorParams(IngestibleParams):
     """Params for LearningRateMonitor callback."""
 
-    model_config = {"frozen": True}
-
     logging_interval: Literal["epoch", "step"] = "epoch"
 
 
-# ---- Inline spec resolver ----
+class IntegratedGPUMemoryMonitorParams(IngestibleParams):
+    """Params for IntegratedGPUMemoryMonitor callback."""
 
-_CALLBACK_REGISTRY: dict[str, tuple[type, type[IngestibleParams]]] = {
-    "ModelCheckpoint": (None, ModelCheckpointParams),
-    "EarlyStopping": (None, EarlyStoppingParams),
-    "LearningRateMonitor": (None, LearningRateMonitorParams),
-}
-
-
-def _resolve_callback_class(class_name: str):
-    """Lazily import and return a callback class by name."""
-    from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
-
-    cls_map = {
-        "ModelCheckpoint": ModelCheckpoint,
-        "EarlyStopping": EarlyStopping,
-        "LearningRateMonitor": LearningRateMonitor,
-    }
-    return cls_map[class_name]
-
-
-def _build_from_spec(spec: dict, registry: dict) -> Any:
-    """Build an object from a `{class_name, params}` spec dict using the given registry.
-
-    Registry maps class_name -> (cls_or_None, param_cls).
-    """
-    class_name = spec.get("class_name")
-    if class_name is None:
-        raise ValueError(f"Inline spec missing 'class_name': {spec}")
-
-    entry = registry.get(class_name)
-    if entry is None:
-        raise ValueError(f"Unknown class_name={class_name!r} in registry. Known: {list(registry)}")
-
-    cls, param_cls = entry
-    if cls is None:
-        cls = _resolve_callback_class(class_name)
-
-    params = param_cls.model_validate(spec.get("params", {}))
-    kwargs = params.model_dump(mode="python")
-    kwargs.pop("class_name", None)
-    return cls(**kwargs)
-
-
-def _resolve_param_value(value: Any, registry: dict) -> Any:
-    """Resolve a single param value.
-
-    If it's an inline `{class_name, params}` dict, build it.
-    If it's a list, resolve each element.
-    Otherwise return as-is (already resolved object from runtime.X substitution).
-    """
-    if isinstance(value, list):
-        return [_resolve_param_value(item, registry) for item in value]
-    if isinstance(value, dict) and "class_name" in value:
-        return _build_from_spec(value, registry)
-    return value
+    log_frequency_mins: float = Field(default=1.0, gt=0.0)
 
 
 class TrainerParams(IngestibleParams):
     """Params for Lightning Trainer."""
-
-    model_config = {"frozen": True}
 
     max_epochs: int = Field(default=20, ge=1)
     accelerator: str = "auto"
@@ -197,77 +138,6 @@ class TrainerParams(IngestibleParams):
 class TestingParams(IngestibleParams):
     """Params for post-fit sampling."""
 
-    model_config = {"frozen": True}
-
     run_sampling_after_fit: bool = True
     num_samples: int = Field(default=2, ge=1)
     sample_steps: int = Field(default=32, ge=1)
-
-
-# ---- Builders ----
-
-def build_logger(section: dict):
-    """Build MLflow logger from a resolved config section."""
-    from pytorch_lightning.loggers import MLFlowLogger
-
-    params = MLFlowLoggerParams.model_validate(section.get("params", {}))
-    return MLFlowLogger(**params.model_dump(mode="python"))
-
-
-def build_checkpoint_callback(section: dict):
-    """Build ModelCheckpoint from a resolved config section.
-
-    `section["params"]["dirpath"]` may be a `runtime.X` reference already
-    resolved to a Path object by the compiler.
-    """
-    from pytorch_lightning.callbacks import ModelCheckpoint
-
-    params = ModelCheckpointParams.model_validate(section.get("params", {}))
-    kwargs = params.model_dump(mode="python")
-    return ModelCheckpoint(**kwargs)
-
-
-def build_early_stopping(section: dict):
-    """Build EarlyStopping callback from a resolved config section.
-
-    Returns None if `params.enabled` is False.
-    """
-    from pytorch_lightning.callbacks import EarlyStopping
-
-    params = EarlyStoppingParams.model_validate(section.get("params", {}))
-    if not params.enabled:
-        return None
-    kwargs = params.model_dump(mode="python")
-    kwargs.pop("enabled", None)
-    return EarlyStopping(**kwargs)
-
-
-def build_trainer(section: dict):
-    """Build Lightning Trainer from a resolved config section.
-
-    `section["params"]["callbacks"]` is a list that may contain:
-    - Already-resolved callback objects (from `runtime.X` refs)
-    - Inline `{class_name, params}` dicts to be built on the spot
-    """
-    import pytorch_lightning as L
-
-    raw_params = dict(section.get("params", {}))
-
-    # Resolve callbacks list — build inline specs, pass through resolved objects
-    raw_callbacks = raw_params.pop("callbacks", [])
-    callbacks = _resolve_param_value(raw_callbacks, _CALLBACK_REGISTRY)
-    # Filter out None (e.g. disabled EarlyStopping)
-    callbacks = [cb for cb in callbacks if cb is not None]
-
-    # Resolve logger
-    logger = raw_params.pop("logger", None)
-
-    # Resolve accelerator policy
-    raw_params["accelerator"] = resolve_accelerator(raw_params.get("accelerator", "auto"))
-
-    params = TrainerParams.model_validate(raw_params)
-    return L.Trainer(
-        logger=logger,
-        callbacks=callbacks,
-        **params.model_dump(mode="python"),
-    )

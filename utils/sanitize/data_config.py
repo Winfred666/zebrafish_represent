@@ -1,4 +1,4 @@
-"""Dataset and dataloader param classes, validators, and builders."""
+"""Dataset and dataloader param classes and validators."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 from utils.sanitize.param_class import IngestibleParams
 
@@ -14,16 +14,16 @@ from utils.sanitize.param_class import IngestibleParams
 class VolumeDatasetParams(IngestibleParams):
     """Single split dataset params injected into TIF dataset builders."""
 
-    model_config = {"frozen": True}
-
     class_name: Literal["TifVolumeDataset", "TifVolumePatchDataset"] = "TifVolumeDataset"
     data_dir: str
     crop_size: tuple[int, int, int] | None = None
-    samples_per_volume: int = Field(ge=1)
     max_files: int | None = None
     scale_factor: tuple[float, float, float] = (0.5, 0.5, 0.5)
     normalize: bool = True
     clip_percentile: tuple[float, float] = (1.0, 99.0)
+    # Fraction of overlap between adjacent grid crops in each spatial dim.
+    # 0.0 = adjacent (no overlap), 0.5 = 50% overlap. Only used when crop_size is set.
+    overlap: tuple[float, float, float] = (0.0, 0.0, 0.0)
     in_channels: int = Field(default=1, ge=1)
     pad_to_multiple: tuple[int, int, int] | None = None
     patch_grid_multiple: tuple[int, int, int] | None = None
@@ -60,6 +60,14 @@ class VolumeDatasetParams(IngestibleParams):
             raise ValueError("clip_percentile must satisfy 0 <= low < high <= 100")
         return (lo, hi)
 
+    @field_validator("overlap")
+    @classmethod
+    def _validate_overlap(cls, value: tuple[float, float, float]) -> tuple[float, float, float]:
+        o_d, o_h, o_w = float(value[0]), float(value[1]), float(value[2])
+        if not (0.0 <= o_d < 1.0 and 0.0 <= o_h < 1.0 and 0.0 <= o_w < 1.0):
+            raise ValueError("overlap values must satisfy 0.0 <= v < 1.0")
+        return (o_d, o_h, o_w)
+
     @model_validator(mode="after")
     def _check_patch_requires_crop(self) -> "VolumeDatasetParams":
         if self.class_name == "TifVolumePatchDataset" and self.crop_size is None:
@@ -70,42 +78,9 @@ class VolumeDatasetParams(IngestibleParams):
 class DataLoaderParams(IngestibleParams):
     """Concrete dataloader params injected into dataloader builders."""
 
-    model_config = {"frozen": True}
-
+    dataset: Dataset # required, cannot be none
     batch_size: int = Field(default=2, ge=1)
     num_workers: int = Field(default=4, ge=0)
     shuffle: bool = False
     pin_memory: bool = True
     persistent_workers: bool = False
-
-
-def build_dataset(section: dict) -> Dataset:
-    """Build a TIF dataset from a resolved config section.
-
-    The section must have `params` containing VolumeDatasetParams fields.
-    """
-    from utils.dataset import build_tif_dataset
-
-    params = VolumeDatasetParams.model_validate(section.get("params", {}))
-    return build_tif_dataset(params)
-
-
-def build_dataloader(section: dict) -> DataLoader:
-    """Build a DataLoader from a resolved config section.
-
-    `section["dataset"]` must be the already-resolved dataset object
-    (substituted from `runtime.X` by the blind-iteration compiler).
-    Other fields are validated as DataLoaderParams.
-    """
-    dataset = section["dataset"]
-    if dataset is None:
-        raise ValueError("dataloader section requires resolved 'dataset' field")
-    params = DataLoaderParams.model_validate(section)
-    return DataLoader(
-        dataset,
-        batch_size=params.batch_size,
-        shuffle=params.shuffle,
-        num_workers=params.num_workers,
-        pin_memory=params.pin_memory,
-        persistent_workers=params.persistent_workers,
-    )

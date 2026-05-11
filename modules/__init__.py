@@ -1,15 +1,13 @@
-"""Modules package exports."""
+"""Modules package — imports from model/ and framework/ subpackages."""
 
-from modules.ddpm import DDPMModule, create_ddpm_dataloaders
-from modules.dit3d import DiT3D
-from modules.local_denoiser import LocalDenoiser3D
-from modules.rect_flow import RectifiedFlowModule, create_rectified_flow_dataloaders
+from modules.model import BaseVolumeModel, DiT3D, LocalDenoiser3D
+from modules.framework import BaseTrainingFramework, DDPMModule, RectifiedFlowModule
 
 __all__ = [
+    "BaseVolumeModel",
     "DiT3D",
     "LocalDenoiser3D",
-    "RectifiedFlowModule",
-    "create_rectified_flow_dataloaders",
+    "BaseTrainingFramework",
     "DDPMModule",
-    "create_ddpm_dataloaders",
+    "RectifiedFlowModule",
 ]

@@ -4,7 +4,7 @@ services:
     image: postgres:17
     container_name: zebrafish_mlflow_postgres
     ports:
-      - "${PG_PORT}:5432"
+      - "0.0.0.0:${PG_PORT}:5432"
     networks:
       - mlflow_backend
     environment:
@@ -24,13 +24,13 @@ services:
     image: minio/minio:latest
     container_name: zebrafish_mlflow_minio
     ports:
-      - "${MINIO_API_PORT}:9000"
-      - "${MINIO_CONSOLE_PORT}:9001"
+      - "0.0.0.0:${MLFLOW_S3_ENDPOINT_PORT}:9000"
+      - "0.0.0.0:${MINIO_CONSOLE_PORT}:9001"
     networks:
       - mlflow_backend
     environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY}
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data

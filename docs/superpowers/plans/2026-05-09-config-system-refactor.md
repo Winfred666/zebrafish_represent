@@ -191,7 +191,7 @@ train_dataset:
   class_name: TifVolumeDataset
   params:
     data_dir: data/raw/sample_sm/train
-    crop_size: [4, 4, 4]
+    crop_size: [32, 32, 32]
     samples_per_volume: 1
     max_files: 1
     scale_factor: [1.0, 1.0, 1.0]
@@ -209,7 +209,7 @@ val_dataset:
   class_name: TifVolumeDataset
   params:
     data_dir: data/raw/sample_sm/val
-    crop_size: [4, 4, 4]
+    crop_size: [32, 32, 32]
     samples_per_volume: 0
     max_files: 0
     scale_factor: [1.0, 1.0, 1.0]

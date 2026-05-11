@@ -1,0 +1,50 @@
+train_dataset:
+  class_name: TifVolumeDataset
+  params:
+    data_dir: PLEASE_FILL_IN_ABSOLUTE_PATH
+    crop_size: [32, 32, 32]
+    # Fraction of overlap between adjacent grid crops in each spatial dim.
+    # 0.0 = adjacent (no overlap), 0.5 = 50% overlap.
+    overlap: [0.5, 0.5, 0.5]
+    max_files: null
+    # Downsample volumes to 1/8 of original resolution to control grid-crop count.
+    scale_factor: [0.125, 0.125, 0.125]
+    normalize: true
+    # (low, high) percentile pair for intensity clipping before min-max normalization.
+    # Clips extreme voxels (e.g. sensor noise, bright artifacts) so they don't
+    # stretch the value range. Applied before scaling to [0, 1].
+    clip_percentile: [1.0, 99.0]
+    # Optional (D, H, W) multiples to zero-pad spatial dims to. Only used when
+    # crop_size is null (full-volume mode); ignored when crop_size is set.
+    # Useful for architectures that require dims divisible by a fixed stride.
+    pad_to_multiple: null
+
+train_dataloader:
+  dataset: runtime.train_dataset
+  batch_size: 2
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+
+val_dataset:
+  class_name: TifVolumeDataset
+  params:
+    data_dir: PLEASE_FILL_IN_ABSOLUTE_PATH
+    crop_size: [32, 32, 32]
+    # No overlap for validation — each voxel appears in exactly one crop.
+    overlap: [0.0, 0.0, 0.0]
+    max_files: null
+    # Downsample volumes to 1/8 of original resolution to control grid-crop count.
+    scale_factor: [0.125, 0.125, 0.125]
+    normalize: true
+    clip_percentile: [1.0, 99.0]
+    pad_to_multiple: null
+
+val_dataloader:
+  dataset: runtime.val_dataset
+  batch_size: 2
+  num_workers: 2
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false

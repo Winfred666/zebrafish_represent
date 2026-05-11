@@ -6,11 +6,11 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
+from pydantic import BaseModel
 
-from utils.display.log_artifact import ArtifactManager, prepare_train_artifacts
 from utils.path_io import resolve_import_path, to_abs_path
 
 _RUNTIME_REF_PATTERN = re.compile(r"^runtime\.(.+)$")
@@ -204,35 +204,44 @@ def _any_unresolved_refs(section: dict[str, Any]) -> bool:
     return _walk(section)
 
 
-# ── Builder registry ──
-# Maps merged-config keys to domain build functions.
-# Every builder has signature: (resolved_section: dict) -> object
-# Add new module types here — no other changes needed.
+# ── Imports needed by build_any_runtime_object for globals() class resolution ──
 
-from utils.sanitize.data_config import build_dataset, build_dataloader
-from utils.sanitize.framework_config import build_framework_module
-from utils.sanitize.model_config import build_model
+from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.loggers import MLFlowLogger
+from torch.utils.data import DataLoader
+
+from modules.framework.ddpm import DDPMModule
+from modules.framework.rect_flow import RectifiedFlowModule
+from modules.model.dit3d import DiT3D
+from modules.model.local_denoiser import LocalDenoiser3D
+from utils.dataset.patch import TifVolumePatchDataset
+from utils.dataset.volume import TifVolumeDataset
+from utils.display.log_artifact import ArtifactManager
+from utils.display.log_gpu import IntegratedGPUMemoryMonitor
+from torch.utils.data import DataLoader
+from utils.sanitize.data_config import DataLoaderParams, VolumeDatasetParams
+from utils.sanitize.framework_config import (
+    DDPMDiffusionParams,
+    DDPMParams,
+    OptimizationParams,
+    RectifiedFlowParams,
+)
+from utils.sanitize.model_config import DiT3DParams, LocalDenoiser3DParams
 from utils.sanitize.wrapper_config import (
-    build_checkpoint_callback,
-    build_early_stopping,
-    build_logger,
-    build_trainer,
+    EarlyStoppingParams,
+    IntegratedGPUMemoryMonitorParams,
+    LearningRateMonitorParams,
+    MLFlowLoggerParams,
+    ModelCheckpointParams,
+    TrainerParams,
 )
 
-_BUILDERS: dict[str, Callable[[dict], Any]] = {
-    "train_dataset": build_dataset,
-    "val_dataset": build_dataset,
-    "test_dataset": build_dataset,
-    "model": build_model,
-    "framework": build_framework_module,
-    "train_dataloader": build_dataloader,
-    "val_dataloader": build_dataloader,
-    "logging": build_logger,
-    "trainer": build_trainer,
-    "checkpoint": build_checkpoint_callback,
-    "early_stopping": build_early_stopping,
-}
-
+# Aliases — params class name must match class_name + "Params" for build_any_runtime_object
+TifVolumePatchDatasetParams = VolumeDatasetParams
+TifVolumeDatasetParams = VolumeDatasetParams
+DDPMModuleParams = DDPMParams
+RectifiedFlowModuleParams = RectifiedFlowParams
 
 # ── Build item descriptor ──
 
@@ -240,27 +249,8 @@ _BUILDERS: dict[str, Callable[[dict], Any]] = {
 class _BuildItem:
     key: str
     section: dict
-    builder: Callable[[dict], Any]
+    # builder: Callable[[dict], Any] # no need to write any builder, using class string matching to build anything
     dependencies: list[str]
-
-
-# ── Blind-iteration compiler ──
-
-def _collect_build_items(config: dict[str, Any]) -> list[_BuildItem]:
-    """Scan the merged config and create a build item for each registered key.
-
-    No if-branches, no special-casing. Every key in `_BUILDERS` that appears
-    in the config gets a build item. Dependencies are discovered automatically
-    by walking the section for `runtime.X` references.
-    """
-    items: list[_BuildItem] = []
-    for key, builder in _BUILDERS.items():
-        if key not in config:
-            continue
-        section = config[key]
-        deps = _collect_runtime_deps(section)
-        items.append(_BuildItem(key, section, builder, deps))
-    return items
 
 
 def _collect_runtime_deps(section: dict[str, Any]) -> list[str]:
@@ -280,6 +270,72 @@ def _collect_runtime_deps(section: dict[str, Any]) -> list[str]:
 
     _walk(section)
     return deps
+
+
+
+def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, type] | None = None) -> Any:
+    """Build a runtime object from a recursive {class_name, params} config dict.
+    Looks up class_name and class_name+Params in class_registry first, then
+    falls back to this module's globals.  If no Params class is found the raw
+    params dict is passed through unvalidated.
+    """
+    if "class_name" not in config:
+        raise ValueError("Config dict must contain 'class_name' key")
+
+    registry = class_registry or {}
+    class_name = config["class_name"]
+    cls = registry.get(class_name) or globals().get(class_name)
+    if cls is None:
+        raise ValueError(f"Class {class_name!r} not found in registry or scope.")
+
+    # If no explicit "params" key, treat all other keys as params (flat config style)
+    if "params" in config:
+        params = config["params"]
+        extra = {k: v for k, v in config.items() if k not in ("class_name", "params")}
+        if isinstance(params, dict) and extra:
+            params = {**extra, **params}
+    else:
+        params = {k: v for k, v in config.items() if k != "class_name"}
+
+    if isinstance(params, dict):
+        for k, v in params.items():
+            if isinstance(v, dict) and "class_name" in v:
+                params[k] = build_any_runtime_object(v, class_registry=class_registry)
+            elif isinstance(v, list):
+                for idx, item in enumerate(v):
+                    if isinstance(item, dict) and "class_name" in item:
+                        v[idx] = build_any_runtime_object(item, class_registry=class_registry)
+    elif isinstance(params, list):
+        for idx, item in enumerate(params):
+            if isinstance(item, dict) and "class_name" in item:
+                params[idx] = build_any_runtime_object(item, class_registry=class_registry)
+
+    params_cls_name = class_name + "Params"
+    params_cls = registry.get(params_cls_name) or globals().get(params_cls_name)
+    if params_cls is not None:
+        params = params_cls.model_validate(params)
+    else:
+        print(f"Warning: Params class {params_cls_name} not found in registry or globals. Skipping params validation.", flush=True)
+
+    kwargs = params.model_dump(mode="python") if isinstance(params, BaseModel) else params
+    import inspect
+    try:
+        sig = inspect.signature(cls.__init__)
+        cfg_param = sig.parameters.get("config")
+        if cfg_param is not None and cfg_param.kind not in (
+            inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL
+        ):
+            return cls(config=params)
+        # Filter kwargs to only include params accepted by the constructor
+        valid_params = set(sig.parameters)
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            pass  # Can't filter if there's **kwargs in the signature
+        else:
+            kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+    except (ValueError, TypeError):
+        pass
+    return cls(**kwargs)
+
 
 
 def _blind_iterate_build(items: list[_BuildItem]) -> dict[str, Any]:
@@ -315,7 +371,7 @@ def _blind_iterate_build(items: list[_BuildItem]) -> dict[str, Any]:
                 still_pending.append(item)
                 continue
 
-            built = item.builder(resolved_section)
+            built = build_any_runtime_object(resolved_section)
             objects[item.key] = built
             made_progress = True
 
@@ -348,14 +404,32 @@ def build_training_runtime(
     paths: ConfigPaths,
 ) -> TrainingRuntime:
     """Mechanically compile a merged config dict into runtime objects.
-
-    1. Collect build items from `_BUILDERS` registry
+    1. Extract building items to know what to build and their dependencies
     2. Blind-iterate: build objects whose deps are ready, repeat until done
-    3. Seed, align CUDA, wire GPU monitor, return TrainingRuntime
+    3. Seed, align CUDA, return TrainingRuntime
     """
-    from utils.sanitize.wrapper_config import align_torch_cuda_runtime, resolve_accelerator
+    from utils.mlflow_setup import apply_docker_env
+    from utils.sanitize.wrapper_config import align_torch_cuda_runtime, resolve_accelerator, trainer_uses_cuda
 
-    items = _collect_build_items(merged_config)
+    # Resolve accelerator early so MLflow env is set before logger builds
+    trainer_section = merged_config.get("trainer", {})
+    accelerator = trainer_section.get("params", {}).get("accelerator", "auto")
+    accelerator = resolve_accelerator(accelerator)
+    apply_docker_env(on_remote_node=trainer_uses_cuda(accelerator))
+
+    items: list[_BuildItem] = []
+    for key, section in merged_config.items():
+        if not isinstance(section, dict):
+            continue
+        if "class_name" not in section:
+            # Auto-add class_name for known key patterns
+            if key.endswith("_dataloader"):
+                section = dict(section, class_name="DataLoader")
+            else:
+                continue
+        deps = _collect_runtime_deps(section)
+        items.append(_BuildItem(key, section, deps))
+
     objects = _blind_iterate_build(items)
 
     # Seed
@@ -363,32 +437,10 @@ def build_training_runtime(
     set_global_seed(seed)
 
     # Align CUDA
-    trainer_section = merged_config.get("trainer", {})
-    accelerator = trainer_section.get("params", {}).get("accelerator", "auto")
-    accelerator = resolve_accelerator(accelerator)
     align_torch_cuda_runtime(accelerator)
 
-    # Artifact manager (derived from logger, available for runtime.X refs)
     logger = objects.get("logging")
-    artifact_manager = None
-    if logger is not None:
-        logger.log_hyperparams(merged_config)
-        artifact_manager = prepare_train_artifacts(logger)
-
-    # GPU memory monitor (flat dict in logging.params, not an inline spec)
-    logging_section = merged_config.get("logging", {})
-    gpu_monitor = logging_section.get("params", {}).get("gpu_memory_monitor", {})
-    if isinstance(gpu_monitor, dict) and gpu_monitor.get("enabled"):
-        from utils.display.log_gpu import build_gpu_memory_callback
-
-        gpu_cb = build_gpu_memory_callback(
-            enabled=True,
-            log_frequency_mins=gpu_monitor.get("log_frequency_mins", 1.0),
-        )
-        if gpu_cb is not None and objects.get("trainer") is not None:
-            objects["trainer"].callbacks.append(gpu_cb)
-
-    # Extract callbacks from trainer for TrainingRuntime convenience field
+    artifact_manager = objects.get("artifact_manager")
     trainer = objects.get("trainer")
     callbacks = trainer.callbacks if trainer is not None else []
 
@@ -411,10 +463,27 @@ def build_training_runtime_from_files(
     wrapper_config_path: str | Path,
 ) -> TrainingRuntime:
     """Load 4 split YAML configs, deep-merge, and compile the training runtime."""
+    from datetime import datetime
+
     paths, merged_config = load_split_configs(
         data_config_path=data_config_path,
         model_config_path=model_config_path,
         framework_config_path=framework_config_path,
         wrapper_config_path=wrapper_config_path,
     )
+
+    # Hard-overwrite run_name: <model>-<wrapper>-<data>-<framework>-YYMMDD
+    run_name = (
+        f"{paths.model.stem}-{paths.wrapper.stem}-{paths.data.stem}"
+        f"-{paths.framework.stem}-{datetime.now().strftime('%y%m%d')}"
+    )
+    merged_config.setdefault("logging", {}).setdefault("params", {})["run_name"] = run_name
+    # Hard-inject artifact_manager before building so it participates in blind-iteration
+    if "artifact_manager" not in merged_config:
+        merged_config["artifact_manager"] = {
+            "class_name": "ArtifactManager",
+            "params": {
+                "logger": "runtime.logging",
+            },
+        }
     return build_training_runtime(merged_config=merged_config, paths=paths)

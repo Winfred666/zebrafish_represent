@@ -13,7 +13,7 @@ class DriverCliTest(unittest.TestCase):
                 "--data-config",
                 "config/data/scale_0p0625.yaml",
                 "--model-config",
-                "config/model/base.yaml",
+                "config/model/dit.yaml",
                 "--framework-config",
                 "config/framework/base.yaml",
                 "--wrapper-config",
@@ -21,7 +21,7 @@ class DriverCliTest(unittest.TestCase):
             ]
         )
         self.assertEqual(args.data_config, "config/data/scale_0p0625.yaml")
-        self.assertEqual(args.model_config, "config/model/base.yaml")
+        self.assertEqual(args.model_config, "config/model/dit.yaml")
         self.assertEqual(args.framework_config, "config/framework/base.yaml")
         self.assertEqual(args.wrapper_config, "config/wrapper/base.yaml")
 
@@ -32,7 +32,7 @@ class DriverCliTest(unittest.TestCase):
                     "--data-config",
                     "config/data/scale_0p0625.yaml",
                     "--model-config",
-                    "config/model/base.yaml",
+                    "config/model/dit.yaml",
                     "--framework-config",
                     "config/framework/base.yaml",
                     "--wrapper-config",

@@ -5,14 +5,11 @@ logging:
   class_name: MLFlowLogger
   params:
     experiment_name: zebrafish_volume_gen
-    run_name: null
+    run_name: base
     tracking_uri: http://172.27.2.100:5000
     tags:
       job_type: train
     log_model: false
-    gpu_memory_monitor:
-      enabled: false
-      log_frequency_mins: 1
 
 trainer:
   class_name: Trainer
@@ -38,16 +35,20 @@ trainer:
           save_top_k: 1
           save_last: true
           filename: "epoch{epoch:03d}-step{step:06d}"
-          dirpath: runtime.artifact_manager.checkpoint_dir
-      - class_name: EarlyStopping
+          dirpath: null
+      - class_name: IntegratedGPUMemoryMonitor
         params:
-          enabled: false
-          monitor: val_loss
-          mode: min
-          patience: 5
-          min_delta: 1.0e-5
-          strict: false
-          check_finite: true
+          log_frequency_mins: 1
+      
+      # enabled = false just means comment out the callback, uncomment if want enable in the future
+      # - class_name: EarlyStopping
+      #   params:
+      #     monitor: val_loss
+      #     mode: min
+      #     patience: 5
+      #     min_delta: 1.0e-5
+      #     strict: false
+      #     check_finite: true
       - class_name: LearningRateMonitor
         params:
           logging_interval: epoch

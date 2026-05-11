@@ -1,0 +1,8 @@
+import_config: local_denoiser.yaml
+
+model:
+  params:
+    patch_size: [4, 4, 4]
+    extract_patch_size: [6, 6, 6]
+    extract_stride: [4, 4, 4]
+    extract_padding: [1, 1, 1]

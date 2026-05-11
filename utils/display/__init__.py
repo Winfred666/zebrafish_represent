@@ -4,13 +4,13 @@ Keep this package init lightweight to avoid importing optional visualization
 dependencies during training-only code paths.
 """
 
-from utils.display.log_artifact import ArtifactManager, log_image_artifact, prepare_train_artifacts
-from utils.display.log_gpu import IntegratedGPUMemoryMonitor, build_gpu_memory_callback
+from utils.display.log_artifact import ArtifactManager, log_image_artifact
+from utils.display.log_gpu import IntegratedGPUMemoryMonitor
+from utils.display.visualize_2d import fix_2d_scalar
 
 __all__ = [
     "ArtifactManager",
     "IntegratedGPUMemoryMonitor",
-    "build_gpu_memory_callback",
-    "prepare_train_artifacts",
+    "fix_2d_scalar",
     "log_image_artifact",
 ]

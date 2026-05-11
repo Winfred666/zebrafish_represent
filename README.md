@@ -68,59 +68,66 @@ uv run mlflow server \
   --artifacts-destination result/mlflow/artifacts
 ```
 
-Then open the dashboard at `http://<server-ip>:5000`.
+Dashboard: `http://<server-ip>:5000`
+
+---
 
 ### Option B: PostgreSQL + MinIO (production)
 
-Faster metadata queries and scalable artifact storage via Docker:
+> WARNING: following services all listen to 0.0.0.0, which is insecure. Do not expose to untrusted networks without proper firewall rules.
+
+Faster metadata queries and scalable artifact storage via Docker.  All services deploy on
+**127.0.0.1** by default.  The only controllable variable is ``REMOTE_ACCESS_IP`` — set it
+when GPU nodes need to reach the services on this host.  If you need a different default
+bind address, edit ``utils/mlflow_setup/__init__.py`` directly.
+
+**Step 1 — Pull images** (use a mirror if Docker Hub is unreachable):
 
 ```bash
-# 1. Pull images (use a mirror if Docker Hub is unreachable)
 docker pull docker.m.daocloud.io/library/postgres:17 && docker tag docker.m.daocloud.io/library/postgres:17 postgres:17
 docker pull docker.m.daocloud.io/minio/minio:latest && docker tag docker.m.daocloud.io/minio/minio:latest minio/minio:latest
-
-# 2. Start backing services
-cd utils/mlflow_setup
-docker compose --env-file config.env -f docker-compose.yaml up -d
-
-# 3. Create the artifact bucket (first time only)
-docker exec zebrafish_mlflow_minio mc alias set s3 http://localhost:9000 minioadmin minioadmin
-docker exec zebrafish_mlflow_minio mc mb s3/mlflow
-docker exec zebrafish_mlflow_minio mc anonymous set download s3/mlflow
-
-# 4. Start MLflow pointing at Docker services
-export MLFLOW_S3_ENDPOINT_URL=http://localhost:43996
-export MLFLOW_S3_IGNORE_TLS=true
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-
-uv run mlflow server \
-  --backend-store-uri postgresql://mlflow:mlflow@localhost:43995/mlflow \
-  --host 0.0.0.0 \
-  --port 5000 \
-  --serve-artifacts \
-  --artifacts-destination s3://mlflow
 ```
 
-Stop services with:
+**Step 2 — Export the remote-access IP and start backing services:**
+
+```bash
+# Set this to your server's LAN IP so GPU nodes can reach the services.
+# MUST set to 127.0.0.1 for local-only usage; Also set logging.params.tracking_uri in config/wrapper/base.yaml
+export REMOTE_ACCESS_IP=172.27.2.100
+cd utils/mlflow_setup
+docker compose --env-file config.env -f docker-compose.yaml up -d
+cd ../..
+```
+
+**Step 3 — Create the artifact bucket** (first time only):
+
+```bash
+uv run python -c "from utils.mlflow_setup import create_bucket; create_bucket()"
+```
+
+**Step 4 — Start the MLflow tracking server:**
+
+```bash
+uv run python -c "from utils.mlflow_setup import serve; serve()"
+```
+
+Dashboard: ``http://${REMOTE_ACCESS_IP:-127.0.0.1}:5000``
+
+All ports, credentials, and S3 URLs are hardcoded in ``utils/mlflow_setup/__init__.py``.
+The training code calls ``apply_docker_env(on_remote_node=True)`` automatically when using a GPU
+accelerator, which switches all host references from ``127.0.0.1`` to ``REMOTE_ACCESS_IP``.
+
+**Stop services:**
 
 ```bash
 cd utils/mlflow_setup && docker compose --env-file config.env -f docker-compose.yaml down
 ```
 
-Python convenience helpers are in `utils/mlflow_setup/__init__.py`:
-
-```python
-from utils.mlflow_setup import compose_up, compose_down, apply_docker_env, create_bucket
-
-compose_up()          # start postgres + minio
-create_bucket()       # create default "mlflow" bucket
-apply_docker_env()    # set env vars so the SDK targets Docker services
-```
-
 ### Config wiring
 
-Set `logging.tracking_uri` in your wrapper config to point at the server, or leave it `null` to use the `MLFLOW_TRACKING_URI` env var.
+Set ``logging.tracking_uri`` in your wrapper config to point at the server, or leave it
+``null`` to use the ``MLFLOW_TRACKING_URI`` env var (auto-set by ``apply_docker_env`` to
+``http://127.0.0.1:5000`` or ``http://${REMOTE_ACCESS_IP}:5000``).
 
 ## 5. Run Training
 

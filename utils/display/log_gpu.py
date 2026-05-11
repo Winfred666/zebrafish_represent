@@ -69,15 +69,3 @@ class IntegratedGPUMemoryMonitor(Callback):
         }
         logger.log_metrics(metrics, step=int(getattr(trainer, "global_step", 0)))
         self._last_log_time = current_time
-
-
-def build_gpu_memory_callback(
-    *,
-    enabled: bool,
-    log_frequency_mins: float,
-) -> Optional[IntegratedGPUMemoryMonitor]:
-    """Construct a GPU memory monitor callback from validated logging config."""
-    if not enabled:
-        return None
-
-    return IntegratedGPUMemoryMonitor(log_frequency_mins=float(log_frequency_mins))

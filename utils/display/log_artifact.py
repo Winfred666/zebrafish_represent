@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,109 +12,84 @@ import numpy as np
 import yaml
 
 
-def _logger_artifact_uri(logger: Any) -> str:
-    """Resolve active run artifact URI from a configured MLflow logger."""
-    if logger is None:
-        raise ValueError("MLflow logger is required to resolve artifact URI.")
-
-    experiment = getattr(logger, "experiment", None)
-    get_run = getattr(experiment, "get_run", None)
-    run_id_raw = getattr(logger, "run_id", None)
-    run_id = str(run_id_raw).strip() if run_id_raw is not None else ""
-    if not callable(get_run) or not run_id:
-        raise ValueError("logger must expose `experiment.get_run` and a non-empty `run_id`.")
-
-    run = get_run(run_id)
-    run_info = getattr(run, "info", None)
-    artifact_uri = str(getattr(run_info, "artifact_uri", "")).strip() if run_info is not None else ""
-    if not artifact_uri:
-        raise ValueError(f"MLflow run '{run_id}' has empty artifact URI.")
-    return artifact_uri
-
-
-@dataclass(frozen=True)
+@dataclass
 class ArtifactManager:
     """Artifact manager backed by a local staging directory.
 
-    Writes go to a temp dir, then are uploaded to MLflow via ``log_artifact``.
-    This works for both local filesystem and S3/MinIO artifact backends.
+    Each write stages to a temp dir, uploads to MLflow immediately for
+    quick validation, then deletes the local temp copy.  A final cleanup
+    of the staging directory is expected after training completes.
     """
-
     root_dir: Path
     checkpoint_dir: Path
     config_dir: Path
     sample_dir: Path
+    logger: Any = field(default=None, repr=False)
 
-    @classmethod
-    def from_root_dir(cls, artifact_root: Path) -> "ArtifactManager":
-        artifact_root = artifact_root.resolve()
+    def __init__(self, logger: Any = None) -> "ArtifactManager":
+        staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
+
+        artifact_root = staging_root.resolve()
+
         checkpoint_dir = artifact_root / "checkpoints"
         config_dir = artifact_root / "configs"
         sample_dir = artifact_root / "samples"
         for directory in (artifact_root, checkpoint_dir, config_dir, sample_dir):
             directory.mkdir(parents=True, exist_ok=True)
-        return cls(
-            root_dir=artifact_root,
-            checkpoint_dir=checkpoint_dir,
-            config_dir=config_dir,
-            sample_dir=sample_dir,
-        )
+        
+        self.root_dir=artifact_root,
+        self.checkpoint_dir=checkpoint_dir,
+        self.config_dir=config_dir,
+        self.sample_dir=sample_dir,
+        self.logger=logger,
+
+    # ── upload ──
+
+    def _upload_artifact(self, local_path: Path, artifact_subdir: str | None) -> None:
+        """Upload a single file to the MLflow run's artifact store."""
+        if self.logger is None:
+            return
+        import mlflow
+
+        run_id = getattr(self.logger, "run_id", None)
+        if not run_id:
+            return
+        tracking_uri = getattr(self.logger, "_tracking_uri", None) or None
+        client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+        client.log_artifact(run_id, str(local_path), artifact_path=artifact_subdir)
+
+    @staticmethod
+    def _artifact_subdir(relative_path: str | Path) -> str | None:
+        parent = str(Path(relative_path).parent)
+        return parent if parent != "." else None
+
+    # ── write + upload + delete ──
 
     def write_yaml_artifact(self, data: Mapping[str, Any], relative_path: str | Path) -> Path:
         artifact_path = self.root_dir / Path(relative_path)
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         with artifact_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(dict(data), handle, sort_keys=False)
+
+        self._upload_artifact(artifact_path, self._artifact_subdir(relative_path))
+        artifact_path.unlink()
         return artifact_path
 
     def write_numpy_artifact(self, array: np.ndarray, relative_path: str | Path) -> Path:
         artifact_path = self.root_dir / Path(relative_path)
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(artifact_path, np.asarray(array))
+
+        self._upload_artifact(artifact_path, self._artifact_subdir(relative_path))
+        artifact_path.unlink()
         return artifact_path
 
+    # ── teardown ──
 
-def _ensure_s3_env() -> None:
-    """Ensure S3/MinIO env vars are set so that MLflow can upload artifacts."""
-    import os
-    if "MLFLOW_S3_ENDPOINT_URL" not in os.environ:
-        os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://localhost:43996"
-    if "MLFLOW_S3_IGNORE_TLS" not in os.environ:
-        os.environ["MLFLOW_S3_IGNORE_TLS"] = "true"
-    if "AWS_ACCESS_KEY_ID" not in os.environ:
-        os.environ["AWS_ACCESS_KEY_ID"] = "minioadmin"
-    if "AWS_SECRET_ACCESS_KEY" not in os.environ:
-        os.environ["AWS_SECRET_ACCESS_KEY"] = "minioadmin"
-    if "NO_PROXY" not in os.environ:
-        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-
-
-def prepare_train_artifacts(logger: Any) -> ArtifactManager:
-    """Create a staging artifact manager and log the staging root to MLflow.
-
-    Artifacts are written to a temp directory first. After training,
-    call ``upload_artifact_manager(logger, manager)`` to push everything to MLflow.
-    """
-    _ensure_s3_env()
-    artifact_uri = _logger_artifact_uri(logger)
-    staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
-    manager = ArtifactManager.from_root_dir(staging_root)
-
-    # Record where artifacts will ultimately live.
-    import mlflow
-    mlflow.log_text(artifact_uri, "artifact_uri.txt")
-
-    return manager
-
-
-def upload_artifact_manager(logger: Any, manager: ArtifactManager, *, prefix: str = "") -> None:
-    """Upload all artifacts from the staging manager to MLflow."""
-    import mlflow
-    for subdir in ("checkpoints", "configs", "samples"):
-        src = manager.root_dir / subdir
-        if src.exists() and any(src.iterdir()):
-            artifact_subpath = f"{prefix}{subdir}" if prefix else subdir
-            mlflow.log_artifacts(str(src), artifact_path=artifact_subpath)
+    def cleanup_temp_folder(self) -> None:
+        """Remove the staging directory tree."""
+        if self.root_dir.exists():
+            shutil.rmtree(self.root_dir)
 
 
 def log_image_artifact(

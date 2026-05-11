@@ -38,7 +38,7 @@ dev = [
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
 
-# PyTorch CUDA 13.0 wheels live on the dedicated PyTorch index.
+# PyTorch CUDA wheels live on the dedicated PyTorch index.
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"

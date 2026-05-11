@@ -1,0 +1,14 @@
+import_config: base.yaml
+
+logging:
+  params:
+    experiment_name: patch_size_sweep
+    tags:
+      job_type: sweep
+      backbone: local_denoiser
+
+trainer:
+  params:
+    max_epochs: 10
+    limit_train_batches: 1.0
+    limit_val_batches: 0.0

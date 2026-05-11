@@ -194,16 +194,26 @@ logging:
 
 ## Training on GPU nodes
 
-Nodes share `/home/ym.xiao/workspace/` and `.venv`. Always `cd` first:
+Nodes share `/home/ym.xiao/workspace/` and `.venv`. **Always use absolute paths** — the remote shell's CWD is `/home/ym.xiao`, not the project directory. The `cd` command in SSH does not reliably change the working directory on these nodes.
+
+Agent sessions run inside zellij or tmux, so jobs can safely run in foreground or background without `nohup`.
 
 ```bash
-ssh gpu05 "cd /home/ym.xiao/workspace/zebrafish_represent && CUDA_VISIBLE_DEVICES=0 .venv/bin/python driver.py \
-  --data-config config/data/scale_0p0625.yaml \
-  --model-config config/model/base.yaml \
-  --framework-config config/framework/base.yaml \
-  --wrapper-config config/wrapper/base.yaml"
+ssh gpu07 "CUDA_VISIBLE_DEVICES=0 /home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python -u \
+  /home/ym.xiao/workspace/zebrafish_represent/driver.py \
+  --data-config /home/ym.xiao/workspace/zebrafish_represent/config/data/local_denoiser_patch.yaml \
+  --model-config /home/ym.xiao/workspace/zebrafish_represent/config/model/local_denoiser.yaml \
+  --framework-config /home/ym.xiao/workspace/zebrafish_represent/config/framework/local_denoiser_ddpm.yaml \
+  --wrapper-config /home/ym.xiao/workspace/zebrafish_represent/config/wrapper/local_denoier.yaml \
+  > /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/logs/<name>.log 2>&1 &"
 ```
 
+For long-running training, run in foreground inside tmux/zellij on the target node, and leave it visible.
+
+**Data and result paths** must be absolute in config files and log redirections:
+- Data root: `/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/`
+- Result root: `/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/`
+- Logs: `/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/logs/`
 
 GPU availability: `bash ~/.claude/skills/use-gpu/scripts/gpu_check.sh`
 
@@ -236,6 +246,14 @@ GPU availability: `bash ~/.claude/skills/use-gpu/scripts/gpu_check.sh`
 - Use one-object parameter injection. Avoid long constructor or factory argument lists. Datasets, dataloader builders, and training modules should accept typed derived objects only.
 - Persist checkpoints, config dumps, and generated samples through MLflow artifact helpers. Do not add config options such as `output_root`, checkpoint `dirpath`, or sample output directories.
 - Keep reusable visualization and artifact code under `utils/display/`. Do not create one-off plotting scripts under `./script`.
+
+## Visualization Protocol
+
+- **No titles**: Every visualization must be paper-ready — no suptitle, no per-panel titles, no text annotations. The figure speaks through the data and colorbar alone.
+- **Color conventions**:
+  - Scalar volume / intensity: `plasma`
+  - Residual (difference): `bwr`
+- All visualization helpers live under `utils/display/` and follow these conventions.
 
 ## Data and Tensor Conventions
 

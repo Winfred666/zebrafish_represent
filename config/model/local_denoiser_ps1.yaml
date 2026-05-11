@@ -1,0 +1,7 @@
+
+model:
+  params:
+    patch_size: [1, 1, 1]
+    extract_patch_size: [1, 1, 1]
+    extract_stride: [1, 1, 1]
+    extract_padding: [0, 0, 0]

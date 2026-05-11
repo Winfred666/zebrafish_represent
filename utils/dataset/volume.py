@@ -17,5 +17,6 @@ class TifVolumeDataset(BaseTifVolumeDataset):
         super().__init__(config)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
-        crop = self._sample_crop(self._volume_from_index(index))
+        vol_idx, sd, sh, sw = self.crop_grid[index]
+        crop = self._extract_crop(self.volumes[vol_idx], sd, sh, sw)
         return {"target": torch.from_numpy(crop)}
