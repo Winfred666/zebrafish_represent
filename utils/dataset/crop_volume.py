@@ -172,12 +172,7 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         return volume
 
     def _load_volume(self, file_path: Path) -> np.ndarray:
-        volume = process_tif_to_array(
-            str(file_path),
-            scale_factor=self.scale_factor,
-            normalize=self.normalize,
-            clip_percentile=self.clip_percentile,
-        )
+        volume = super()._load_volume(file_path)  # downsample + normalize + [-1,1] rescale + 
         if volume.shape[0] < self.in_channels:
             raise ValueError(
                 f"File {file_path} has {volume.shape[0]} channels, "
@@ -185,12 +180,7 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             )
         volume = volume[: self.in_channels]
         volume = self._pad_full_volume_if_needed(volume)
-        # Rescale from [0,1] to [-1,1] so background (~0) → -1, fish (~1) → 1.
-        # Zero-filter in _build_crop_grid preserves all crops since -1 ≠ 0,
-        # giving full-volume coverage when fusing.
-        if self.normalize:
-            volume = volume * 2.0 - 1.0
-        return volume.astype(np.float32, copy=False)
+        return volume
 
     # ── padding ───────────────────────────────────────────────────
 

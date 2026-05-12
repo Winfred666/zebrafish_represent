@@ -54,20 +54,22 @@ class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
     # ── volume I/O ──
 
     def _load_volume(self, file_path: Path) -> np.ndarray:
+        """Load a TIF, downsample, normalize to [0,1], then rescale to [-1,1].
+
+        Subclasses that override this should call ``super()._load_volume()``
+        and then apply their own post-processing (channel selection, padding).
+        """
+        normalize = getattr(self, "normalize", False)
+        clip_percentile = getattr(self, "clip_percentile", None)
         volume = process_tif_to_array(
             str(file_path),
             scale_factor=self.scale_factor,
-            normalize=False,
-            clip_percentile=None,
+            normalize=normalize,
+            clip_percentile=clip_percentile,
         )
-        print(
-            "[TIF-LOG]"
-            f" file={file_path.name}"
-            f" shape={tuple(volume.shape)}"
-            f" min={float(volume.min()):.4f}"
-            f" max={float(volume.max()):.4f}"
-            f" mean={float(volume.mean()):.4f}"
-        )
+        # Rescale from [0,1] to [-1,1] so background (~0) → -1, signal (~1) → 1.
+        if normalize:
+            volume = volume * 2.0 - 1.0
         return volume.astype(np.float32, copy=False)
 
     def _load_volumes(self) -> list[np.ndarray]:
