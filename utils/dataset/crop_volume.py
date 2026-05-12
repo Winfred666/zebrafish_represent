@@ -172,7 +172,7 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         return volume
 
     def _load_volume(self, file_path: Path) -> np.ndarray:
-        volume = super()._load_volume(file_path)  # downsample + normalize + [-1,1] rescale + 
+        volume = super()._load_volume(file_path)  # downsample + normalize + [-1,1] rescale
         if volume.shape[0] < self.in_channels:
             raise ValueError(
                 f"File {file_path} has {volume.shape[0]} channels, "
@@ -185,20 +185,50 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
     # ── padding ───────────────────────────────────────────────────
 
     def _pad_full_volume_if_needed(self, volume: np.ndarray) -> np.ndarray:
-        if self.crop_size is not None or self.pad_to_multiple is None:
+        """Pad spatial dims so the crop grid covers every voxel.
+
+        When ``crop_size`` is set, pads trailing edges so the last crop
+        exactly reaches the volume boundary (``_grid_starts`` uses integer
+        division which can leave a gap).  Padded voxels use the background
+        value (-1.0 for [-1,1] data, 0.0 for raw) so they are zero-filtered
+        later if empty.
+        """
+        _, D, H, W = volume.shape
+        pad_d = pad_h = pad_w = 0
+        pad_val = -1.0 if self.normalize else 0.0
+
+        if self.crop_size is not None:
+            cd, ch, cw = self.crop_size
+            od, oh, ow = self.overlap
+            # stride = crop_size * (1 - overlap)
+            stride_d = max(1, int(round(cd * (1.0 - od))))
+            stride_h = max(1, int(round(ch * (1.0 - oh))))
+            stride_w = max(1, int(round(cw * (1.0 - ow))))
+
+            def _pad_dim(dim_len: int, crop_len: int, stride: int) -> int:
+                if dim_len <= crop_len:
+                    return 0
+                remainder = (dim_len - crop_len) % stride
+                return 0 if remainder == 0 else stride - remainder
+
+            pad_d = _pad_dim(D, cd, stride_d)
+            pad_h = _pad_dim(H, ch, stride_h)
+            pad_w = _pad_dim(W, cw, stride_w)
+
+        elif self.pad_to_multiple is not None:
+            mult_depth, mult_height, mult_width = self.pad_to_multiple
+            pad_d = (mult_depth - (D % mult_depth)) % mult_depth
+            pad_h = (mult_height - (H % mult_height)) % mult_height
+            pad_w = (mult_width - (W % mult_width)) % mult_width
+
+        if pad_d == 0 and pad_h == 0 and pad_w == 0:
             return volume
-        _, depth, height, width = volume.shape
-        mult_depth, mult_height, mult_width = self.pad_to_multiple
-        pad_depth = (mult_depth - (depth % mult_depth)) % mult_depth
-        pad_height = (mult_height - (height % mult_height)) % mult_height
-        pad_width = (mult_width - (width % mult_width)) % mult_width
-        if pad_depth == 0 and pad_height == 0 and pad_width == 0:
-            return volume
+
         return np.pad(
             volume,
-            ((0, 0), (0, pad_depth), (0, pad_height), (0, pad_width)),
+            ((0, 0), (0, pad_d), (0, pad_h), (0, pad_w)),
             mode="constant",
-            constant_values=0.0,
+            constant_values=pad_val,
         )
 
     # ── crop grid ─────────────────────────────────────────────────
