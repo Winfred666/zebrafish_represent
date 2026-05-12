@@ -233,19 +233,57 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     "full_size": batch["full_size"][idx].detach().cpu(),
                 })
 
+    def _gather_fusion_crops(self) -> tuple[list, dict[str, list]]:
+        """All-gather fusion crops across DDP ranks so every crop is included."""
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            return self.val_fusion1_clean, self.val_fusion1_noised
+
+        world_size = dist.get_world_size()
+        # gather clean crops
+        gathered_clean = [None] * world_size
+        dist.all_gather_object(gathered_clean, self.val_fusion1_clean or [])
+        # gather noisy crops per t-key
+        gathered_noised: dict[str, list] = {}
+        for t_key in self.FUSION_T_KEYS:
+            per_rank = [None] * world_size
+            dist.all_gather_object(per_rank, (self.val_fusion1_noised or {}).get(t_key, []))
+            gathered_noised[t_key] = per_rank
+
+        # merge across ranks
+        merged_clean: list = []
+        for rank_list in gathered_clean:
+            merged_clean.extend(rank_list)
+        merged_noised: dict[str, list] = {}
+        for t_key in self.FUSION_T_KEYS:
+            merged_noised[t_key] = []
+            for rank_list in gathered_noised[t_key]:
+                merged_noised[t_key].extend(rank_list)
+
+        return merged_clean, merged_noised
+
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
         """Denoise stored fusion crops, fuse into full volumes, log MSE + panels."""
-        if self.val_fusion1_noised is None or self.val_fusion1_clean is None:
+        import torch.distributed as dist
+        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
+
+        # Gather crops from all DDP ranks so fusion covers the full volume
+        merged_clean, merged_noised = self._gather_fusion_crops()
+
+        if not is_rank0:
+            return  # only rank 0 logs to avoid duplicate artifacts
+
+        if not merged_clean:
             return
 
         # Fuse clean reference once
-        clean_fused = volume_fuse(self.val_fusion1_clean, fusion_id=0)
+        clean_fused = volume_fuse(merged_clean, fusion_id=0)
 
         self.val_fusion1_denoised = []
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
-            crop_dicts = self.val_fusion1_noised[t_key]
+            crop_dicts = merged_noised.get(t_key, [])
             if not crop_dicts:
                 continue
 
@@ -270,7 +308,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
             # MSE against clean fused volume
             mse = F.mse_loss(denoised_fused, clean_fused)
-            self.log(f"val_fusion_mse_{t_key}", mse, on_step=False, on_epoch=True)
+            self.log(f"val_fusion_mse_{t_key}", mse, on_step=False, on_epoch=True, sync_dist=False)
 
             # Mid-W GT|Denoised|Residual panel (W is the clearest dim for fish)
             if self.logger is not None:
@@ -290,6 +328,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         """After validation: flip fusion state or log fusion artifacts."""
         if self._fusion_collecting:
             self._fusion_collecting = False  # collection complete
+            self._log_fusion_validation()    # log pre-training baseline
         elif self.val_fusion1_noised is not None:
             self._log_fusion_validation()
 
@@ -343,7 +382,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         # Hard-fixed vstack at last val batch (minimum artifact even without fusion).
         # Uses mid-W slice — the clearest dimension for zebrafish morphology.
         # batch_idx==1 is the last batch with current val config (32 crops,
-        # batch_size=2, 4 DDP ranks, limit_val_batches=0.5 → 2 batches/rank).
         if batch_idx == 1 and self.logger is not None:
             try:
                 n_show = min(clean.shape[0], 5)

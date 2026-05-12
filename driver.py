@@ -137,6 +137,9 @@ def train(
     if resume_ckpt:
         print(f"Resuming full trainer state from checkpoint: {resume_ckpt}")
 
+    # Run one validation epoch before training to log initial-sample artifacts
+    runtime.trainer.validate(framework_module, dataloaders=runtime.val_loader)
+
     runtime.trainer.fit(
         framework_module,
         train_dataloaders=runtime.train_loader,
