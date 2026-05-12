@@ -249,7 +249,13 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         for vol_idx, sd, sh, sw in raw:
             vol = self._get_volume(vol_idx)
             crop = self._extract_crop(vol, sd, sh, sw)
-            if np.any(crop):
+            # Convert [-1,1] → [0,1] for emptiness check so background
+            # (~ -1) maps to ~0 and is correctly identified as empty.
+            if self.normalize:
+                crop_01 = (crop + 1.0) * 0.5
+            else:
+                crop_01 = crop
+            if np.any(crop_01):
                 filtered.append((vol_idx, sd, sh, sw))
             else:
                 empty += 1
