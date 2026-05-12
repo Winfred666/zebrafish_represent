@@ -277,7 +277,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 c0 = clean_fused[0].detach().float().cpu().numpy()
                 d0 = denoised_fused[0].detach().float().cpu().numpy()
                 mid_d = c0.shape[0] // 2
-                panel = fix_2d_scalar(c0[mid_d], d0[mid_d], colorbar_limits=(0.0, 1.0))
+                panel = fix_2d_scalar(c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0))
                 log_image_artifact(
                     self.logger, panel,
                     f"val_fusion_{t_key}",

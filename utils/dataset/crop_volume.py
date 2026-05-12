@@ -131,6 +131,8 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             "overlap": self.overlap,
             "patch_grid_multiple": self.patch_grid_multiple,
             "pad_to_multiple": self.pad_to_multiple,
+            "normalize": self.normalize,
+            "clip_percentile": self.clip_percentile,
         }
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
@@ -183,6 +185,11 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             )
         volume = volume[: self.in_channels]
         volume = self._pad_full_volume_if_needed(volume)
+        # Rescale from [0,1] to [-1,1] so background (~0) → -1, fish (~1) → 1.
+        # Zero-filter in _build_crop_grid preserves all crops since -1 ≠ 0,
+        # giving full-volume coverage when fusing.
+        if self.normalize:
+            volume = volume * 2.0 - 1.0
         return volume.astype(np.float32, copy=False)
 
     # ── padding ───────────────────────────────────────────────────
