@@ -37,11 +37,11 @@ class ArtifactManager:
         for directory in (artifact_root, checkpoint_dir, config_dir, sample_dir):
             directory.mkdir(parents=True, exist_ok=True)
         
-        self.root_dir=artifact_root,
-        self.checkpoint_dir=checkpoint_dir,
-        self.config_dir=config_dir,
-        self.sample_dir=sample_dir,
-        self.logger=logger,
+        self.root_dir = artifact_root
+        self.checkpoint_dir = checkpoint_dir
+        self.config_dir = config_dir
+        self.sample_dir = sample_dir
+        self.logger = logger
 
     # ── upload ──
 
