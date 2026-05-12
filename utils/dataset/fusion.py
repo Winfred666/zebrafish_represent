@@ -38,13 +38,25 @@ def volume_fuse(
         pos = tuple(int(x) for x in crop_dict["pos_idx"])  # (sd, sh, sw)
         _, crop_d, crop_h, crop_w = target.shape
 
+        # Clamp slice ends to full_size (crops may extend past the original
+        # volume when _extract_crop padded a volume smaller than crop_size).
+        end_d = min(pos[0] + crop_d, full_size[1])
+        end_h = min(pos[1] + crop_h, full_size[2])
+        end_w = min(pos[2] + crop_w, full_size[3])
+        crop_d_valid = end_d - pos[0]
+        crop_h_valid = end_h - pos[1]
+        crop_w_valid = end_w - pos[2]
+
         slices = (
             slice(None),
-            slice(pos[0], pos[0] + crop_d),
-            slice(pos[1], pos[1] + crop_h),
-            slice(pos[2], pos[2] + crop_w),
+            slice(pos[0], end_d),
+            slice(pos[1], end_h),
+            slice(pos[2], end_w),
         )
-        accumulator[slices] += target
+        target_valid = target[
+            :, :crop_d_valid, :crop_h_valid, :crop_w_valid
+        ]
+        accumulator[slices] += target_valid
         weight[slices] += 1.0
 
     # Average overlapping regions; leave uncovered voxels as zero
