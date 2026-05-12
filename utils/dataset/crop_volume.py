@@ -1,6 +1,6 @@
 """Crop-based TIF volume dataset for 3D generative training.
 
-Each item is a ``crop`` — a fixed-size subvolume with metadata (sample_id,
+Each item is a ``crop`` — a fixed-size subvolume with metadata (fusion_id,
 pos_idx, full_size) so crops can be fused back into the original volume.
 """
 
@@ -216,7 +216,7 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         crop = self._extract_crop(self.volumes[vol_idx], sd, sh, sw)
         return {
             "target": torch.from_numpy(crop),
-            "sample_id": vol_idx,
+            "fusion_id": vol_idx,
             "pos_idx": torch.tensor([sd, sh, sw], dtype=torch.long),
             "full_size": torch.tensor(self.volumes[vol_idx].shape, dtype=torch.long),
         }

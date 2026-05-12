@@ -7,3 +7,6 @@ framework:
       weight_decay: 0.0001
       loss_type: mse
       sample_steps: 4
+    diffusion:
+      timestep_respacing: null # faster infer sampling by skipping steps in the noise schedule;
+      gen_noise_weight: 0.5

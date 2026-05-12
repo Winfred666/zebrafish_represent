@@ -10,9 +10,9 @@ from torch import Tensor
 
 def volume_fuse(
     crops: list[Dict[str, Tensor]],
-    sample_id: int,
+    fusion_id: int,
 ) -> Tensor:
-    """Fuse all crops belonging to *sample_id* back into the full volume.
+    """Fuse all crops belonging to *fusion_id* back into the full volume.
 
     Overlapping voxels are averaged.  Missing voxels (not covered by any
     crop) remain zero.
@@ -20,14 +20,14 @@ def volume_fuse(
     Args:
         crops: List of crop dicts as returned by
                :class:`CropTifVolumeDataset.__getitem__`.
-        sample_id: The fusion index to reassemble.
+        fusion_id: The fusion index to reassemble.
 
     Returns:
         Tensor of shape ``full_size`` (C, D, H, W).
     """
-    matching = [c for c in crops if int(c["sample_id"]) == sample_id]
+    matching = [c for c in crops if int(c["fusion_id"]) == fusion_id]
     if not matching:
-        raise ValueError(f"No crops found for sample_id={sample_id}")
+        raise ValueError(f"No crops found for fusion_id={fusion_id}")
 
     full_size = tuple(int(x) for x in matching[0]["full_size"])
     accumulator = torch.zeros(full_size, dtype=torch.float32)

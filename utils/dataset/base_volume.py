@@ -16,7 +16,7 @@ class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
     """Loads TIF/TIFF volumes and returns them whole — one fusion per index.
 
     Each item is a dict with the full volume tensor plus metadata needed
-    for later reconstruction (sample_id, full_size).
+    for later reconstruction (fusion_id, full_size).
     """
 
     def __init__(
@@ -79,7 +79,7 @@ class BaseTifVolumeDataset(Dataset[Dict[str, torch.Tensor]]):
         volume = self.volumes[index]
         return {
             "target": torch.from_numpy(volume),
-            "sample_id": index,
+            "fusion_id": index,
             "full_size": torch.tensor(volume.shape, dtype=torch.long),
         }
 

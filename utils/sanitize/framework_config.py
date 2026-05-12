@@ -10,18 +10,30 @@ from utils.sanitize.param_class import IngestibleParams
 
 
 class OptimizationParams(IngestibleParams):
-    """Optimization params injected into training modules."""
+    """Optimization params shared across all training frameworks."""
 
     learning_rate: float = Field(ge=0.0)
     weight_decay: float = Field(ge=0.0)
     loss_type: Literal["mse", "l1"] = "mse"
     sample_steps: int = Field(ge=1)
 
+class CommonDiffusionParams(IngestibleParams):
+    """Common diffusion params for all frameworks."""
+    gen_noise_weight: float = Field(default=0.5, gt=0.0)
+    timestep_respacing: int | None = None
 
-class DDPMDiffusionParams(IngestibleParams):
-    """DDPM diffusion schedule params."""
 
-    num_train_timesteps: int = Field(default=1000, ge=2)
+class BaseFrameworkParams(IngestibleParams):
+    """Shared base params for all training frameworks."""
+
+    model: object = None
+    optimization: OptimizationParams
+    diffusion: CommonDiffusionParams  # framework-specific diffusion params, but with common noise schedule
+
+
+class DDPMDiffusionParams(CommonDiffusionParams):
+    """DDPM diffusion schedule params (total steps from optimization.sample_steps)."""
+
     beta_schedule: Literal["linear", "cosine"] = "linear"
     beta_start: float = Field(default=1e-4, gt=0.0)
     beta_end: float = Field(default=2e-2, gt=0.0)
@@ -34,36 +46,23 @@ class DDPMDiffusionParams(IngestibleParams):
         return self
 
 
-class RectifiedFlowModuleParams(IngestibleParams):
+class RectifiedFlowModuleParams(BaseFrameworkParams):
     """Params for RectifiedFlowModule — model reference resolved at build time."""
 
-    model: object = None
-    optimization: OptimizationParams
-    diffusion: object = None  # not used by rectified flow, but kept for schema compatibility
 
-
-class DDPMModuleParams(IngestibleParams):
+class DDPMModuleParams(BaseFrameworkParams):
     """Params for DDPMModule — model reference resolved at build time."""
-
-    model: object = None
-    optimization: OptimizationParams
     diffusion: DDPMDiffusionParams
 
 
-class IaNDiffusionParams(IngestibleParams):
+class IaNDiffusionParams(CommonDiffusionParams):
     """IaN diffusion schedule params (cosine interpolation)."""
-
-    num_train_timesteps: int = Field(default=1000, ge=2)
-    timestep_respacing: int | None = None
     loss_type: Literal["l2"] = "l2"
-    gen_noise_weight: float = Field(default=0.5, gt=0.0)
     sampling_mode: Literal["ddim", "pc"] = "pc"
 
 
-class IaNFlowModuleParams(IngestibleParams):
+class IaNFlowModuleParams(BaseFrameworkParams):
     """Params for IaNFlowModule — model reference resolved at build time."""
 
-    model: object = None
-    optimization: OptimizationParams
     diffusion: IaNDiffusionParams = IaNDiffusionParams()
     stage: int = Field(default=1, ge=1, le=2)

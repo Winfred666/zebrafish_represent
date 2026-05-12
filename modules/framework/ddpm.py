@@ -37,18 +37,15 @@ class DDPMModule(BaseTrainingFramework):
     """DDPM objective over a 3D DiT backbone."""
 
     def __init__(self, config: DDPMModuleParams):
-        super().__init__()
-        self.config = config
-        self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
+        super().__init__(config)
 
-        self.model = config.model
-        if config.optimization.loss_type == "mse":
+        if self.optimization.loss_type == "mse":
             self._loss_fn = lambda delta: delta.pow(2)
         else:
             self._loss_fn = torch.abs
 
-        betas = _build_beta_schedule(
-            num_train_timesteps=config.diffusion.num_train_timesteps,
+        betas = _build_beta_schedule( # scheduler for DDPM alphas and noise levels
+            num_train_timesteps=self.optimization.sample_steps,
             beta_schedule=config.diffusion.beta_schedule,
             beta_start=config.diffusion.beta_start,
             beta_end=config.diffusion.beta_end,
@@ -72,27 +69,6 @@ class DDPMModule(BaseTrainingFramework):
     def get_data_loss(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
         return self._ddpm_loss(batch["target"])
 
-    def _predict_x0(
-        self, noisy: Tensor, timesteps: Tensor, prediction: Tensor
-    ) -> Tensor:
-        """Convert DDPM prediction (epsilon/x0/v) to clean x0 estimate."""
-        T = self.config.diffusion.num_train_timesteps
-        timesteps = (timesteps * T).long().clamp(0, T - 1)
-        prediction_type = self.config.diffusion.prediction_type
-        if prediction_type == "x0":
-            return prediction
-        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy.ndim)
-        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy.ndim)
-        if prediction_type == "epsilon":
-            return (noisy - sigma * prediction) / alpha
-        # v-prediction
-        return alpha * noisy - sigma * prediction
-
-    def _make_noisy(self, clean: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
-        """DDPM forward diffusion at continuous t mapped to integer steps."""
-        noise = torch.randn_like(clean)
-        return self._q_sample(clean, t, noise), noise
-
     # ── DDPM-specific helpers ───────────────────────────────────
 
     @staticmethod
@@ -103,16 +79,17 @@ class DDPMModule(BaseTrainingFramework):
         return gathered
 
     def _normalized_t(self, timesteps: Tensor) -> Tensor:
-        denominator = float(max(1, self.config.diffusion.num_train_timesteps - 1))
+        denominator = float(max(1, self.optimization.sample_steps - 1))
         return timesteps.to(dtype=torch.float32) / denominator
 
-    def _q_sample(self, clean_volume: Tensor, timesteps: Tensor, noise: Tensor) -> Tensor:
-        if timesteps.dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
-            T = self.config.diffusion.num_train_timesteps
-            timesteps = (timesteps * T).long().clamp(0, T - 1)
-        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, clean_volume.ndim)
-        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, clean_volume.ndim)
-        return alpha * clean_volume + sigma * noise
+    def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
+        """DDPM forward: x_t = √(ᾱ_t)·x₀ + √(1-ᾱ_t)·ε  (t=0→clean, t=1→noise)."""
+        if t.dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
+            T = self.optimization.sample_steps
+            t = (t * (T - 1)).long().clamp(0, T - 1)
+        alpha = self._extract(self.sqrt_alphas_cumprod, t, clean.ndim)
+        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, t, clean.ndim)
+        return alpha * clean + sigma * noise
 
     def _target_from_prediction_type(
         self, clean_volume: Tensor, noise: Tensor, timesteps: Tensor
@@ -141,7 +118,7 @@ class DDPMModule(BaseTrainingFramework):
     def _ddpm_loss(self, clean_volume: Tensor) -> Dict[str, Tensor]:
         batch_size = clean_volume.shape[0]
         timesteps = torch.randint(
-            0, self.config.diffusion.num_train_timesteps, (batch_size,),
+            0, self.optimization.sample_steps, (batch_size,),
             device=clean_volume.device, dtype=torch.long,
         )
         noise = torch.randn_like(clean_volume)
@@ -152,64 +129,33 @@ class DDPMModule(BaseTrainingFramework):
         loss = self._loss_fn(prediction - target).mean()
         return {"loss": loss}
 
-    # ── sampling ────────────────────────────────────────────────
+    # ── one-step reverse diffusion ───────────────────────────────
 
-    @torch.no_grad()
-    def sample(self, batch_size: int = 1, steps: int | None = None) -> Tensor:
-        """Generate samples with ancestral DDPM or DDIM-style striding."""
-        self.eval()
-        total_steps = int(self.config.diffusion.num_train_timesteps)
-        sample_steps = int(steps or self.config.optimization.sample_steps)
-        sample_steps = max(1, min(sample_steps, total_steps))
-        use_full_schedule = sample_steps == total_steps
+    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
+        """Single ancestral DDPM reverse step. t ∈ [0,1], 0=clean, 1=noise."""
+        del step_size  # ancestral DDPM moves exactly one discrete step
+        # the posterior variance and mean are defined for adjacent steps. For multi-step jumps we must recompute the transition
+        # so no support for step_size
+        batch_size = noisy.shape[0]
+        T = self.optimization.sample_steps
+        timestep = int(t * (T - 1))
+        timestep = max(0, min(T - 1, timestep))
 
-        if use_full_schedule:
-            timestep_list = list(range(total_steps - 1, -1, -1))
-        else:
-            timestep_list = [
-                int(value.item())
-                for value in torch.linspace(total_steps - 1, 0, sample_steps, dtype=torch.long)
-            ]
+        t_tensor = torch.full((batch_size,), timestep, device=noisy.device, dtype=torch.long)
+        normalized_t = self._normalized_t(t_tensor)
+        prediction = self(noisy, normalized_t)
+        epsilon = self._epsilon_from_prediction(prediction, noisy, t_tensor)
 
-        sample = torch.randn(
-            (batch_size, self.config.model.out_channels,
-             self.config.model.input_size[0],
-             self.config.model.input_size[1],
-             self.config.model.input_size[2]),
-            device=self.device,
+        beta_t = self._extract(self.betas, t_tensor, noisy.ndim)
+        sqrt_one_minus_alpha_bar_t = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t_tensor, noisy.ndim
+        )
+        sqrt_recip_alpha_t = self._extract(self.sqrt_recip_alphas, t_tensor, noisy.ndim)
+        model_mean = sqrt_recip_alpha_t * (
+            noisy - (beta_t / sqrt_one_minus_alpha_bar_t) * epsilon
         )
 
-        for index, timestep_index in enumerate(timestep_list):
-            timesteps = torch.full((batch_size,), timestep_index, device=self.device, dtype=torch.long)
-            normalized_timesteps = self._normalized_t(timesteps)
-            prediction = self(sample, normalized_timesteps) # WARNING: here prediction
-            epsilon = self._epsilon_from_prediction(prediction, sample, timesteps)
-
-            if use_full_schedule:
-                beta_t = self._extract(self.betas, timesteps, sample.ndim)
-                sqrt_one_minus_alpha_bar_t = self._extract(
-                    self.sqrt_one_minus_alphas_cumprod, timesteps, sample.ndim
-                )
-                sqrt_recip_alpha_t = self._extract(self.sqrt_recip_alphas, timesteps, sample.ndim)
-                model_mean = sqrt_recip_alpha_t * (
-                    sample - (beta_t / sqrt_one_minus_alpha_bar_t) * epsilon
-                )
-                if timestep_index > 0:
-                    posterior_variance = self._extract(self.posterior_variance, timesteps, sample.ndim)
-                    sample = model_mean + torch.sqrt(posterior_variance) * torch.randn_like(sample)
-                else:
-                    sample = model_mean
-                continue
-
-            alpha_bar_t = self._extract(self.alphas_cumprod, timesteps, sample.ndim)
-            x0_prediction = (sample - torch.sqrt(1.0 - alpha_bar_t) * epsilon) / torch.sqrt(alpha_bar_t)
-            if index == len(timestep_list) - 1:
-                sample = x0_prediction
-                continue
-
-            previous_index = timestep_list[index + 1]
-            previous_timesteps = torch.full((batch_size,), previous_index, device=self.device, dtype=torch.long)
-            alpha_bar_prev = self._extract(self.alphas_cumprod, previous_timesteps, sample.ndim)
-            sample = torch.sqrt(alpha_bar_prev) * x0_prediction + torch.sqrt(1.0 - alpha_bar_prev) * epsilon
-
-        return sample
+        if timestep > 0:
+            posterior_variance = self._extract(self.posterior_variance, t_tensor, noisy.ndim)
+            return model_mean + torch.sqrt(posterior_variance) * torch.randn_like(noisy)
+        return model_mean

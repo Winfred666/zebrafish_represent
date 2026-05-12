@@ -1,11 +1,23 @@
-"""Rectified-flow training module."""
+"""Rectified-flow training module.
+
+Timestep convention (unified with IaN / DDPM):
+    t = 0  →  clean data  (x₀)
+    t = 1  →  pure noise  (ε)
+
+Forward interpolation:
+    x_t = (1 - t) · x₀  +  t · ε
+
+The model predicts the constant velocity  v = dx/dt = ε − x₀.
+Loss:  MSE(v_pred, ε − x₀).
+
+Reverse sampling (ODE): integrate from t = 1 back to t = 0.
+"""
 
 from __future__ import annotations
 
 from typing import Dict
 
 import torch
-from einops import repeat
 from torch import Tensor
 
 from modules.framework.base import BaseTrainingFramework
@@ -13,15 +25,12 @@ from utils.sanitize.framework_config import RectifiedFlowModuleParams
 
 
 class RectifiedFlowModule(BaseTrainingFramework):
-    """Rectified-flow objective over a 3D DiT backbone."""
+    """Rectified-flow objective over a 3D volume backbone."""
 
     def __init__(self, config: RectifiedFlowModuleParams):
-        super().__init__()
-        self.config = config
-        self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
+        super().__init__(config)
 
-        self.model = config.model
-        if config.optimization.loss_type == "mse":
+        if self.optimization.loss_type == "mse":
             self._loss_fn = lambda delta: delta.pow(2)
         else:
             self._loss_fn = torch.abs
@@ -31,34 +40,26 @@ class RectifiedFlowModule(BaseTrainingFramework):
     def get_data_loss(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
         return self._rectified_flow_loss(batch["target"])
 
-    def _predict_x0(
-        self, noisy: Tensor, timesteps: Tensor, prediction: Tensor
-    ) -> Tensor:
-        """Convert velocity prediction to clean x0: x0 = noisy + (1-t) * velocity."""
-        t_view = timesteps
-        while t_view.ndim < noisy.ndim:
-            t_view = t_view.unsqueeze(-1)
-        return noisy + (1.0 - t_view) * prediction
-
-    def _make_noisy(self, clean: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
-        """Rectified-flow interpolation: noisy = (1-t)*source + t*target."""
-        source = torch.randn_like(clean)
+    def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
+        """x_t = (1−t)·x₀ + t·ε   (t=0 → clean,  t=1 → noise)."""
         t_view = t
         while t_view.ndim < clean.ndim:
             t_view = t_view.unsqueeze(-1)
-        noisy = (1.0 - t_view) * source + t_view * clean
-        return noisy, source
+        return (1.0 - t_view) * clean + t_view * noise
 
     # ── rectified-flow specific ─────────────────────────────────
 
     def _rectified_flow_loss(self, target_volume: Tensor) -> Dict[str, Tensor]:
         batch_size = target_volume.shape[0]
-        source_volume = torch.randn_like(target_volume)
+        source_volume = torch.randn_like(target_volume) * self._noise_w
         timesteps = torch.rand(batch_size, device=target_volume.device)
-        timestep_view = repeat(timesteps, "b -> b 1 1 1 1")
 
-        noisy_volume = (1.0 - timestep_view) * source_volume + timestep_view * target_volume
-        target_velocity = target_volume - source_volume
+        t_view = timesteps
+        while t_view.ndim < target_volume.ndim:
+            t_view = t_view.unsqueeze(-1)
+
+        noisy_volume = (1.0 - t_view) * target_volume + t_view * source_volume
+        target_velocity = source_volume - target_volume  # ε − x₀
         predicted_velocity = self(noisy_volume, timesteps)
         loss = self._loss_fn(predicted_velocity - target_velocity).mean()
 
@@ -66,23 +67,12 @@ class RectifiedFlowModule(BaseTrainingFramework):
 
     # ── sampling ────────────────────────────────────────────────
 
-    @torch.no_grad()
-    def sample(self, batch_size: int = 1, steps: int | None = None) -> Tensor:
-        """Euler solver for the rectified-flow ODE from Gaussian noise to data."""
-        self.eval()
-        sample_steps = int(steps or self.config.optimization.sample_steps)
-        dt = 1.0 / sample_steps
-        shape = (
-            batch_size,
-            self.config.model.out_channels,
-            self.config.model.input_size[0],
-            self.config.model.input_size[1],
-            self.config.model.input_size[2],
-        )
-        sample = torch.randn(shape, device=self.device)
+    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
+        """Single reverse Euler step:  x ← x − step_size · v(x, t).
 
-        for step_index in range(sample_steps):
-            timesteps = torch.full((batch_size,), step_index / sample_steps, device=self.device)
-            sample = sample + dt * self(sample, timesteps)
-
-        return sample
+        v = ε̂ − x̂₀  points toward noise; subtracting moves toward clean.
+        """
+        batch_size = noisy.shape[0]
+        t_tensor = torch.full((batch_size,), t, device=noisy.device, dtype=noisy.dtype)
+        velocity = self(noisy, t_tensor)
+        return noisy - step_size * velocity

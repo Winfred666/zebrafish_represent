@@ -9,6 +9,4 @@ framework:
       loss_type: mse
       sample_steps: 50
     diffusion:
-      num_train_timesteps: 1000
       timestep_respacing: null
-      gen_noise_weight: 0.5

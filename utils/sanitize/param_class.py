@@ -17,7 +17,8 @@ class IngestibleParams(BaseModel):
         if isinstance(data, dict):
             known = set(cls.model_fields.keys())
             extra = set(data.keys()) - known
-            print(f"WARNING: Fields: '{extra}' not defined in {cls.__name__}, left unvalidated and directly passed to the runtime object. If this is intentional, ignore this warning.")
+            if extra:
+                print(f"WARNING: Fields: {sorted(extra)} not defined in {cls.__name__}, left unvalidated and directly passed to the runtime object. If this is intentional, ignore this warning.")
         return data
 
     @classmethod
