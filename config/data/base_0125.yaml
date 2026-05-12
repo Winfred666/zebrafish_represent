@@ -22,8 +22,10 @@ train_dataset:
 train_dataloader:
   class_name: DataLoader
   dataset: runtime.train_dataset
-  batch_size: 2
-  num_workers: 4
+  batch_size: 64
+  devices:
+  num_workers: 8
+  prefetch_factor: 4
   shuffle: true
   pin_memory: true
   persistent_workers: true
@@ -46,7 +48,8 @@ val_dataloader:
   class_name: DataLoader
   dataset: runtime.val_dataset
   batch_size: 2
-  num_workers: 2
+  num_workers: 4
+  prefetch_factor: 2
   shuffle: false
   pin_memory: true
   persistent_workers: false
