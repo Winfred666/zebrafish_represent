@@ -185,55 +185,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         denoised = self._make_clean(noisy, t_val)
         return F.mse_loss(denoised, clean_volume)
 
-    def _make_validation_panels(
-        self, clean: Tensor
-    ) -> dict[str, np.ndarray]:
-        """Build validation panels: multi-t, multi-Z XY slices + orthogonal views.
-
-        Returns a dict mapping descriptive keys (e.g. ``"xy_midz_t050"``)
-        to RGB image arrays produced by :func:`fix_2d_scalar`.
-        """
-        device = clean.device
-        t_vals = [0.25, 0.5, 0.75]
-
-        predictions_at_t: dict[float, np.ndarray] = {}
-        for tv in t_vals:
-            t_tensor = torch.full((1,), tv, device=device)
-            noisy, _ = self._make_noisy(clean, t_tensor)
-            with torch.no_grad():
-                denoised = self._make_clean(noisy, tv)
-            predictions_at_t[tv] = denoised[0, 0].detach().float().cpu().numpy()
-
-        c0 = clean[0, 0].detach().float().cpu().numpy()
-        D, H, W = c0.shape
-        mid_d, mid_h, mid_w = D // 2, H // 2, W // 2
-
-        panels: dict[str, np.ndarray] = {}
-
-        # Mid-Z XY panels at each t-value
-        for tv in t_vals:
-            p0 = predictions_at_t[tv]
-            panels[f"xy_midz_t{int(tv * 100):03d}"] = fix_2d_scalar(
-                c0[mid_d, :, :], p0[mid_d, :, :]
-            )
-
-        # Multi-Z XY panels at t=0.5 (top and bottom only; mid-Z already covered)
-        p0_050 = predictions_at_t[0.5]
-        for zkey, zi in [("top", int(D * 0.25)), ("bot", int(D * 0.75))]:
-            panels[f"xy_{zkey}z_t050"] = fix_2d_scalar(
-                c0[zi, :, :], p0_050[zi, :, :]
-            )
-
-        # Orthogonal mid-slice views at t=0.5
-        panels["xz_midy_t050"] = fix_2d_scalar(
-            c0[:, mid_h, :], p0_050[:, mid_h, :]
-        )
-        panels["yz_midx_t050"] = fix_2d_scalar(
-            c0[:, :, mid_w], p0_050[:, :, mid_w]
-        )
-
-        return panels
-
     def _validation_extra(self, clean: Tensor) -> dict[str, float]:
         """Override in subclasses to add framework-specific validation metrics."""
         del clean
@@ -369,7 +320,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         del batch_idx
         losses = self.get_data_loss(batch)
         for key, value in losses.items():
-            self.log(f"train_{key}", value, on_step=True, on_epoch=True, prog_bar=(key == "loss"))
+            self.log(f"train_{key}", value, on_step=True, on_epoch=False, prog_bar=(key == "loss"))
         if self.global_step % 500 == 0:
             recon = self._compute_reconstruction_loss_at_t(batch["target"], 0.5)
             self.log("train_reconstruction_loss", recon, on_step=False, on_epoch=True)
@@ -384,41 +335,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
         clean = batch["target"]
 
-        # Multi-step reconstruction loss at 5 noise levels
-        for t_label, t_val in [
-            ("val_recon_t0", 0.0),
-            ("val_recon_t025", 0.25),
-            ("val_recon_t050", 0.5),
-            ("val_recon_t075", 0.75),
-            ("val_recon_t1", 1.0),
-        ]:
-            recon = self._compute_reconstruction_loss_at_t(clean, t_val)
-            self.log(t_label, recon, on_step=False, on_epoch=True)
-
         # Framework-specific extra validation metrics
         extra = self._validation_extra(clean)
         for key, val in extra.items():
             self.log(f"val_{key}", val, on_step=False, on_epoch=True)
 
-        # Rich visualization: first 3 batches → multi-t, multi-Z, orthogonal views
-        if batch_idx < 3 and self.logger is not None:
-            try:
-                panels = self._make_validation_panels(clean[:1])
-                for panel_key, panel_img in panels.items():
-                    log_image_artifact(
-                        self.logger, panel_img,
-                        f"val_{panel_key}_batch_{batch_idx}",
-                        self.global_step,
-                    )
-            except Exception:
-                import traceback
-                print("WARNING: failed to log val visualization panel:", flush=True)
-                traceback.print_exc()
-
-        # Multi-sample vstack at batch_idx=5: denoise up to 4 samples at t=0.5
+        # Hard-fixed vstack at batch_idx=5 (minimum artifact even without fusion)
         if batch_idx == 5 and self.logger is not None:
             try:
-                n_show = min(clean.shape[0], 4)
+                n_show = min(clean.shape[0], 5)
                 t_tensor = torch.full((n_show,), 0.5, device=clean.device)
                 noisy, _ = self._make_noisy(clean[:n_show], t_tensor)
                 denoised = self._make_clean(noisy, 0.5)
@@ -428,19 +353,17 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     c0 = clean[i, 0].detach().float().cpu().numpy()
                     d0 = denoised[i, 0].detach().float().cpu().numpy()
                     mid_d = c0.shape[0] // 2
-                    panel = fix_2d_scalar(c0[mid_d], d0[mid_d])
-                    panels.append(panel)
+                    panels.append(fix_2d_scalar(c0[mid_d], d0[mid_d]))
 
                 if panels:
-                    vstacked = np.vstack(panels)
                     log_image_artifact(
-                        self.logger, vstacked,
-                        f"val_multisample_n{n_show}_t050",
+                        self.logger, np.vstack(panels),
+                        "val_xy_midz_t50_batch_5",
                         self.global_step,
                     )
             except Exception:
                 import traceback
-                print("WARNING: failed to log multi-sample panel:", flush=True)
+                print("WARNING: failed to log batch-5 vstack panel:", flush=True)
                 traceback.print_exc()
 
         # Fusion-crop collection (first validation only: builds noisy crop bank)
