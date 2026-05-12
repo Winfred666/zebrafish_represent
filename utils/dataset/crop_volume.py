@@ -1,12 +1,15 @@
-"""Crop-based TIF volume dataset for 3D generative training.
+"""Crop-based TIF volume dataset with lazy loading and crop-index caching.
 
-Each item is a ``crop`` — a fixed-size subvolume with metadata (fusion_id,
-pos_idx, full_size) so crops can be fused back into the original volume.
+Scales to hundreds of TIFFs by (1) caching the pre-computed non-zero crop grid
+to disk so subsequent runs skip the expensive zero-filter pass, and (2) loading
+volumes on demand with an LRU cache so RAM usage is bounded to a few volumes.
 """
 
 from __future__ import annotations
 
-import math
+import hashlib
+import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict
 
@@ -19,15 +22,20 @@ from utils.tif2volume import process_tif_to_array
 
 
 class CropTifVolumeDataset(BaseTifVolumeDataset):
-    """Grid-crop dataset with zero-filtering and optional patch-grid snap.
+    """Grid-crop dataset with zero-filtering, lazy loading, and crop-index cache.
 
-    All crops carry metadata so they can be reassembled into the original
-    fusion volume via :func:`utils.dataset.fusion.volume_fuse`.
+    On first run the full non-zero crop grid is computed and saved to
+    ``cache_dir``.  Subsequent runs load it instantly.  Volumes are loaded
+    on demand and held in a bounded LRU cache so RAM grows with cache size,
+    not with dataset size.
+
+    All crops carry metadata for reassembly via
+    :func:`utils.dataset.fusion.volume_fuse`.
     """
 
+    # ── init ──────────────────────────────────────────────────────
+
     def __init__(self, config: CropTifVolumeDatasetParams):
-        # Set crop-specific attrs BEFORE super().__init__ so _load_volume
-        # (which is called during base init) sees them via Python MRO.
         self.config = config
         self.normalize = bool(config.normalize)
         self.clip_percentile = config.clip_percentile
@@ -40,28 +48,126 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             if self.crop_size is not None
             else (0.0, 0.0, 0.0)
         )
+        self.scale_factor = tuple(float(v) for v in config.scale_factor)
 
-        super().__init__(
-            data_dir=config.data_dir,
-            max_files=config.max_files,
-            scale_factor=config.scale_factor,
+        # ── file discovery ──
+        self.data_dir = Path(config.data_dir)
+        self._file_paths = self._discover_files()
+        self.file_count = len(self._file_paths)
+
+        # ── lazy-loading state ──
+        # Cache all volumes (each ~6 MB at 0.125 scale; 100 files ≈ 600 MB RAM).
+        # Small cache causes constant network-I/O cache misses that starve the GPU.
+        self._max_cached = max(4, self.file_count)
+        self._volume_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+
+        # ── volume shapes (read without loading full data) ──
+        self._vol_shapes: list[tuple[int, ...]] = [
+            self._read_shape(fp) for fp in self._file_paths
+        ]
+
+        # ── crop index (from cache or first-pass build) ──
+        self.effective_input_size = (
+            self.crop_size
+            if self.crop_size is not None
+            else self._vol_shapes[0][1:]
         )
-
-        # Post-init: effective input size and crop grid
-        if self.crop_size is not None:
-            self.effective_input_size = self.crop_size
-        else:
-            self.effective_input_size = tuple(int(v) for v in self.volumes[0].shape[1:])
-
-        self.crop_grid: list[tuple[int, int, int, int]] = self._build_crop_grid()
+        self.crop_grid: list[tuple[int, int, int, int]] = self._load_or_build_crop_grid()
 
         print(
-            f"[TIF-LOG] crop_size={self.crop_size}, "
+            f"[TIF-LOG] {self.file_count} files indexed, "
+            f"crop_size={self.crop_size}, "
             f"effective_input_size={self.effective_input_size}, "
             f"overlap={self.overlap}, total_crops={len(self.crop_grid)}"
         )
 
-    # ── overridden volume I/O (adds normalize + clip + in_channels) ──
+        # ── preload all volumes into main-process cache ──────────
+        # Workers inherit this cache via fork() copy-on-write, so they
+        # never hit network I/O on _get_volume.  This avoids the 2894
+        # TIF loads / 2 epochs we saw at _max_cached=4.
+        if self.crop_size is not None:
+            for vol_idx in range(self.file_count):
+                self._get_volume(vol_idx)
+
+    # ── file discovery ────────────────────────────────────────────
+
+    def _discover_files(self) -> list[Path]:
+        files = sorted(
+            list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
+        )
+        if self.config.max_files is not None:
+            files = files[: int(self.config.max_files)]
+        if not files:
+            raise ValueError(f"No tif files found in {self.data_dir}")
+        return files
+
+    # ── shape probe (header only, no data load) ───────────────────
+
+    def _read_shape(self, file_path: Path) -> tuple[int, ...]:
+        """Read downsampled volume shape from TIFF header without loading pixel data."""
+        try:
+            import tifffile
+            with tifffile.TiffFile(str(file_path)) as tif:
+                page = tif.pages[0]
+                shape: tuple[int, ...] = page.shape
+                if len(shape) == 3:           # (D, H, W)
+                    shape = (1, *shape)
+                elif len(shape) == 2:          # (H, W)
+                    shape = (1, 1, *shape)
+                # Apply scale factor to spatial dims (keep channels unchanged)
+                sf = self.scale_factor
+                return (shape[0],) + tuple(max(1, int(s * f)) for s, f in zip(shape[1:], sf))
+        except Exception:
+            vol = self._load_volume(file_path)
+            return tuple(vol.shape)
+
+    # ── crop index cache ──────────────────────────────────────────
+
+    def _cache_key(self) -> str:
+        """Deterministic key from all parameters that affect the crop grid."""
+        parts = {
+            "files": sorted(str(p.name) for p in self._file_paths),
+            "crop_size": self.crop_size,
+            "overlap": self.overlap,
+            "patch_grid_multiple": self.patch_grid_multiple,
+            "pad_to_multiple": self.pad_to_multiple,
+        }
+        raw = json.dumps(parts, sort_keys=True, default=str)
+        return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+    def _cache_path(self) -> Path:
+        return self.data_dir / f".crop_index_{self._cache_key()}.pt"
+
+    def _load_or_build_crop_grid(self) -> list[tuple[int, int, int, int]]:
+        cache_path = self._cache_path()
+        if cache_path.exists():
+            print(f"[TIF-LOG] Loading cached crop index: {cache_path}")
+            loaded = torch.load(cache_path, weights_only=True)
+            if isinstance(loaded, list):
+                return loaded
+            print("[TIF-LOG] Stale cache — rebuilding crop index")
+
+        grid = self._build_crop_grid()
+        torch.save(grid, cache_path)
+        print(f"[TIF-LOG] Crop index cached to {cache_path}")
+        return grid
+
+    # ── volume I/O (lazy + LRU) ──────────────────────────────────
+
+    def _get_volume(self, vol_idx: int) -> np.ndarray:
+        """Return volume *vol_idx*, loading it into the LRU cache if needed."""
+        if vol_idx in self._volume_cache:
+            # Move to end (most-recently-used)
+            self._volume_cache.move_to_end(vol_idx)
+            return self._volume_cache[vol_idx]
+
+        # Evict oldest if cache full
+        while len(self._volume_cache) >= self._max_cached:
+            self._volume_cache.popitem(last=False)
+
+        volume = self._load_volume(self._file_paths[vol_idx])
+        self._volume_cache[vol_idx] = volume
+        return volume
 
     def _load_volume(self, file_path: Path) -> np.ndarray:
         volume = process_tif_to_array(
@@ -70,7 +176,6 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             normalize=self.normalize,
             clip_percentile=self.clip_percentile,
         )
-
         if volume.shape[0] < self.in_channels:
             raise ValueError(
                 f"File {file_path} has {volume.shape[0]} channels, "
@@ -78,23 +183,13 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             )
         volume = volume[: self.in_channels]
         volume = self._pad_full_volume_if_needed(volume)
-
-        print(
-            "[TIF-LOG]"
-            f" file={file_path.name}"
-            f" shape={tuple(volume.shape)}"
-            f" min={float(volume.min()):.4f}"
-            f" max={float(volume.max()):.4f}"
-            f" mean={float(volume.mean()):.4f}"
-        )
         return volume.astype(np.float32, copy=False)
 
-    # ── padding ──
+    # ── padding ───────────────────────────────────────────────────
 
     def _pad_full_volume_if_needed(self, volume: np.ndarray) -> np.ndarray:
         if self.crop_size is not None or self.pad_to_multiple is None:
             return volume
-
         _, depth, height, width = volume.shape
         mult_depth, mult_height, mult_width = self.pad_to_multiple
         pad_depth = (mult_depth - (depth % mult_depth)) % mult_depth
@@ -102,7 +197,6 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         pad_width = (mult_width - (width % mult_width)) % mult_width
         if pad_depth == 0 and pad_height == 0 and pad_width == 0:
             return volume
-
         return np.pad(
             volume,
             ((0, 0), (0, pad_depth), (0, pad_height), (0, pad_width)),
@@ -110,89 +204,70 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             constant_values=0.0,
         )
 
-    # ── crop grid ──
+    # ── crop grid ─────────────────────────────────────────────────
 
     def _grid_starts(
         self, dim_length: int, crop_length: int, overlap_fraction: float, axis: int
     ) -> list[int]:
-        """Start positions along one spatial axis for a regular overlapping grid."""
         if dim_length <= crop_length:
             return [0]
-
         stride = max(1, int(round(crop_length * (1.0 - overlap_fraction))))
-        n_crops = math.ceil((dim_length - crop_length) / stride) + 1
+        n_crops = (dim_length - crop_length) // stride + 1
         starts = [i * stride for i in range(n_crops)]
-        max_start = dim_length - crop_length
-        if starts[-1] > max_start:
-            starts[-1] = max_start
-
-        # Grid-snap: align starts to patch_grid_multiple
+        if starts[-1] > dim_length - crop_length:
+            starts[-1] = dim_length - crop_length
         if self.patch_grid_multiple is not None:
             multiple = int(self.patch_grid_multiple[axis])
             starts = sorted(set((s // multiple) * multiple for s in starts))
-
         return starts
 
     def _build_crop_grid(self) -> list[tuple[int, int, int, int]]:
-        """Precompute (vol_idx, start_d, start_h, start_w) for every crop.
-
-        Filters all-zero crops by default.
-        """
-        raw_grid: list[tuple[int, int, int, int]] = []
-
-        for vol_idx, volume in enumerate(self.volumes):
+        """Full-pass: load every volume, enumerate all crops, filter zeros."""
+        raw: list[tuple[int, int, int, int]] = []
+        for vol_idx in range(self.file_count):
+            vol = self._get_volume(vol_idx)
             if self.crop_size is None:
-                raw_grid.append((vol_idx, 0, 0, 0))
+                raw.append((vol_idx, 0, 0, 0))
                 continue
+            _, depth, height, width = vol.shape
+            cd, ch, cw = self.crop_size
+            od, oh, ow = self.overlap
+            for sd in self._grid_starts(depth, cd, od, axis=0):
+                for sh in self._grid_starts(height, ch, oh, axis=1):
+                    for sw in self._grid_starts(width, cw, ow, axis=2):
+                        raw.append((vol_idx, sd, sh, sw))
 
-            _, depth, height, width = volume.shape
-            crop_d, crop_h, crop_w = self.crop_size
-            overlap_d, overlap_h, overlap_w = self.overlap
-
-            starts_d = self._grid_starts(depth, crop_d, overlap_d, axis=0)
-            starts_h = self._grid_starts(height, crop_h, overlap_h, axis=1)
-            starts_w = self._grid_starts(width, crop_w, overlap_w, axis=2)
-
-            for sd in starts_d:
-                for sh in starts_h:
-                    for sw in starts_w:
-                        raw_grid.append((vol_idx, sd, sh, sw))
-
-        # Zero-filter
         filtered: list[tuple[int, int, int, int]] = []
-        empty_count = 0
-        for vol_idx, sd, sh, sw in raw_grid:
-            crop = self._extract_crop(self.volumes[vol_idx], sd, sh, sw)
+        empty = 0
+        for vol_idx, sd, sh, sw in raw:
+            vol = self._get_volume(vol_idx)
+            crop = self._extract_crop(vol, sd, sh, sw)
             if np.any(crop):
                 filtered.append((vol_idx, sd, sh, sw))
             else:
-                empty_count += 1
+                empty += 1
 
-        total = len(raw_grid)
+        total = len(raw)
         if total > 0:
             print(
-                f"[TIF-LOG] Empty crop filter: {empty_count}/{total} "
-                f"({empty_count / total * 100:.2f}%) all-zero crops removed, "
-                f"{len(filtered)} crops retained"
+                f"[TIF-LOG] Empty crop filter: {empty}/{total} "
+                f"({empty / total * 100:.2f}%) all-zero crops removed, "
+                f"{len(filtered)} retained"
             )
-
         return filtered
 
-    # ── crop extraction ──
+    # ── crop extraction ───────────────────────────────────────────
 
     def _extract_crop(
         self, volume: np.ndarray, start_d: int, start_h: int, start_w: int
     ) -> np.ndarray:
-        """Extract a deterministic crop, padding if the volume is too small."""
         if self.crop_size is None:
             return volume.astype(np.float32, copy=False)
-
         _, depth, height, width = volume.shape
-        crop_d, crop_h, crop_w = self.crop_size
-
-        pad_d = max(0, crop_d - depth)
-        pad_h = max(0, crop_h - height)
-        pad_w = max(0, crop_w - width)
+        cd, ch, cw = self.crop_size
+        pad_d = max(0, cd - depth)
+        pad_h = max(0, ch - height)
+        pad_w = max(0, cw - width)
         if pad_d > 0 or pad_h > 0 or pad_w > 0:
             volume = np.pad(
                 volume,
@@ -200,25 +275,25 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
                 mode="constant",
                 constant_values=0.0,
             )
-
         crop = volume[
             :,
-            start_d : start_d + crop_d,
-            start_h : start_h + crop_h,
-            start_w : start_w + crop_w,
+            start_d : start_d + cd,
+            start_h : start_h + ch,
+            start_w : start_w + cw,
         ]
         return crop.astype(np.float32, copy=False)
 
-    # ── Dataset interface ──
+    # ── Dataset interface ─────────────────────────────────────────
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         vol_idx, sd, sh, sw = self.crop_grid[index]
-        crop = self._extract_crop(self.volumes[vol_idx], sd, sh, sw)
+        volume = self._get_volume(vol_idx)
+        crop = self._extract_crop(volume, sd, sh, sw)
         return {
-            "target": torch.from_numpy(crop),
+            "target": torch.from_numpy(crop.copy()),
             "fusion_id": vol_idx,
             "pos_idx": torch.tensor([sd, sh, sw], dtype=torch.long),
-            "full_size": torch.tensor(self.volumes[vol_idx].shape, dtype=torch.long),
+            "full_size": torch.tensor(volume.shape, dtype=torch.long),
         }
 
     def __len__(self) -> int:
