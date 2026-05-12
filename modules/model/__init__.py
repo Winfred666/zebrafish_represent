@@ -1,7 +1,14 @@
 """Volume prediction model package."""
 
+from modules.block.pos_enc import get_normalized_3d_pos_enc
 from modules.model.base import BaseVolumeModel
-from modules.model.dit3d import DiT3D
-from modules.model.local_denoiser import LocalDenoiser3D
+from modules.model.dit3d import DiT3D, PatchEmbed3D
+from modules.model.prdit import PRDiT
 
-__all__ = ["BaseVolumeModel", "DiT3D", "LocalDenoiser3D"]
+__all__ = [
+    "BaseVolumeModel",
+    "DiT3D",
+    "PRDiT",
+    "PatchEmbed3D",
+    "get_normalized_3d_pos_enc",
+]

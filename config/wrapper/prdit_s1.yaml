@@ -1,0 +1,19 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 100
+    accelerator: gpu
+    check_val_every_n_epoch: 5
+    limit_val_batches: 0.5
+    log_every_n_steps: 100
+
+logging:
+  params:
+    experiment_name: prdit_s1_IaN
+    run_name: prdit_s1
+    tags:
+      stage: "1"
+
+testing:
+  sample_steps: 50

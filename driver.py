@@ -13,7 +13,7 @@ sys.path.append(str(Path(__file__).parent))
 
 from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.path_io import load_dotenv
-from utils.sanitize.runtime_factory import build_training_runtime_from_files
+from utils.runtime_factory import build_training_runtime_from_files
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

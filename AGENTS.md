@@ -255,10 +255,22 @@ GPU availability: `bash ~/.claude/skills/use-gpu/scripts/gpu_check.sh`
   - Residual (difference): `bwr`
 - All visualization helpers live under `utils/display/` and follow these conventions.
 
+## Dataset Terminology
+
+Three levels of volume granularity:
+
+| Term | Definition | Source |
+|------|-----------|--------|
+| **fusion** | One whole TIF volume (or downsampled), loaded by `BaseTifVolumeDataset` | `utils/dataset/base_volume.py` |
+| **crop** | One fixed-size training sample extracted on a regular grid with overlap, zero-filtering, and optional grid-snap to `patch_grid_multiple` | `utils/dataset/crop_volume.py` |
+| **patch** | One token that `LocalDenoiser3D` processes via `ExtractPatches3D` — the smallest unit the model operates on | `modules/model/local_denoiser.py` |
+
+Every crop carries metadata for reconstruction: `sample_id` (fusion index), `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.
+
 ## Data and Tensor Conventions
 
 - Network tensor shape: `(B, C, D, H, W)`
-- Dataset sample dict for volume training: `{"target": Tensor[C, D, H, W]}`
+- Dataset sample dict: `{"target": Tensor[C, D, H, W], "sample_id": int, "pos_idx": Tensor[3], "full_size": Tensor[4]}`
 - Spatial axis order is always `(D, H, W)`
 - Volume channels are channel-first after preprocessing
 - This repository works on TIF/TIFF microscopy volumes, not NIfTI volumes

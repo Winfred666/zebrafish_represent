@@ -34,7 +34,7 @@ class DDPMDiffusionParams(IngestibleParams):
         return self
 
 
-class RectifiedFlowParams(IngestibleParams):
+class RectifiedFlowModuleParams(IngestibleParams):
     """Params for RectifiedFlowModule — model reference resolved at build time."""
 
     model: object = None
@@ -42,9 +42,28 @@ class RectifiedFlowParams(IngestibleParams):
     diffusion: object = None  # not used by rectified flow, but kept for schema compatibility
 
 
-class DDPMParams(IngestibleParams):
+class DDPMModuleParams(IngestibleParams):
     """Params for DDPMModule — model reference resolved at build time."""
 
     model: object = None
     optimization: OptimizationParams
     diffusion: DDPMDiffusionParams
+
+
+class IaNDiffusionParams(IngestibleParams):
+    """IaN diffusion schedule params (cosine interpolation)."""
+
+    num_train_timesteps: int = Field(default=1000, ge=2)
+    timestep_respacing: int | None = None
+    loss_type: Literal["l2"] = "l2"
+    gen_noise_weight: float = Field(default=0.5, gt=0.0)
+    sampling_mode: Literal["ddim", "pc"] = "pc"
+
+
+class IaNFlowModuleParams(IngestibleParams):
+    """Params for IaNFlowModule — model reference resolved at build time."""
+
+    model: object = None
+    optimization: OptimizationParams
+    diffusion: IaNDiffusionParams = IaNDiffusionParams()
+    stage: int = Field(default=1, ge=1, le=2)

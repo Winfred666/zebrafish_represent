@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from utils.eval.sample_quality import compute_sample_quality_metrics
-from utils.sanitize.runtime_factory import (
+from utils.runtime_factory import (
     _collect_runtime_deps,
     _extract_ref_path,
     _is_runtime_ref,
@@ -21,14 +21,14 @@ class RuntimeEntryTest(unittest.TestCase):
     def test_builder_globals_resolves_expected_classes(self) -> None:
         """build_any_runtime_object resolves key classes via globals()."""
         expected_classes = {
-            "DiT3D", "LocalDenoiser3D",
+            "DiT3D", "PRDiT",
             "RectifiedFlowModule", "DDPMModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
-            "TifVolumeDataset", "TifVolumePatchDataset", "DataLoader",
+            "CropTifVolumeDataset", "DataLoader",
         }
-        import utils.sanitize.runtime_factory as rf
+        import utils.runtime_factory as rf
         available = set(rf.__dict__)
         missing = expected_classes - available
         self.assertEqual(len(missing), 0,
@@ -120,23 +120,17 @@ class RuntimeEntryTest(unittest.TestCase):
             "input_size": [4, 4, 4], "patch_size": [2, 2, 2],
             "hidden_size": 64, "depth": 2, "num_heads": 4,
             "mlp_ratio": 2.0,
-            "tokenizer_kind": "conv3d",
-            "tokenizer_patch_size": [2, 2, 2],
-            "tokenizer_stride": [2, 2, 2],
-            "tokenizer_padding": [0, 0, 0],
+            "pos_encoding_type": "sinusoidal",
         })
         self.assertEqual(params.hidden_size, 64)
+        self.assertEqual(params.pos_encoding_type, "sinusoidal")
 
         with self.assertRaises(ValueError):
             DiT3DParams.model_validate({
                 "in_channels": 1, "out_channels": 1,
-                "input_size": [4, 4, 4], "patch_size": [2, 2, 2],
+                "input_size": [4, 4, 4], "patch_size": [3, 3, 3],
                 "hidden_size": 64, "depth": 2, "num_heads": 4,
                 "mlp_ratio": 2.0,
-                "tokenizer_kind": "extract_patches",
-                "tokenizer_patch_size": [4, 4, 4],
-                "tokenizer_stride": [2, 2, 2],
-                "tokenizer_padding": [1, 1, 1],
             })
 
     # ── Sample quality metrics (no data loading) ──
@@ -150,9 +144,9 @@ class RuntimeEntryTest(unittest.TestCase):
     # ── YAML import inheritance ──
 
     def test_yaml_import_config_chain(self) -> None:
-        config = load_yaml_config("config/model/local_denoiser.yaml")
-        self.assertEqual(config["model"]["class_name"], "LocalDenoiser3D")
-        self.assertEqual(config["model"]["params"]["extract_patch_size"], [4, 4, 4])
+        config = load_yaml_config("config/model/dit.yaml")
+        self.assertEqual(config["model"]["class_name"], "DiT3D")
+        self.assertEqual(config["model"]["params"]["patch_size"], [2, 2, 2])
 
     def test_framework_config_defaults(self) -> None:
         config = load_yaml_config("config/framework/base.yaml")
@@ -161,7 +155,7 @@ class RuntimeEntryTest(unittest.TestCase):
 
     def test_wrapper_override_inherits_base_callbacks(self) -> None:
         """Child wrapper config inherits callbacks from base, unless overridden."""
-        config = load_yaml_config("config/wrapper/local_denoier.yaml")
+        config = load_yaml_config("config/wrapper/prdit_s1.yaml")
         trainer_params = config["trainer"]["params"]
         self.assertIn("callbacks", trainer_params)
 

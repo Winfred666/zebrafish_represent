@@ -211,37 +211,13 @@ from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, Mode
 from pytorch_lightning.loggers import MLFlowLogger
 from torch.utils.data import DataLoader
 
-from modules.framework.ddpm import DDPMModule
-from modules.framework.rect_flow import RectifiedFlowModule
-from modules.model.dit3d import DiT3D
-from modules.model.local_denoiser import LocalDenoiser3D
-from utils.dataset.patch import TifVolumePatchDataset
-from utils.dataset.volume import TifVolumeDataset
 from utils.display.log_artifact import ArtifactManager
 from utils.display.log_gpu import IntegratedGPUMemoryMonitor
-from torch.utils.data import DataLoader
-from utils.sanitize.data_config import DataLoaderParams, VolumeDatasetParams
-from utils.sanitize.framework_config import (
-    DDPMDiffusionParams,
-    DDPMParams,
-    OptimizationParams,
-    RectifiedFlowParams,
-)
-from utils.sanitize.model_config import DiT3DParams, LocalDenoiser3DParams
-from utils.sanitize.wrapper_config import (
-    EarlyStoppingParams,
-    IntegratedGPUMemoryMonitorParams,
-    LearningRateMonitorParams,
-    MLFlowLoggerParams,
-    ModelCheckpointParams,
-    TrainerParams,
-)
+from utils.dataset import *
+from modules.framework import *
+from modules.model import *  # DiT3D, PRDiT, BaseVolumeModel
+from utils.sanitize import *  # all Params classes
 
-# Aliases — params class name must match class_name + "Params" for build_any_runtime_object
-TifVolumePatchDatasetParams = VolumeDatasetParams
-TifVolumeDatasetParams = VolumeDatasetParams
-DDPMModuleParams = DDPMParams
-RectifiedFlowModuleParams = RectifiedFlowParams
 
 # ── Build item descriptor ──
 
@@ -422,11 +398,9 @@ def build_training_runtime(
         if not isinstance(section, dict):
             continue
         if "class_name" not in section:
-            # Auto-add class_name for known key patterns
-            if key.endswith("_dataloader"):
-                section = dict(section, class_name="DataLoader")
-            else:
-                continue
+            # Raw config values (seed, testing, resume_ckpt_path) — consumed
+            # directly by driver.py, not built as runtime objects.
+            continue
         deps = _collect_runtime_deps(section)
         items.append(_BuildItem(key, section, deps))
 

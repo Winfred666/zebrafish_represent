@@ -1,18 +1,15 @@
 """Dataset package exports."""
 
-from utils.dataset.patch import TifVolumePatchDataset
-from utils.dataset.volume import TifVolumeDataset
-from utils.sanitize.data_config import VolumeDatasetParams
+from utils.dataset.crop_volume import CropTifVolumeDataset
+from utils.sanitize.data_config import CropTifVolumeDatasetParams
 
 
-def build_tif_dataset(config: VolumeDatasetParams) -> TifVolumeDataset | TifVolumePatchDataset:
-    """Instantiate the configured TIF dataset variant."""
-    if config.class_name == "TifVolumePatchDataset":
-        return TifVolumePatchDataset(config)
-    return TifVolumeDataset(config)
+def build_tif_dataset(config: CropTifVolumeDatasetParams) -> CropTifVolumeDataset:
+    """Instantiate the configured crop-based TIF dataset."""
+    return CropTifVolumeDataset(config)
+
 
 __all__ = [
     "build_tif_dataset",
-    "TifVolumePatchDataset",
-    "TifVolumeDataset",
+    "CropTifVolumeDataset",
 ]

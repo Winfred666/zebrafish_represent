@@ -36,3 +36,40 @@ class TimestepEmbedder(nn.Module):
             raise ValueError(f"Expected 1D timesteps, got shape={tuple(t.shape)}")
         timestep_features = self.timestep_embedding(t, self.frequency_embedding_size)
         return self.mlp(timestep_features)
+
+
+class DualHeadTimestepEmbedder(nn.Module):
+    """Timestep embedder with separate coarse and fine conditioning heads.
+
+    Scalar timesteps → sinusoidal embedding → shared MLP → two heads:
+
+    - coarse head: projects to the coarse denoiser's token dimension
+    - fine head: projects to the transformer hidden size (identity when depth==0)
+    """
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        coarse_hidden_size: int,
+        fine_hidden_size: int,
+        frequency_embedding_size: int = 256,
+        is_depth_zero: bool = True,
+    ):
+        super().__init__()
+        self.frequency_embedding_size = frequency_embedding_size
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            nn.SiLU(),
+        )
+        self.coarse_head = nn.Linear(hidden_size, coarse_hidden_size, bias=True)
+        self.fine_head = (
+            nn.Identity()
+            if is_depth_zero
+            else nn.Linear(hidden_size, fine_hidden_size, bias=True)
+        )
+
+    def forward(self, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        timestep_emb = TimestepEmbedder.timestep_embedding(t, self.frequency_embedding_size)
+        shared = self.mlp(timestep_emb)
+        return self.coarse_head(shared), self.fine_head(shared)

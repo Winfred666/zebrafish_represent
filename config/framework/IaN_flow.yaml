@@ -1,0 +1,14 @@
+framework:
+  class_name: IaNFlowModule
+  params:
+    model: runtime.model
+    stage: 1
+    optimization:
+      learning_rate: 0.0001
+      weight_decay: 0.0
+      loss_type: mse
+      sample_steps: 50
+    diffusion:
+      num_train_timesteps: 1000
+      timestep_respacing: null
+      gen_noise_weight: 0.5

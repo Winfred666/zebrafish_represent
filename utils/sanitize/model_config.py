@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any
 
 from pydantic import Field, model_validator
 
@@ -20,27 +20,14 @@ class DiT3DParams(IngestibleParams):
     depth: int = Field(ge=1)
     num_heads: int = Field(ge=1)
     mlp_ratio: float = Field(gt=0.0)
-    tokenizer_kind: Literal["conv3d"] = "conv3d"
-    tokenizer_patch_size: tuple[int, int, int]
-    tokenizer_stride: tuple[int, int, int]
-    tokenizer_padding: tuple[int, int, int]
+    tokenizer: Any = None
+    pos_encoding_type: str = "learned"
+    tokenizer_patch_size: tuple[int, int, int] | None = None
+    tokenizer_stride: tuple[int, int, int] | None = None
+    tokenizer_padding: tuple[int, int, int] = (0, 0, 0)
 
     @model_validator(mode="after")
     def _validate_tokenizer_alignment(self) -> "DiT3DParams":
-        if self.tokenizer_kind != "conv3d":
-            raise ValueError("DiT3D requires tokenizer_kind='conv3d'")
-        if self.tokenizer_patch_size != self.patch_size:
-            raise ValueError(
-                f"DiT3D requires tokenizer_patch_size == patch_size. "
-                f"Got {self.tokenizer_patch_size} != {self.patch_size}"
-            )
-        if self.tokenizer_stride != self.patch_size:
-            raise ValueError(
-                f"DiT3D requires tokenizer_stride == patch_size. "
-                f"Got {self.tokenizer_stride} != {self.patch_size}"
-            )
-        if self.tokenizer_padding != (0, 0, 0):
-            raise ValueError("DiT3D requires tokenizer_padding=[0, 0, 0]")
         if any(s % p != 0 for s, p in zip(self.input_size, self.patch_size)):
             raise ValueError(
                 f"input_size must be divisible by patch_size. "
@@ -49,31 +36,36 @@ class DiT3DParams(IngestibleParams):
         return self
 
 
-class LocalDenoiser3DParams(IngestibleParams):
-    """Params for the LocalDenoiser3D (PRDiT) backbone.
+class PRDiTParams(IngestibleParams):
+    """Params for the PRDiT model (stage-1 or stage-2)."""
 
-    Field names directly match LocalDenoiser3D.__init__ parameters.
-    """
-
-    in_channels: int = Field(ge=1)
-    out_channels: int = Field(ge=1)
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=1, ge=1)
     input_size: tuple[int, int, int]
     patch_size: tuple[int, int, int]
     extract_patch_size: tuple[int, int, int]
-    extract_stride: tuple[int, int, int]
-    extract_padding: tuple[int, int, int]
-    mlp_ratio: float = Field(default=1.0, gt=0.0)
+    extract_stride: tuple[int, int, int] | None = None
+    extract_padding: tuple[int, int, int] = (0, 0, 0)
+    hidden_size: int = Field(ge=1)
+    depth: int = Field(default=0, ge=0)
+    num_heads: int = Field(default=8, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0)
+    coarse_mlp_ratio: float = Field(default=1.0, gt=0.0)
 
     @model_validator(mode="after")
-    def _validate_grid_alignment(self) -> "LocalDenoiser3DParams":
+    def _validate_grid_alignment(self) -> "PRDiTParams":
         if any(s % p != 0 for s, p in zip(self.input_size, self.patch_size)):
             raise ValueError(
                 f"input_size must be divisible by patch_size. "
                 f"Got input_size={self.input_size}, patch_size={self.patch_size}"
             )
+        extract_stride = (
+            self.extract_stride if self.extract_stride is not None
+            else self.extract_patch_size
+        )
         for axis, (in_sz, out_p, ex_p, ex_s, ex_pad) in enumerate(
             zip(self.input_size, self.patch_size, self.extract_patch_size,
-                self.extract_stride, self.extract_padding), start=1
+                extract_stride, self.extract_padding), start=1
         ):
             numerator = in_sz + 2 * ex_pad - ex_p
             if numerator < 0:

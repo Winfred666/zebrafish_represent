@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 
 from modules.framework.base import BaseTrainingFramework
-from utils.sanitize.framework_config import DDPMParams
+from utils.sanitize.framework_config import DDPMModuleParams
 
 
 def _build_beta_schedule(
@@ -36,7 +36,7 @@ def _build_beta_schedule(
 class DDPMModule(BaseTrainingFramework):
     """DDPM objective over a 3D DiT backbone."""
 
-    def __init__(self, config: DDPMParams):
+    def __init__(self, config: DDPMModuleParams):
         super().__init__()
         self.config = config
         self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
@@ -182,7 +182,7 @@ class DDPMModule(BaseTrainingFramework):
         for index, timestep_index in enumerate(timestep_list):
             timesteps = torch.full((batch_size,), timestep_index, device=self.device, dtype=torch.long)
             normalized_timesteps = self._normalized_t(timesteps)
-            prediction = self(sample, normalized_timesteps)
+            prediction = self(sample, normalized_timesteps) # WARNING: here prediction
             epsilon = self._epsilon_from_prediction(prediction, sample, timesteps)
 
             if use_full_schedule:

@@ -10,16 +10,29 @@ from modules.block.common import modulate
 
 
 class SwiGLUMLP(nn.Module):
-    """Simple SwiGLU feed-forward block without external dependencies."""
+    """SwiGLU feed-forward block matching timm's SwiGLU interface."""
 
-    def __init__(self, in_features: int, hidden_features: int):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        norm_layer: type[nn.Module] | None = None,
+        drop: float = 0.0,
+    ):
         super().__init__()
-        self.value = nn.Linear(in_features, hidden_features)
-        self.gate = nn.Linear(in_features, hidden_features)
-        self.proj = nn.Linear(hidden_features, in_features)
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+
+        self.w1 = nn.Linear(in_features, hidden_features)
+        self.w2 = nn.Linear(in_features, hidden_features)
+        self.w3 = nn.Linear(hidden_features, out_features)
+        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
+        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(self.value(x) * F.silu(self.gate(x)))
+        hidden = F.silu(self.w1(x)) * self.w2(x)
+        return self.w3(self.drop(self.norm(hidden)))
 
 
 class MlpDenoiser(nn.Module):
@@ -38,15 +51,15 @@ class MlpDenoiser(nn.Module):
         self.norm2 = nn.LayerNorm(token_dim, elementwise_affine=False, eps=1e-6)
         hidden_features = max(1, int(token_dim * mlp_ratio))
 
-        self.mlp1 = nn.Sequential(
-            nn.Linear(token_dim, hidden_features),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(hidden_features, token_dim),
+        self.mlp1 = SwiGLUMLP(
+            in_features=token_dim,
+            hidden_features=hidden_features,
+            norm_layer=nn.LayerNorm,
         )
-        self.mlp2 = nn.Sequential(
-            nn.Linear(token_dim, hidden_features),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(hidden_features, token_dim),
+        self.mlp2 = SwiGLUMLP(
+            in_features=token_dim,
+            hidden_features=hidden_features,
+            norm_layer=nn.LayerNorm,
         )
 
         self.linear_final = nn.Linear(token_dim, patch_volume * out_channels, bias=True)

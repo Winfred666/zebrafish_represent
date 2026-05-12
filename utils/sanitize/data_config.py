@@ -5,16 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from torch.utils.data import Dataset
 
 from utils.sanitize.param_class import IngestibleParams
 
 
-class VolumeDatasetParams(IngestibleParams):
-    """Single split dataset params injected into TIF dataset builders."""
+class CropTifVolumeDatasetParams(IngestibleParams):
+    """Params for CropTifVolumeDataset — grid-crop dataset with zero-filtering."""
 
-    class_name: Literal["TifVolumeDataset", "TifVolumePatchDataset"] = "TifVolumeDataset"
+    class_name: Literal["CropTifVolumeDataset"] = "CropTifVolumeDataset"
     data_dir: str
     crop_size: tuple[int, int, int] | None = None
     max_files: int | None = None
@@ -68,17 +68,11 @@ class VolumeDatasetParams(IngestibleParams):
             raise ValueError("overlap values must satisfy 0.0 <= v < 1.0")
         return (o_d, o_h, o_w)
 
-    @model_validator(mode="after")
-    def _check_patch_requires_crop(self) -> "VolumeDatasetParams":
-        if self.class_name == "TifVolumePatchDataset" and self.crop_size is None:
-            raise ValueError("TifVolumePatchDataset requires crop_size to be set")
-        return self
-
 
 class DataLoaderParams(IngestibleParams):
     """Concrete dataloader params injected into dataloader builders."""
 
-    dataset: Dataset # required, cannot be none
+    dataset: Dataset  # required, cannot be none
     batch_size: int = Field(default=2, ge=1)
     num_workers: int = Field(default=4, ge=0)
     shuffle: bool = False

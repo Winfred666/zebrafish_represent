@@ -9,13 +9,13 @@ from einops import repeat
 from torch import Tensor
 
 from modules.framework.base import BaseTrainingFramework
-from utils.sanitize.framework_config import RectifiedFlowParams
+from utils.sanitize.framework_config import RectifiedFlowModuleParams
 
 
 class RectifiedFlowModule(BaseTrainingFramework):
     """Rectified-flow objective over a 3D DiT backbone."""
 
-    def __init__(self, config: RectifiedFlowParams):
+    def __init__(self, config: RectifiedFlowModuleParams):
         super().__init__()
         self.config = config
         self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
