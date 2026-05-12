@@ -282,11 +282,14 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         pad_h = max(0, ch - height)
         pad_w = max(0, cw - width)
         if pad_d > 0 or pad_h > 0 or pad_w > 0:
+            # Data is in [-1,1] when normalized → pad with -1.0 (background).
+            # Otherwise pad with 0.0 (raw intensity floor).
+            pad_val = -1.0 if self.normalize else 0.0
             volume = np.pad(
                 volume,
                 ((0, 0), (0, pad_d), (0, pad_h), (0, pad_w)),
                 mode="constant",
-                constant_values=0.0,
+                constant_values=pad_val,
             )
         crop = volume[
             :,
