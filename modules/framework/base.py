@@ -272,12 +272,12 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             mse = F.mse_loss(denoised_fused, clean_fused)
             self.log(f"val_fusion_mse_{t_key}", mse, on_step=False, on_epoch=True)
 
-            # Mid-Z GT|Denoised|Residual panel
+            # Mid-W GT|Denoised|Residual panel (W is the clearest dim for fish)
             if self.logger is not None:
                 c0 = clean_fused[0].detach().float().cpu().numpy()
                 d0 = denoised_fused[0].detach().float().cpu().numpy()
-                mid_d = c0.shape[0] // 2
-                panel = fix_2d_scalar(c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0))
+                mid_w = c0.shape[-1] // 2
+                panel = fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], colorbar_limits=(-1.0, 1.0))
                 log_image_artifact(
                     self.logger, panel,
                     f"val_fusion_{t_key}",
@@ -340,8 +340,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         for key, val in extra.items():
             self.log(f"val_{key}", val, on_step=False, on_epoch=True)
 
-        # Hard-fixed vstack at batch_idx=5 (minimum artifact even without fusion)
-        if batch_idx == 5 and self.logger is not None:
+        # Hard-fixed vstack at last val batch (minimum artifact even without fusion).
+        # Uses mid-W slice — the clearest dimension for zebrafish morphology.
+        # batch_idx==1 is the last batch with current val config (32 crops,
+        # batch_size=2, 4 DDP ranks, limit_val_batches=0.5 → 2 batches/rank).
+        if batch_idx == 1 and self.logger is not None:
             try:
                 n_show = min(clean.shape[0], 5)
                 t_tensor = torch.full((n_show,), 0.5, device=clean.device)
@@ -352,18 +355,18 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 for i in range(n_show):
                     c0 = clean[i, 0].detach().float().cpu().numpy()
                     d0 = denoised[i, 0].detach().float().cpu().numpy()
-                    mid_d = c0.shape[0] // 2
-                    panels.append(fix_2d_scalar(c0[mid_d], d0[mid_d]))
+                    mid_w = c0.shape[-1] // 2
+                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w]))
 
                 if panels:
                     log_image_artifact(
                         self.logger, np.vstack(panels),
-                        "val_xy_midz_t50_batch_5",
+                        "val_xy_midw_t50_batch_1",
                         self.global_step,
                     )
             except Exception:
                 import traceback
-                print("WARNING: failed to log batch-5 vstack panel:", flush=True)
+                print("WARNING: failed to log batch-1 vstack panel:", flush=True)
                 traceback.print_exc()
 
         # Fusion-crop collection (first validation only: builds noisy crop bank)
