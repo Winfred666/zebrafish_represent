@@ -295,23 +295,11 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
 
     kwargs = params.model_dump(mode="python") if isinstance(params, BaseModel) else params
     kwargs.pop("class_name", None)  # metadata field, never a constructor arg
-    import inspect
+    # Prefer config=params (single-object injection) over **kwargs
     try:
-        sig = inspect.signature(cls.__init__)
-        cfg_param = sig.parameters.get("config")
-        if cfg_param is not None and cfg_param.kind not in (
-            inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL
-        ):
-            return cls(config=params)
-        # Filter kwargs to only include params accepted by the constructor
-        valid_params = set(sig.parameters)
-        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            pass  # Can't filter if there's **kwargs in the signature
-        else:
-            kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-    except (ValueError, TypeError):
-        pass
-    return cls(**kwargs)
+        return cls(config=params)
+    except TypeError:
+        return cls(**kwargs)
 
 
 
