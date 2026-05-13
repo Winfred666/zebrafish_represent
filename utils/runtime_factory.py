@@ -271,18 +271,19 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
         )
     params = config["params"]
 
-    if isinstance(params, dict):
-        for k, v in params.items():
-            if isinstance(v, dict) and "class_name" in v:
-                params[k] = build_any_runtime_object(v, class_registry=class_registry)
-            elif isinstance(v, list):
-                for idx, item in enumerate(v):
-                    if isinstance(item, dict) and "class_name" in item:
-                        v[idx] = build_any_runtime_object(item, class_registry=class_registry)
-    # elif isinstance(params, list):
-    #     for idx, item in enumerate(params):
-    #         if isinstance(item, dict) and "class_name" in item:
-    #             params[idx] = build_any_runtime_object(item, class_registry=class_registry)
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"Config section for {class_name!r}: 'params' must be a dict, "
+            f"got {type(params).__name__}. Check your YAML syntax."
+        )
+
+    for k, v in params.items():
+        if isinstance(v, dict) and "class_name" in v:
+            params[k] = build_any_runtime_object(v, class_registry=class_registry)
+        elif isinstance(v, list):
+            for idx, item in enumerate(v):
+                if isinstance(item, dict) and "class_name" in item:
+                    v[idx] = build_any_runtime_object(item, class_registry=class_registry)
 
     params_cls_name = class_name + "Params"
     params_cls = registry.get(params_cls_name) or globals().get(params_cls_name)

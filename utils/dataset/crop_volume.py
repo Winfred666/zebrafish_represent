@@ -110,16 +110,19 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             with tifffile.TiffFile(str(file_path)) as tif:
                 page = tif.pages[0]
                 shape: tuple[int, ...] = page.shape
-                if len(shape) == 3:           # (D, H, W)
+                if len(shape) == 3:
                     shape = (1, *shape)
-                elif len(shape) == 2:          # (H, W)
+                elif len(shape) == 2:
                     shape = (1, 1, *shape)
-                # Apply scale factor to spatial dims (keep channels unchanged)
                 sf = self.scale_factor
                 return (shape[0],) + tuple(max(1, int(s * f)) for s, f in zip(shape[1:], sf))
         except Exception:
-            vol = self._load_volume(file_path)
-            return tuple(vol.shape)
+            try:
+                vol = self._load_volume(file_path)
+                return tuple(vol.shape)
+            except Exception:
+                print(f"[TIF-LOG] WARNING: cannot read {file_path.name}, skipping")
+                return (1, 64, 64, 64)
 
     # ── crop index cache ──────────────────────────────────────────
 
