@@ -64,7 +64,6 @@ class MLFlowLoggerParams(IngestibleParams):
     tracking_uri: str | None = Field(default_factory=lambda: os.environ.get("MLFLOW_TRACKING_URI"))
     tags: dict[str, str] = Field(default_factory=dict)
     log_model: bool = False
-    gpu_memory_monitor: dict = Field(default_factory=dict)
 
 
 class ModelCheckpointParams(IngestibleParams):
