@@ -303,6 +303,7 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
         ):
             return cls(config=params)
         # Filter kwargs to only include params accepted by the constructor
+        kwargs.pop("class_name", None)  # metadata field, never a constructor arg
         valid_params = set(sig.parameters)
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             pass  # Can't filter if there's **kwargs in the signature
