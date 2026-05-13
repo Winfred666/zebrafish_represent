@@ -264,14 +264,12 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
     if cls is None:
         raise ValueError(f"Class {class_name!r} not found in registry or scope.")
 
-    # If no explicit "params" key, treat all other keys as params (flat config style)
-    if "params" in config:
-        params = config["params"]
-        extra = {k: v for k, v in config.items() if k not in ("class_name", "params")}
-        if isinstance(params, dict) and extra:
-            params = {**extra, **params}
-    else:
-        params = {k: v for k, v in config.items() if k != "class_name"}
+    if "params" not in config:
+        raise ValueError(
+            f"Config section for {class_name!r} must have a 'params' key. "
+            "Flat configs are not allowed."
+        )
+    params = config["params"]
 
     if isinstance(params, dict):
         for k, v in params.items():
@@ -281,10 +279,10 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
                 for idx, item in enumerate(v):
                     if isinstance(item, dict) and "class_name" in item:
                         v[idx] = build_any_runtime_object(item, class_registry=class_registry)
-    elif isinstance(params, list):
-        for idx, item in enumerate(params):
-            if isinstance(item, dict) and "class_name" in item:
-                params[idx] = build_any_runtime_object(item, class_registry=class_registry)
+    # elif isinstance(params, list):
+    #     for idx, item in enumerate(params):
+    #         if isinstance(item, dict) and "class_name" in item:
+    #             params[idx] = build_any_runtime_object(item, class_registry=class_registry)
 
     params_cls_name = class_name + "Params"
     params_cls = registry.get(params_cls_name) or globals().get(params_cls_name)

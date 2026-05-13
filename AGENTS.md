@@ -19,6 +19,14 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 
 `utils/sanitize/` is a decoupled config validator + object factory compiler. It validates `params` via domain Pydantic models, resolves `class_name` to instantiate objects, and resolves `runtime.X` cross-references by blind iteration until all objects are built.
 
+### Runtime Factory Protocol
+
+- **YAML must match the Params class exactly.** Every key under `params:` must be a valid field of the target `{ClassName}Params` Pydantic model. Extra keys that don't exist in the Params class are a YAML error — fix the config, not the factory.
+- **No flat configs.** Every section MUST have `class_name` + `params`. The factory rejects sections without `params` outright.
+- **Single-object injection.** If the target class constructor has a `config` parameter accepting the Params instance, the factory passes `cls(config=params)` directly. Otherwise it unpacks `params.model_dump()` as `**kwargs`.
+- **No backward-compatibility shims.** Delete stale keys, don't add `extra="ignore"` or silent skips.
+- **Mismatch → WARNING.** If a Params class isn't found for a `class_name`, the factory warns and passes the raw params dict unvalidated. The downstream constructor is responsible for handling it.
+
 ### Adding a New Module or Config Section
 
 1. Define its param class in the appropriate domain file under `utils/sanitize/` (extend `IngestibleParams`).
