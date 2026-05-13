@@ -81,14 +81,6 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             f"overlap={self.overlap}, total_crops={len(self.crop_grid)}"
         )
 
-        # ── preload all volumes into main-process cache ──────────
-        # Workers inherit this cache via fork() copy-on-write, so they
-        # never hit network I/O on _get_volume.  This avoids the 2894
-        # TIF loads / 2 epochs we saw at _max_cached=4.
-        if self.crop_size is not None:
-            for vol_idx in range(self.file_count):
-                self._get_volume(vol_idx)
-
     # ── file discovery ────────────────────────────────────────────
 
     def _discover_files(self) -> list[Path]:
