@@ -314,8 +314,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             if self.logger is not None:
                 c0 = clean_fused[0].detach().float().cpu().numpy()
                 d0 = denoised_fused[0].detach().float().cpu().numpy()
-                mid_w = c0.shape[-1] // 2
-                panel = fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], colorbar_limits=(-1.0, 1.0))
+                mid_d = c0.shape[0] // 2
+                panel = fix_2d_scalar(c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0))
                 log_image_artifact(
                     self.logger, panel,
                     f"val_fusion_{t_key}",
@@ -325,11 +325,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── PL epoch-end hooks ───────────────────────────────────────
 
     def on_validation_epoch_end(self) -> None:
-        """After validation: flip fusion state or log fusion artifacts."""
-        if self._fusion_collecting:
-            self._fusion_collecting = False  # collection complete
-            self._log_fusion_validation()    # log pre-training baseline
-        elif self.val_fusion1_noised is not None:
+        if self.val_fusion1_noised is not None:
             self._log_fusion_validation()
 
     def _run_fixed_seed_generation(
