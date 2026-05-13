@@ -13,7 +13,7 @@ train_dataset:
     # (low, high) percentile pair for intensity clipping before min-max normalization.
     # Clips extreme voxels (e.g. sensor noise, bright artifacts) so they don't
     # stretch the value range. Applied before scaling to [0, 1].
-    clip_percentile: [1.0, 99.0]
+    clip_percentile: [0.0, 100.0]
     # Optional (D, H, W) multiples to zero-pad spatial dims to. Only used when
     # crop_size is null (full-volume mode); ignored when crop_size is set.
     # Useful for architectures that require dims divisible by a fixed stride.
@@ -22,7 +22,7 @@ train_dataset:
 train_dataloader:
   class_name: DataLoader
   dataset: runtime.train_dataset
-  batch_size: 64
+  batch_size: 256
   devices:
   num_workers: 8
   prefetch_factor: 4

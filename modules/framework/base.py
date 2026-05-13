@@ -58,9 +58,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
 
         # ── fusion validation state ──────────────────────────────
-        self.val_fusion1_noised: dict[str, list] | None = None
-        self.val_fusion1_clean: list | None = None
-        self.val_fusion1_denoised: list = []
+        # 3 hard-fixed fusions: val_fusions_clean[i] = list of clean crop dicts
+        # val_fusions_noised[i][t_key] = list of noisy crop dicts at that t-level
+        self.val_fusions_clean: list[list] = []
+        self.val_fusions_noised: list[dict[str, list]] = []
         self._fusion_collecting: bool = False
 
     # ── abstract (framework-specific) ──────────────────────────
@@ -193,131 +194,142 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── fusion validation (crop-based datasets) ──────────────────
 
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
-        """On the first validation epoch, build the noisy-crop bank for fusion 0.
+        """On the first validation epoch, build the noisy-crop bank for fusions 0–2.
 
         Only triggers when the batch carries ``fusion_id`` and ``pos_idx``
-        (i.e. from :class:`CropTifVolumeDataset`).  Collects clean crops and
-        their noisy versions at 5 t-levels, then skips fusion logging until
-        the next validation epoch.
+        (i.e. from :class:`CropTifVolumeDataset`).
         """
         if "fusion_id" not in batch or "pos_idx" not in batch:
             return
-        if not self._fusion_collecting and self.val_fusion1_noised is not None:
+        if not self._fusion_collecting and self.val_fusions_noised:
             return  # already built in a previous epoch
 
-        if self.val_fusion1_noised is None:
-            self.val_fusion1_noised = {k: [] for k in self.FUSION_T_KEYS}
-            self.val_fusion1_clean = []
+        if not self.val_fusions_noised:
+            self.val_fusions_noised = [
+                {k: [] for k in self.FUSION_T_KEYS} for _ in range(3)
+            ]
+            self.val_fusions_clean = [[] for _ in range(3)]
             self._fusion_collecting = True
 
-        fusion_mask = batch["fusion_id"] == 0
-        if not fusion_mask.any():
-            return
+        for fusion_idx in range(3):
+            fusion_mask = batch["fusion_id"] == fusion_idx
+            if not fusion_mask.any():
+                continue
 
-        for idx in fusion_mask.nonzero(as_tuple=True)[0]:
-            clean_4d = batch["target"][idx]
-            self.val_fusion1_clean.append({
-                "target": clean_4d.detach().cpu(),
-                "fusion_id": batch["fusion_id"][idx].detach().cpu(),
-                "pos_idx": batch["pos_idx"][idx].detach().cpu(),
-                "full_size": batch["full_size"][idx].detach().cpu(),
-            })
-
-            for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
-                t_tensor = torch.full((1,), t_val, device=clean_4d.device)
-                noisy, _ = self._make_noisy(clean_4d.unsqueeze(0), t_tensor)
-                self.val_fusion1_noised[t_key].append({
-                    "target": noisy.squeeze(0).detach().cpu(),
+            for idx in fusion_mask.nonzero(as_tuple=True)[0]:
+                clean_4d = batch["target"][idx]
+                self.val_fusions_clean[fusion_idx].append({
+                    "target": clean_4d.detach().cpu(),
                     "fusion_id": batch["fusion_id"][idx].detach().cpu(),
                     "pos_idx": batch["pos_idx"][idx].detach().cpu(),
                     "full_size": batch["full_size"][idx].detach().cpu(),
                 })
 
-    def _gather_fusion_crops(self) -> tuple[list, dict[str, list]]:
-        """All-gather fusion crops across DDP ranks so every crop is included."""
+                for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
+                    t_tensor = torch.full((1,), t_val, device=clean_4d.device)
+                    noisy, _ = self._make_noisy(clean_4d.unsqueeze(0), t_tensor)
+                    self.val_fusions_noised[fusion_idx][t_key].append({
+                        "target": noisy.squeeze(0).detach().cpu(),
+                        "fusion_id": batch["fusion_id"][idx].detach().cpu(),
+                        "pos_idx": batch["pos_idx"][idx].detach().cpu(),
+                        "full_size": batch["full_size"][idx].detach().cpu(),
+                    })
+
+    def _gather_fusion_crops(
+        self, clean_list: list, noised_dicts: list[dict[str, list]]
+    ) -> tuple[list, list[dict[str, list]]]:
+        """All-gather fusion crops across DDP ranks."""
         import torch.distributed as dist
         if not dist.is_initialized():
-            return self.val_fusion1_clean, self.val_fusion1_noised
+            return clean_list, noised_dicts
 
         world_size = dist.get_world_size()
-        # gather clean crops
         gathered_clean = [None] * world_size
-        dist.all_gather_object(gathered_clean, self.val_fusion1_clean or [])
-        # gather noisy crops per t-key
-        gathered_noised: dict[str, list] = {}
-        for t_key in self.FUSION_T_KEYS:
-            per_rank = [None] * world_size
-            dist.all_gather_object(per_rank, (self.val_fusion1_noised or {}).get(t_key, []))
-            gathered_noised[t_key] = per_rank
+        dist.all_gather_object(gathered_clean, clean_list)
+        gathered_noised: list[list[dict[str, list]]] = []
+        for _ in range(world_size):
+            gathered_noised.append([{k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))])
+        dist.all_gather_object(gathered_noised, noised_dicts)
 
-        # merge across ranks
         merged_clean: list = []
         for rank_list in gathered_clean:
             merged_clean.extend(rank_list)
-        merged_noised: dict[str, list] = {}
-        for t_key in self.FUSION_T_KEYS:
-            merged_noised[t_key] = []
-            for rank_list in gathered_noised[t_key]:
-                merged_noised[t_key].extend(rank_list)
+        merged_noised: list[dict[str, list]] = [
+            {k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))
+        ]
+        for rank_noised in gathered_noised:
+            for fi, fusion_dict in enumerate(rank_noised):
+                for t_key in self.FUSION_T_KEYS:
+                    merged_noised[fi][t_key].extend(fusion_dict.get(t_key, []))
 
         return merged_clean, merged_noised
 
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
-        """Denoise stored fusion crops, fuse into full volumes, log MSE + panels."""
+        """Denoise, fuse, log MSE + vstacked mid_d panels for 3 fusions."""
         import torch.distributed as dist
         is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
-
-        # Gather crops from all DDP ranks so fusion covers the full volume
-        merged_clean, merged_noised = self._gather_fusion_crops()
-
         if not is_rank0:
-            return  # only rank 0 logs to avoid duplicate artifacts
-
-        if not merged_clean:
             return
 
-        # Fuse clean reference once
-        clean_fused = volume_fuse(merged_clean, fusion_id=0)
+        if not self.val_fusions_clean or not self.val_fusions_noised:
+            return
 
-        self.val_fusion1_denoised = []
+        # Gather across ranks for each fusion
+        all_clean, all_noised = self._gather_fusion_crops(
+            self.val_fusions_clean, self.val_fusions_noised
+        )
+
+        n_fusions = len(all_noised)
+        if n_fusions == 0:
+            return
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
-            crop_dicts = merged_noised.get(t_key, [])
-            if not crop_dicts:
-                continue
+            mse_sum = 0.0
+            panels: list[np.ndarray] = []
 
-            # Batch-denoise all crops for this t-level (stack → (N,C,D,H,W))
-            noisy_batch = torch.stack(
-                [c["target"] for c in crop_dicts], dim=0
-            ).to(self.device)
-            denoised_batch = self._make_clean(noisy_batch, t_val)
+            for fi in range(n_fusions):
+                clean_crops = [c for c in all_clean if int(c["fusion_id"]) == fi]
+                crop_dicts = all_noised[fi].get(t_key, [])
+                if not crop_dicts or not clean_crops:
+                    continue
 
-            denoised_crops = []
-            for i, crop_dict in enumerate(crop_dicts):
-                denoised_crops.append({
-                    "target": denoised_batch[i].detach().cpu(),
-                    "fusion_id": crop_dict["fusion_id"],
-                    "pos_idx": crop_dict["pos_idx"],
-                    "full_size": crop_dict["full_size"],
-                })
+                # Fuse clean reference
+                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
 
-            # Fuse denoised crops → full volume
-            denoised_fused = volume_fuse(denoised_crops, fusion_id=0)
-            self.val_fusion1_denoised.append(denoised_fused)
+                # Batch-denoise all noisy crops for this fusion + t-level
+                noisy_batch = torch.stack(
+                    [c["target"] for c in crop_dicts], dim=0
+                ).to(self.device)
+                denoised_batch = self._make_clean(noisy_batch, t_val)
 
-            # MSE against clean fused volume
-            mse = F.mse_loss(denoised_fused, clean_fused)
-            self.log(f"val_fusion_mse_{t_key}", mse, on_step=False, on_epoch=True, sync_dist=False)
+                denoised_crops = []
+                for i, crop_dict in enumerate(crop_dicts):
+                    denoised_crops.append({
+                        "target": denoised_batch[i].detach().cpu(),
+                        "fusion_id": crop_dict["fusion_id"],
+                        "pos_idx": crop_dict["pos_idx"],
+                        "full_size": crop_dict["full_size"],
+                    })
 
-            # Mid-W GT|Denoised|Residual panel (W is the clearest dim for fish)
-            if self.logger is not None:
-                c0 = clean_fused[0].detach().float().cpu().numpy()
-                d0 = denoised_fused[0].detach().float().cpu().numpy()
-                mid_d = c0.shape[0] // 2
-                panel = fix_2d_scalar(c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0))
+                denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
+                mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
+
+                # mid_d slice panel
+                if self.logger is not None:
+                    c0 = clean_fused[0].detach().float().cpu().numpy()
+                    d0 = denoised_fused[0].detach().float().cpu().numpy()
+                    mid_d = c0.shape[0] // 2
+                    panels.append(fix_2d_scalar(
+                        c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0)
+                    ))
+
+            self.log(f"val_fusion_mse_{t_key}", mse_sum / max(1, n_fusions),
+                     on_step=False, on_epoch=True, sync_dist=False)
+
+            if panels and self.logger is not None:
                 log_image_artifact(
-                    self.logger, panel,
+                    self.logger, np.vstack(panels),
                     f"val_fusion_{t_key}",
                     self.global_step,
                 )
@@ -325,7 +337,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── PL epoch-end hooks ───────────────────────────────────────
 
     def on_validation_epoch_end(self) -> None:
-        if self.val_fusion1_noised is not None:
+        if self.val_fusions_noised:
             self._log_fusion_validation()
 
     def _run_fixed_seed_generation(
@@ -389,13 +401,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 for i in range(n_show):
                     c0 = clean[i, 0].detach().float().cpu().numpy()
                     d0 = denoised[i, 0].detach().float().cpu().numpy()
-                    mid_w = c0.shape[-1] // 2
-                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w]))
+                    mid_d = c0.shape[0] // 2
+                    panels.append(fix_2d_scalar(c0[mid_d], d0[mid_d]))
 
                 if panels:
                     log_image_artifact(
                         self.logger, np.vstack(panels),
-                        "val_xy_midw_t50_batch_1",
+                        "val_xy_midz_t50_batch_1",
                         self.global_step,
                     )
             except Exception:
