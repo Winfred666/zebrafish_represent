@@ -26,13 +26,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _collect_reference_targets(runtime) -> dict[str, torch.Tensor]:
-    """Collect reference volumes from val/test datasets for quality metrics."""
+    """Collect reference volumes from val dataset for quality metrics."""
     collected: dict[str, torch.Tensor] = {}
-    for split in ("val", "test"):
-        dataset = runtime.objects.get(f"{split}_dataset")
-        if dataset is None or len(dataset) == 0:
-            continue
-        collected[split] = torch.stack(
+    dataset = runtime.objects.get("val_dataset")
+    if dataset is not None and len(dataset) > 0:
+        collected["val"] = torch.stack(
             [dataset[index]["target"] for index in range(len(dataset))],
             dim=0,
         )
