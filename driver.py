@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+from torch.utils.data import DataLoader
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -135,9 +136,6 @@ def train(
     if resume_ckpt:
         print(f"Resuming full trainer state from checkpoint: {resume_ckpt}")
 
-    # Pre-training baseline: validate before any gradient updates
-    runtime.trainer.validate(framework_module, dataloaders=runtime.val_loader)
-
     runtime.trainer.fit(
         framework_module,
         train_dataloaders=runtime.train_loader,
@@ -149,10 +147,26 @@ def train(
 
     testing_section = config.get("testing", {})
     if testing_section.get("run_sampling_after_fit", True):
-        samples = framework_module.sample(
-            batch_size=testing_section.get("num_samples", 1),
-            steps=testing_section.get("sample_steps", 4),
+        num_samples: int = testing_section.get("num_samples", 1)
+        sample_steps: int = testing_section.get("sample_steps", 50)
+
+        # Split across devices so each GPU generates its share
+        devices = max(1, runtime.trainer.num_devices)
+        batch_sizes: list[int] = []
+        base = num_samples // devices
+        rem = num_samples % devices
+        for d in range(devices):
+            n = base + (1 if d < rem else 0)
+            if n > 0:
+                batch_sizes.append(n)
+
+        predict_loader = DataLoader(
+            [{"batch_size": n, "sample_steps": sample_steps} for n in batch_sizes],
+            batch_size=1,
         )
+        predictions = runtime.trainer.predict(framework_module, dataloaders=predict_loader)
+        samples = torch.cat(predictions, dim=0)
+
         reference_targets = _collect_reference_targets(runtime)
         _log_postfit_sample_metrics(
             runtime=runtime,

@@ -123,6 +123,19 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             x = self.one_step_sample(x, t, step_size)
         return x
 
+    def predict_step(self, batch, batch_idx):
+        """Generate samples — one batch per predict dataloader item.
+
+        ``batch`` is a dict with keys ``batch_size`` (int) and
+        ``sample_steps`` (int), pre-split by the driver so each device
+        produces its share of the total ``num_samples``.
+        """
+        bs = batch["batch_size"]
+        batch_size = bs.item() if isinstance(bs, torch.Tensor) else int(bs)
+        ss = batch["sample_steps"]
+        steps = ss.item() if isinstance(ss, torch.Tensor) else int(ss)
+        return self.sample(batch_size=batch_size, steps=steps)
+
     @torch.no_grad()
     def _make_clean(self, noisy: Tensor, t_start: float) -> Tensor:
         """Reverse trajectory from noise level *t_start* down to clean (t=0).
@@ -265,25 +278,36 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
         return merged_clean, merged_noised
 
+    def _validation_batch_size(self) -> int:
+        """Best-effort validation DataLoader batch size for fusion denoising."""
+        trainer = getattr(self, "trainer", None)
+        val_loaders = getattr(trainer, "val_dataloaders", None)
+        if isinstance(val_loaders, (list, tuple)):
+            val_loader = val_loaders[0] if val_loaders else None
+        else:
+            val_loader = val_loaders
+        batch_size = getattr(val_loader, "batch_size", None)
+        return max(1, int(batch_size or 1))
+
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
         """Denoise, fuse, log MSE + vstacked mid_w panels for 3 fusions."""
         import torch.distributed as dist
-        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        if not is_rank0:
-            return
 
         if not self.val_fusions_clean or not self.val_fusions_noised:
             return
 
-        # Gather across ranks for each fusion
         all_clean, all_noised = self._gather_fusion_crops(
             self.val_fusions_clean, self.val_fusions_noised
         )
+        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        if not is_rank0:
+            return
 
         n_fusions = len(all_noised)
         if n_fusions == 0:
             return
+        denoise_batch_size = self._validation_batch_size()
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
             mse_sum = 0.0
@@ -299,11 +323,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 clean_fused = volume_fuse(clean_crops, fusion_id=fi)
 
                 # Batch-denoise all noisy crops for this fusion + t-level
-                # Split into sub-batches to avoid OOM on large fusions
-                DENOISE_BATCH = 32 # [TODO]: I think this should be same as training batch size.
+                # Match validation batch size so fusion validation uses the same
+                # per-rank memory envelope as the validation loop.
                 all_denoised = []
-                for b_start in range(0, len(crop_dicts), DENOISE_BATCH):
-                    b_end = min(b_start + DENOISE_BATCH, len(crop_dicts))
+                for b_start in range(0, len(crop_dicts), denoise_batch_size):
+                    b_end = min(b_start + denoise_batch_size, len(crop_dicts))
                     sub = crop_dicts[b_start:b_end]
                     sub_batch = torch.stack(
                         [c["target"] for c in sub], dim=0
