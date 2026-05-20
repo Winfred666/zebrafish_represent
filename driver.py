@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -24,6 +25,68 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--framework-config", type=str, required=True, help="Path to framework config YAML file")
     parser.add_argument("--wrapper-config", type=str, required=True, help="Path to wrapper config YAML file")
     return parser.parse_args(argv)
+
+
+def _dataset_requires_single_process_cache_build(dataset: object) -> bool:
+    checker = getattr(dataset, "requires_single_process_cache_build", None)
+    return callable(checker) and bool(checker())
+
+
+def _rebuild_dataloader_with_zero_workers(
+    loader: DataLoader,
+    params: dict,
+) -> DataLoader:
+    """Rebuild a configured DataLoader for deterministic hot-cache creation."""
+    dataloader_kwargs = {
+        "dataset": loader.dataset,
+        "batch_size": params.get("batch_size", loader.batch_size),
+        "shuffle": bool(params.get("shuffle", False)),
+        "num_workers": 0,
+        "prefetch_factor": None,
+        "pin_memory": bool(params.get("pin_memory", loader.pin_memory)),
+        "persistent_workers": False,
+        "collate_fn": loader.collate_fn,
+        "drop_last": bool(params.get("drop_last", getattr(loader, "drop_last", False))),
+        "timeout": getattr(loader, "timeout", 0),
+        "worker_init_fn": getattr(loader, "worker_init_fn", None),
+        "generator": getattr(loader, "generator", None),
+    }
+    return DataLoader(**dataloader_kwargs)
+
+
+def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
+    """Force num_workers=0 while hot crop caches are incomplete.
+
+    The steady-state dataloader config stays in YAML.  This runtime-only
+    override avoids worker-process cache races during first cache materialization
+    and automatically disappears once all per-volume cache files exist.
+    """
+    changed: list[str] = []
+    for object_key, config_key in (
+        ("train_dataloader", "train_dataloader"),
+        ("val_dataloader", "val_dataloader"),
+    ):
+        loader = runtime.objects.get(object_key)
+        if loader is None:
+            continue
+        dataset = getattr(loader, "dataset", None)
+        if not _dataset_requires_single_process_cache_build(dataset):
+            continue
+        if int(getattr(loader, "num_workers", 0)) == 0:
+            continue
+        params = (
+            runtime.runtime_config
+            .get(config_key, {})
+            .get("params", {})
+        )
+        runtime.objects[object_key] = _rebuild_dataloader_with_zero_workers(loader, params)
+        changed.append(object_key)
+    if changed:
+        print(
+            "[HOT-CACHE] Incomplete crop cache detected; overriding "
+            f"{', '.join(changed)} num_workers=0 for this run."
+        )
+    return changed
 
 
 def _log_postfit_sample_metrics(
@@ -85,6 +148,7 @@ def train(
         framework_config_path=framework_config_path,
         wrapper_config_path=wrapper_config_path,
     )
+    _apply_hot_cache_dataloader_override(runtime)
 
     config = runtime.runtime_config
 
@@ -153,8 +217,13 @@ def train(
             [{"batch_size": n, "sample_steps": sample_steps} for n in batch_sizes],
             batch_size=1,
         )
+        t0 = time.time()
         predictions = runtime.trainer.predict(framework_module, dataloaders=predict_loader)
         samples = torch.cat(predictions, dim=0)
+        t1 = time.time()
+        gen_elapsed = t1 - t0
+        print(f"[TEST] sample generation took {gen_elapsed:.1f}s "
+              f"({num_samples} samples, {sample_steps} steps)")
 
         # Incrementally accumulate val crops file-by-file so FID/MMD/MS-SSIM
         # evolve with growing reference coverage.
@@ -175,6 +244,18 @@ def train(
                     reference_targets={"val": torch.stack(reference_crops, dim=0)},
                     step=step,
                 )
+            t2 = time.time()
+            total_elapsed = t2 - t0
+            ref_elapsed = t2 - t1
+            print(f"[TEST] reference collection + metrics took {ref_elapsed:.1f}s")
+            print(f"[TEST] total test phase took {total_elapsed:.1f}s")
+            runtime.logger.log_metrics(
+                {"test_sample_gen_time": float(gen_elapsed)}, step=0,
+            )
+        else:
+            runtime.logger.log_metrics(
+                {"test_sample_gen_time": float(gen_elapsed)}, step=0,
+            )
 
         framework_module.log_sample_slices(samples, tag="test_sample")
 
