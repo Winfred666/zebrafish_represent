@@ -1,0 +1,18 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 20
+    accelerator: gpu
+    devices: 4
+    strategy: ddp_find_unused_parameters_false
+    check_val_every_n_epoch: 5
+    num_sanity_val_steps: 10
+    limit_val_batches: 0.5
+
+logging:
+  params:
+    experiment_name: prdit_s2_IaN
+    run_name: prdit_s2
+    tags:
+      stage: "2"
