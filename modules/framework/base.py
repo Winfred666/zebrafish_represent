@@ -251,9 +251,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             gathered_noised.append([{k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))])
         dist.all_gather_object(gathered_noised, noised_dicts)
 
-        merged_clean: list = []
+        merged_clean: list[list] = [[] for _ in range(len(noised_dicts))]
         for rank_list in gathered_clean:
-            merged_clean.extend(rank_list)
+            for fi, crops in enumerate(rank_list):
+                merged_clean[fi].extend(crops)
         merged_noised: list[dict[str, list]] = [
             {k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))
         ]
@@ -266,7 +267,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
-        """Denoise, fuse, log MSE + vstacked mid_d panels for 3 fusions."""
+        """Denoise, fuse, log MSE + vstacked mid_w panels for 3 fusions."""
         import torch.distributed as dist
         is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
         if not is_rank0:
@@ -289,7 +290,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             panels: list[np.ndarray] = []
 
             for fi in range(n_fusions):
-                clean_crops = [c for c in all_clean if int(c["fusion_id"]) == fi]
+                clean_crops = all_clean[fi]
                 crop_dicts = all_noised[fi].get(t_key, [])
                 if not crop_dicts or not clean_crops:
                     continue
@@ -298,10 +299,18 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 clean_fused = volume_fuse(clean_crops, fusion_id=fi)
 
                 # Batch-denoise all noisy crops for this fusion + t-level
-                noisy_batch = torch.stack(
-                    [c["target"] for c in crop_dicts], dim=0
-                ).to(self.device)
-                denoised_batch = self._make_clean(noisy_batch, t_val)
+                # Split into sub-batches to avoid OOM on large fusions
+                DENOISE_BATCH = 32 # [TODO]: I think this should be same as training batch size.
+                all_denoised = []
+                for b_start in range(0, len(crop_dicts), DENOISE_BATCH):
+                    b_end = min(b_start + DENOISE_BATCH, len(crop_dicts))
+                    sub = crop_dicts[b_start:b_end]
+                    sub_batch = torch.stack(
+                        [c["target"] for c in sub], dim=0
+                    ).to(self.device)
+                    sub_denoised = self._make_clean(sub_batch, t_val)
+                    all_denoised.append(sub_denoised)
+                denoised_batch = torch.cat(all_denoised, dim=0)
 
                 denoised_crops = []
                 for i, crop_dict in enumerate(crop_dicts):
@@ -315,13 +324,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
-                # mid_d slice panel
+                # mid_w slice panel
                 if self.logger is not None:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
-                    mid_d = c0.shape[0] // 2
+                    mid_w = c0.shape[2] // 2
                     panels.append(fix_2d_scalar(
-                        c0[mid_d], d0[mid_d], colorbar_limits=(-1.0, 1.0)
+                        c0[:, :, mid_w], d0[:, :, mid_w], colorbar_limits=(-1.0, 1.0)
                     ))
 
             self.log(f"val_fusion_mse_{t_key}", mse_sum / max(1, n_fusions),
@@ -333,6 +342,33 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     f"val_fusion_{t_key}",
                     self.global_step,
                 )
+
+    # ── sample visualization (shared, test & validation) ─────────
+
+    @torch.no_grad()
+    def log_sample_slices(self, samples: Tensor, tag: str) -> None:
+        """Log mid_w slices of generated samples as vstack panels.
+
+        Same pattern as the batch-1 vstack panel in :meth:`validation_step`.
+        """
+        import torch.distributed as dist
+        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        if not is_rank0 or self.logger is None:
+            return
+
+        from utils.display import render_slice, log_image_artifact
+
+        n_show = min(samples.shape[0], 5)
+        panels: list[np.ndarray] = []
+        for i in range(n_show):
+            vol = samples[i, 0].detach().float().cpu().numpy()
+            mid_w = vol.shape[2] // 2
+            panels.append(render_slice(vol[:, :, mid_w]))
+
+        if panels:
+            log_image_artifact(
+                self.logger, np.vstack(panels), tag, self.global_step,
+            )
 
     # ── PL epoch-end hooks ───────────────────────────────────────
 
@@ -401,13 +437,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 for i in range(n_show):
                     c0 = clean[i, 0].detach().float().cpu().numpy()
                     d0 = denoised[i, 0].detach().float().cpu().numpy()
-                    mid_d = c0.shape[0] // 2
-                    panels.append(fix_2d_scalar(c0[mid_d], d0[mid_d]))
+                    mid_w = c0.shape[2] // 2
+                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w]))
 
                 if panels:
                     log_image_artifact(
                         self.logger, np.vstack(panels),
-                        "val_xy_midz_t50_batch_1",
+                        "val_yz_midw_t50_batch_1",
                         self.global_step,
                     )
             except Exception:

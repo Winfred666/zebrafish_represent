@@ -434,10 +434,10 @@ def build_training_runtime_from_files(
         wrapper_config_path=wrapper_config_path,
     )
 
-    # Hard-overwrite run_name: <model>-<wrapper>-<data>-<framework>-YYMMDD
+    # Hard-overwrite run_name: <model>-<wrapper>-<data>-<framework>-YYMMDD_HHMMSS
     run_name = (
         f"{paths.model.stem}-{paths.wrapper.stem}-{paths.data.stem}"
-        f"-{paths.framework.stem}-{datetime.now().strftime('%y%m%d')}"
+        f"-{paths.framework.stem}-{datetime.now().strftime('%y%m%d_%H%M%S')}"
     )
     merged_config.setdefault("logging", {}).setdefault("params", {})["run_name"] = run_name
     # Hard-inject artifact_manager before building so it participates in blind-iteration

@@ -53,6 +53,7 @@ class PRDiT(BaseVolumeModel):
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         coarse_mlp_ratio: float = 1.0,
+        load_from_ckpt: str | None = None,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -131,6 +132,26 @@ class PRDiT(BaseVolumeModel):
         self.initialize_weights()
         if depth > 0:
             self._freeze_coarse_path()
+
+        if load_from_ckpt is not None:
+            self._load_stage1_ckpt(load_from_ckpt)
+
+    def _load_stage1_ckpt(self, ckpt_path: str) -> None:
+        """Load stage-1 weights and re-freeze the coarse path."""
+        import logging
+        logger = logging.getLogger(__name__)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+        # Strip Lightning "model." prefix if present
+        if any(k.startswith("model.") for k in state_dict):
+            state_dict = {k[len("model."):]: v for k, v in state_dict.items()}
+        missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        logger.info("Loaded stage-1 checkpoint from %s", ckpt_path)
+        logger.info("  Missing keys: %s", missing if missing else "(none)")
+        logger.info("  Unexpected keys: %s", unexpected if unexpected else "(none)")
+        # Re-freeze after loading (load_state_dict resets requires_grad)
+        self._freeze_coarse_path()
+        logger.info("Coarse path re-frozen after checkpoint load")
 
     # --- weight initialization ---
 

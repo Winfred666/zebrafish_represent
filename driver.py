@@ -161,6 +161,7 @@ def train(
             sample_tensor=samples,
             reference_targets=reference_targets,
         )
+        framework_module.log_sample_slices(samples, tag="test_sample")
 
     if runtime.artifact_manager is not None:
         runtime.artifact_manager.cleanup_temp_folder()

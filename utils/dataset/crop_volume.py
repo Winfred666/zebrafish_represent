@@ -132,6 +132,9 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
+    # These are small by design — they store only the crop grid indices (fusion_id, start positions), 
+    # not the volume data. Volumes are cached in RAM at runtime. 
+    # Future runs load the grid instantly (bypassing the multi-hour cache generation).
     def _cache_path(self) -> Path:
         return self.data_dir / f".crop_index_{self._cache_key()}.pt"
 
@@ -247,7 +250,11 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         """Full-pass: load every volume, enumerate all crops, filter zeros."""
         raw: list[tuple[int, int, int, int]] = []
         for vol_idx in range(self.file_count):
-            vol = self._get_volume(vol_idx)
+            try:
+                vol = self._get_volume(vol_idx)
+            except Exception:
+                print(f"[TIF-LOG] WARNING: cannot load {self._file_paths[vol_idx].name}, skipping")
+                continue
             if self.crop_size is None:
                 raw.append((vol_idx, 0, 0, 0))
                 continue

@@ -51,6 +51,7 @@ class PRDiTParams(IngestibleParams):
     num_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
     coarse_mlp_ratio: float = Field(default=1.0, gt=0.0)
+    load_from_ckpt: str | None = None
 
     @model_validator(mode="after")
     def _validate_grid_alignment(self) -> "PRDiTParams":

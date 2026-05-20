@@ -100,8 +100,8 @@ def fix_2d_scalar(
     cmap: str = "plasma",
     residual_cmap: str = "bwr",
     dpi: int = _PANEL_DPI,
-    colorbar_limits: tuple[float, float] | None = None,
-    residual_limits: tuple[float, float] | None = None,
+    colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
+    residual_limits: tuple[float, float] | None = (-1.0, 1.0),
 ) -> np.ndarray:
     """Render gt, pred, and residual (gt - pred) side-by-side in a single row.
 
@@ -139,3 +139,21 @@ def fix_2d_scalar(
         )
 
     return np.hstack(panels)
+
+
+def render_slice(
+    field,
+    close_fig: bool = True,
+    cmap: str = "plasma",
+    dpi: int = _PANEL_DPI,
+    colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
+) -> np.ndarray:
+    """Render a single 2D scalar field as an RGB image."""
+    field_np = _coerce_field(field)
+    return _render_panel_rgb(
+        field=field_np,
+        cmap=cmap,
+        colorbar_limits=colorbar_limits,
+        close_fig=close_fig,
+        dpi=int(dpi),
+    )

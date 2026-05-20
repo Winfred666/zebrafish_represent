@@ -120,7 +120,7 @@ class IntegratedGPUMemoryMonitorParams(IngestibleParams):
 class TrainerParams(IngestibleParams):
     """Params for Lightning Trainer."""
 
-    max_epochs: int = Field(default=20, ge=1)
+    max_epochs: int = Field(default=20, ge=0)
     accelerator: str = "auto"
     devices: int | str = 1
     precision: str | int = "32"
