@@ -1,0 +1,9 @@
+import_config: xs_0125.yaml
+
+train_dataset:
+  params:
+    max_files: 10
+
+val_dataset:
+  params:
+    max_files: 5
