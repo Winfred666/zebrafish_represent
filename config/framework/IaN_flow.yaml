@@ -4,7 +4,7 @@ framework:
     model: runtime.model
     stage: 2
     optimization:
-      learning_rate: 0.00008  # 8e-5, lower than stage-1 (1e-4) following baseline best practice
+      learning_rate: 0.00002  # 2e-5
       weight_decay: 0.0
       loss_type: mse
       sample_steps: 250
