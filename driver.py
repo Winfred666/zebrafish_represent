@@ -26,23 +26,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _collect_reference_targets(runtime) -> dict[str, torch.Tensor]:
-    """Collect reference volumes from val dataset for quality metrics."""
-    collected: dict[str, torch.Tensor] = {}
-    dataset = runtime.objects.get("val_dataset")
-    if dataset is not None and len(dataset) > 0:
-        collected["val"] = torch.stack(
-            [dataset[index]["target"] for index in range(len(dataset))],
-            dim=0,
-        )
-    return collected
-
-
 def _log_postfit_sample_metrics(
     *,
     runtime,
     sample_tensor: torch.Tensor,
     reference_targets: dict[str, torch.Tensor],
+    step: int = 0,
 ) -> None:
     sample_array = sample_tensor.detach().cpu().numpy()
     sample_path = runtime.artifact_manager.write_numpy_artifact(
@@ -78,7 +67,7 @@ def _log_postfit_sample_metrics(
         summary_artifact["sample_quality"] = quality_metrics
 
     runtime.artifact_manager.write_yaml_artifact(summary_artifact, "samples/sample_quality_metrics.yaml")
-    runtime.logger.log_metrics(metrics_to_log, step=runtime.trainer.global_step)
+    runtime.logger.log_metrics(metrics_to_log, step=step)
 
 
 def train(
@@ -167,12 +156,26 @@ def train(
         predictions = runtime.trainer.predict(framework_module, dataloaders=predict_loader)
         samples = torch.cat(predictions, dim=0)
 
-        reference_targets = _collect_reference_targets(runtime)
-        _log_postfit_sample_metrics(
-            runtime=runtime,
-            sample_tensor=samples,
-            reference_targets=reference_targets,
-        )
+        # Incrementally accumulate val crops file-by-file so FID/MMD/MS-SSIM
+        # evolve with growing reference coverage.
+        val_dataset = runtime.objects.get("val_dataset")
+        if val_dataset is not None:
+            total_crops = len(val_dataset)
+            file_count = val_dataset.file_count
+            crops_per_step = max(1, total_crops // file_count)
+            reference_crops: list[torch.Tensor] = []
+            for step in range(file_count):
+                start = step * crops_per_step
+                end = total_crops if step == file_count - 1 else start + crops_per_step
+                for idx in range(start, end):
+                    reference_crops.append(val_dataset[idx]["target"])
+                _log_postfit_sample_metrics(
+                    runtime=runtime,
+                    sample_tensor=samples,
+                    reference_targets={"val": torch.stack(reference_crops, dim=0)},
+                    step=step,
+                )
+
         framework_module.log_sample_slices(samples, tag="test_sample")
 
     if runtime.artifact_manager is not None:

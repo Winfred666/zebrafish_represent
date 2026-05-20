@@ -1,15 +1,15 @@
-"""Crop-based TIF volume dataset with lazy loading and crop-index caching.
+"""Crop-based TIF volume dataset with eager volume loading and crop-index caching.
 
-Scales to hundreds of TIFFs by (1) caching the pre-computed non-zero crop grid
-to disk so subsequent runs skip the expensive zero-filter pass, and (2) loading
-volumes on demand with an LRU cache so RAM usage is bounded to a few volumes.
+Scales to hundreds of TIFFs by caching the pre-computed non-zero crop grid to
+disk and loading all downsampled volumes into RAM during dataset construction.
+The index cache stores crop coordinates only; fast per-crop access comes from
+serving slices from resident in-memory volumes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections import OrderedDict
 from pathlib import Path
 from typing import Dict
 
@@ -18,16 +18,15 @@ import torch
 
 from utils.dataset.base_volume import BaseTifVolumeDataset
 from utils.sanitize.data_config import CropTifVolumeDatasetParams
-from utils.tif2volume import process_tif_to_array
 
 
 class CropTifVolumeDataset(BaseTifVolumeDataset):
-    """Grid-crop dataset with zero-filtering, lazy loading, and crop-index cache.
+    """Grid-crop dataset with zero-filtering, eager loading, and crop-index cache.
 
     On first run the full non-zero crop grid is computed and saved to
-    ``cache_dir``.  Subsequent runs load it instantly.  Volumes are loaded
-    on demand and held in a bounded LRU cache so RAM grows with cache size,
-    not with dataset size.
+    the dataset directory.  Subsequent runs load the grid instantly.  Volumes
+    are still read from TIF once per dataset construction, then crops are served
+    from RAM to avoid per-batch network IO and downsampling stalls.
 
     All crops carry metadata for reassembly via
     :func:`utils.dataset.fusion.volume_fuse`.
@@ -55,16 +54,9 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         self._file_paths = self._discover_files()
         self.file_count = len(self._file_paths)
 
-        # ── lazy-loading state ──
-        # Cache all volumes (each ~6 MB at 0.125 scale; 100 files ≈ 600 MB RAM).
-        # Small cache causes constant network-I/O cache misses that starve the GPU.
-        self._max_cached = max(4, self.file_count)
-        self._volume_cache: OrderedDict[int, np.ndarray] = OrderedDict()
-
-        # ── volume shapes (read without loading full data) ──
-        self._vol_shapes: list[tuple[int, ...]] = [
-            self._read_shape(fp) for fp in self._file_paths
-        ]
+        # ── eager volume load ──
+        self.volumes = self._load_all_volumes() # WARNING: MAIN BOTTLENECK !!!!!
+        self._vol_shapes: list[tuple[int, ...]] = [tuple(vol.shape) for vol in self.volumes]
 
         # ── crop index (from cache or first-pass build) ──
         self.effective_input_size = (
@@ -87,34 +79,15 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         files = sorted(
             list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
         )
-        if self.config.max_files is not None:
-            files = files[: int(self.config.max_files)]
         if not files:
             raise ValueError(f"No tif files found in {self.data_dir}")
+        # Deterministic shuffle so max_files draws a reproducible subset
+        import random
+        rng = random.Random(42)
+        rng.shuffle(files)
+        if self.config.max_files is not None:
+            files = files[: int(self.config.max_files)]
         return files
-
-    # ── shape probe (header only, no data load) ───────────────────
-
-    def _read_shape(self, file_path: Path) -> tuple[int, ...]:
-        """Read downsampled volume shape from TIFF header without loading pixel data."""
-        try:
-            import tifffile
-            with tifffile.TiffFile(str(file_path)) as tif:
-                page = tif.pages[0]
-                shape: tuple[int, ...] = page.shape
-                if len(shape) == 3:
-                    shape = (1, *shape)
-                elif len(shape) == 2:
-                    shape = (1, 1, *shape)
-                sf = self.scale_factor
-                return (shape[0],) + tuple(max(1, int(s * f)) for s, f in zip(shape[1:], sf))
-        except Exception:
-            try:
-                vol = self._load_volume(file_path)
-                return tuple(vol.shape)
-            except Exception:
-                print(f"[TIF-LOG] WARNING: cannot read {file_path.name}, skipping")
-                return (1, 64, 64, 64)
 
     # ── crop index cache ──────────────────────────────────────────
 
@@ -132,9 +105,8 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
-    # These are small by design — they store only the crop grid indices (fusion_id, start positions), 
-    # not the volume data. Volumes are cached in RAM at runtime. 
-    # Future runs load the grid instantly (bypassing the multi-hour cache generation).
+    # These are small by design: they store only crop grid indices
+    # (fusion_id, start positions), not volume data.
     def _cache_path(self) -> Path:
         return self.data_dir / f".crop_index_{self._cache_key()}.pt"
 
@@ -152,22 +124,41 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         print(f"[TIF-LOG] Crop index cached to {cache_path}")
         return grid
 
-    # ── volume I/O (lazy + LRU) ──────────────────────────────────
+    # ── volume I/O ───────────────────────────────────────────────
+
+    def _load_all_volumes(self) -> list[np.ndarray]:
+        """Load all downsampled volumes into RAM once for fast crop serving."""
+        volumes: list[np.ndarray] = []
+        loaded_paths: list[Path] = []
+        skipped = 0
+        total_bytes = 0
+        for file_path in self._file_paths:
+            try:
+                volume = self._load_volume(file_path)
+            except Exception as exc:
+                skipped += 1
+                print(f"[TIF-LOG] WARNING: cannot load {file_path.name}, skipping: {exc}")
+                continue
+            volumes.append(volume)
+            loaded_paths.append(file_path)
+            total_bytes += int(volume.nbytes)
+
+        if not volumes:
+            raise ValueError(f"No readable tif files found in {self.data_dir}")
+
+        if skipped:
+            self._file_paths = loaded_paths
+            self.file_count = len(volumes)
+
+        print(
+            f"[TIF-LOG] Eager-loaded {len(volumes)} volume(s) into RAM "
+            f"({total_bytes / (1024.0 ** 3):.2f} GiB)"
+        )
+        return volumes
 
     def _get_volume(self, vol_idx: int) -> np.ndarray:
-        """Return volume *vol_idx*, loading it into the LRU cache if needed."""
-        if vol_idx in self._volume_cache:
-            # Move to end (most-recently-used)
-            self._volume_cache.move_to_end(vol_idx)
-            return self._volume_cache[vol_idx]
-
-        # Evict oldest if cache full
-        while len(self._volume_cache) >= self._max_cached:
-            self._volume_cache.popitem(last=False)
-
-        volume = self._load_volume(self._file_paths[vol_idx])
-        self._volume_cache[vol_idx] = volume
-        return volume
+        """Return resident volume *vol_idx* from RAM."""
+        return self.volumes[vol_idx]
 
     def _load_volume(self, file_path: Path) -> np.ndarray:
         volume = super()._load_volume(file_path)  # downsample + normalize + [-1,1] rescale
@@ -247,7 +238,7 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         return starts
 
     def _build_crop_grid(self) -> list[tuple[int, int, int, int]]:
-        """Full-pass: load every volume, enumerate all crops, filter zeros."""
+        """Full-pass: enumerate all resident volumes and filter empty crops."""
         raw: list[tuple[int, int, int, int]] = []
         for vol_idx in range(self.file_count):
             try:
