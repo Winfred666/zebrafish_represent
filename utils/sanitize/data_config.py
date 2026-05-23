@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
-
 from pydantic import Field, field_validator
 from torch.utils.data import Dataset
 
@@ -14,7 +12,6 @@ from utils.sanitize.param_class import IngestibleParams
 class CropTifVolumeDatasetParams(IngestibleParams):
     """Params for CropTifVolumeDataset — grid-crop dataset with zero-filtering."""
 
-    class_name: Literal["CropTifVolumeDataset"] = "CropTifVolumeDataset"
     data_dir: str
     crop_size: tuple[int, int, int] | None = None
     max_files: int | None = None
@@ -69,12 +66,29 @@ class CropTifVolumeDatasetParams(IngestibleParams):
         return (o_d, o_h, o_w)
 
 
+class CropTifVolumeHotDatasetParams(CropTifVolumeDatasetParams):
+    """Params for CropTifVolumeHotDataset — metadata-indexed crop cache dataset."""
+
+    cache_root: str | None = None
+
+    @field_validator("cache_root")
+    @classmethod
+    def _to_abs_cache_root(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            return str(candidate.resolve())
+        return str((Path.cwd() / candidate).resolve())
+
+
 class DataLoaderParams(IngestibleParams):
     """Concrete dataloader params injected into dataloader builders."""
 
     dataset: Dataset  # required, cannot be none
     batch_size: int = Field(default=2, ge=1)
     num_workers: int = Field(default=4, ge=0)
+    prefetch_factor: int | None = Field(default=None, ge=1)
     shuffle: bool = False
     pin_memory: bool = True
     persistent_workers: bool = False

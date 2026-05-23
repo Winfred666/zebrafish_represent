@@ -123,6 +123,7 @@ class TrainerParams(IngestibleParams):
     max_epochs: int = Field(default=20, ge=0)
     accelerator: str = "auto"
     devices: int | str = 1
+    strategy: str = "auto"
     precision: str | int = "32"
     log_every_n_steps: int = Field(default=10, ge=1)
     check_val_every_n_epoch: int = Field(default=1, ge=1)

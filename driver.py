@@ -32,11 +32,16 @@ def _dataset_requires_single_process_cache_build(dataset: object) -> bool:
     return callable(checker) and bool(checker())
 
 
+def _dataset_requires_single_process_loading(dataset: object) -> bool:
+    checker = getattr(dataset, "requires_single_process_loading", None)
+    return callable(checker) and bool(checker())
+
+
 def _rebuild_dataloader_with_zero_workers(
     loader: DataLoader,
     params: dict,
 ) -> DataLoader:
-    """Rebuild a configured DataLoader for deterministic hot-cache creation."""
+    """Rebuild a configured DataLoader for deterministic hot-cache access."""
     dataloader_kwargs = {
         "dataset": loader.dataset,
         "batch_size": params.get("batch_size", loader.batch_size),
@@ -55,11 +60,11 @@ def _rebuild_dataloader_with_zero_workers(
 
 
 def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
-    """Force num_workers=0 while hot crop caches are incomplete.
+    """Force num_workers=0 for hot crop cache build/read paths.
 
     The steady-state dataloader config stays in YAML.  This runtime-only
     override avoids worker-process cache races during first cache materialization
-    and automatically disappears once all per-volume cache files exist.
+    and worker-process stalls on multi-GB cache payload reads.
     """
     changed: list[str] = []
     for object_key, config_key in (
@@ -70,7 +75,10 @@ def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
         if loader is None:
             continue
         dataset = getattr(loader, "dataset", None)
-        if not _dataset_requires_single_process_cache_build(dataset):
+        if not (
+            _dataset_requires_single_process_cache_build(dataset)
+            or _dataset_requires_single_process_loading(dataset)
+        ):
             continue
         if int(getattr(loader, "num_workers", 0)) == 0:
             continue
@@ -83,7 +91,7 @@ def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
         changed.append(object_key)
     if changed:
         print(
-            "[HOT-CACHE] Incomplete crop cache detected; overriding "
+            "[HOT-CACHE] Overriding "
             f"{', '.join(changed)} num_workers=0 for this run."
         )
     return changed

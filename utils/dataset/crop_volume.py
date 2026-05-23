@@ -1,102 +1,138 @@
-"""Crop-based TIF volume dataset with eager volume loading and crop-index caching.
+"""Hot-cache crop dataset — metadata-indexed, fully pre-cached, no lazy I/O.
 
-Scales to hundreds of TIFFs by caching the pre-computed non-zero crop grid to
-disk and loading all downsampled volumes into RAM during dataset construction.
-The index cache stores crop coordinates only; fast per-crop access comes from
-serving slices from resident in-memory volumes.
+The dataset scans TIFF metadata during ``__init__`` to build the crop grid, then
+eagerly loads every per-volume ``.pt`` cache file into RAM via a thread pool.
+``__getitem__`` is a pure in-memory lookup — no disk I/O, no mmap, no TIFF
+reading.  Cache materialization is handled by a separate offline build step
+(see ``utils/script/build_hot_cache.py``).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict
 
 import numpy as np
+import tifffile
 import torch
+from torch.utils.data import Dataset
 
-from utils.dataset.base_volume import BaseTifVolumeDataset
-from utils.sanitize.data_config import CropTifVolumeDatasetParams
+from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
+from utils.tif2volume import _try_integer_downscale_factors
 
 
-class CropTifVolumeDataset(BaseTifVolumeDataset):
-    """Grid-crop dataset with zero-filtering, eager loading, and crop-index cache.
+class CropTifVolumeHotDataset(Dataset):
+    """Fully pre-cached crop dataset — no lazy I/O path.
 
-    On first run the full non-zero crop grid is computed and saved to
-    the dataset directory.  Subsequent runs load the grid instantly.  Volumes
-    are still read from TIF once per dataset construction, then crops are served
-    from RAM to avoid per-batch network IO and downsampling stalls.
+    Every volume must have a corresponding ``.pt`` cache file before the dataset
+    is constructed.  ``__init__`` eagerly loads all caches into RAM.
+    ``__getitem__`` serves crops from the in-memory dict.
 
-    All crops carry metadata for reassembly via
-    :func:`utils.dataset.fusion.volume_fuse`.
+    Use ``utils/script/build_hot_cache.py`` to build cache files offline.
     """
 
-    # ── init ──────────────────────────────────────────────────────
+    CACHE_MODE = "hot_preserve_all_v1"
+    CACHE_VERSION = 1
 
-    def __init__(self, config: CropTifVolumeDatasetParams):
+    def __init__(self, config: CropTifVolumeHotDatasetParams):
         self.config = config
         self.normalize = bool(config.normalize)
         self.clip_percentile = config.clip_percentile
         self.in_channels = int(config.in_channels)
         self.crop_size = config.crop_size
-        self.pad_to_multiple = config.pad_to_multiple
-        self.patch_grid_multiple = config.patch_grid_multiple
         self.overlap = (
             tuple(float(v) for v in config.overlap)
             if self.crop_size is not None
             else (0.0, 0.0, 0.0)
         )
         self.scale_factor = tuple(float(v) for v in config.scale_factor)
+        self.pad_to_multiple = config.pad_to_multiple
+        self.patch_grid_multiple = config.patch_grid_multiple
 
-        # ── file discovery ──
         self.data_dir = Path(config.data_dir)
+        self.cache_root = Path(config.cache_root) if getattr(config, "cache_root", None) else None
         self._file_paths = self._discover_files()
         self.file_count = len(self._file_paths)
 
-        # ── eager volume load ──
-        self.volumes = self._load_all_volumes() # WARNING: MAIN BOTTLENECK !!!!!
-        self._vol_shapes: list[tuple[int, ...]] = [tuple(vol.shape) for vol in self.volumes]
-
-        # ── crop index (from cache or first-pass build) ──
+        self._volume_crop_cache: dict[int, dict] = {}
+        self._vol_shapes = self._scan_volume_shapes()
+        self.file_count = len(self._file_paths)
         self.effective_input_size = (
             self.crop_size
-            if self.crop_size is not None
+            if self.crop_size is not None or not self._vol_shapes
             else self._vol_shapes[0][1:]
         )
-        self.crop_grid: list[tuple[int, int, int, int]] = self._load_or_build_crop_grid()
+
+        self._volume_crop_starts: list[list[tuple[int, int, int]]] = []
+        self._volume_offsets: list[int] = []
+        self.crop_grid: list[tuple[int, int, int, int]] = self._build_preserve_all_crop_grid()
+        self._volume_offsets.append(len(self.crop_grid))
+
+        if not self.cache_complete():
+            missing = [
+                i for i in range(self.file_count)
+                if not self._cache_path_for_volume(i).exists()
+            ]
+            raise RuntimeError(
+                f"Incomplete hot crop cache: {len(missing)}/{self.file_count} "
+                f"volumes missing. Build caches first with "
+                f"utils/script/build_hot_cache.py. "
+                f"First 5 missing indices: {missing[:5]}"
+            )
+
+        self._eager_preload_volume_caches()
 
         print(
-            f"[TIF-LOG] {self.file_count} files indexed, "
-            f"crop_size={self.crop_size}, "
-            f"effective_input_size={self.effective_input_size}, "
-            f"overlap={self.overlap}, total_crops={len(self.crop_grid)}"
+            f"[TIF-LOG] Hot dataset indexed {self.file_count} file(s) from metadata, "
+            f"crop_size={self.crop_size}, effective_input_size={self.effective_input_size}, "
+            f"overlap={self.overlap}, total_crops={len(self.crop_grid)}, "
+            f"cache_complete={self.cache_complete()}"
         )
 
     # ── file discovery ────────────────────────────────────────────
 
     def _discover_files(self) -> list[Path]:
+        if self.config.max_files is not None and int(self.config.max_files) == 0:
+            return []
         files = sorted(
             list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
         )
         if not files:
             raise ValueError(f"No tif files found in {self.data_dir}")
-        # Deterministic shuffle so max_files draws a reproducible subset
         import random
+
         rng = random.Random(42)
         rng.shuffle(files)
         if self.config.max_files is not None:
             files = files[: int(self.config.max_files)]
         return files
 
-    # ── crop index cache ──────────────────────────────────────────
+    # ── cache identity ────────────────────────────────────────────
 
-    def _cache_key(self) -> str:
-        """Deterministic key from all parameters that affect the crop grid."""
+    def _cache_key(self, cache_mode: str = "hot_preserve_all_v1") -> str:
+        files = []
+        for path in self._file_paths:
+            try:
+                stat = path.stat()
+                rel_path = path.relative_to(self.data_dir).as_posix()
+                files.append({
+                    "path": rel_path,
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                })
+            except OSError:
+                files.append({"path": str(path), "size": None, "mtime_ns": None})
         parts = {
-            "files": sorted(str(p.name) for p in self._file_paths),
+            "cache_mode": cache_mode,
+            "files": files,
             "crop_size": self.crop_size,
             "overlap": self.overlap,
+            "scale_factor": self.scale_factor,
+            "in_channels": self.in_channels,
             "patch_grid_multiple": self.patch_grid_multiple,
             "pad_to_multiple": self.pad_to_multiple,
             "normalize": self.normalize,
@@ -105,91 +141,114 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
-    # These are small by design: they store only crop grid indices
-    # (fusion_id, start positions), not volume data.
-    def _cache_path(self) -> Path:
-        return self.data_dir / f".crop_index_{self._cache_key()}.pt"
+    def _crop_cache_dir(self) -> Path:
+        if self.cache_root is not None:
+            return self.cache_root / f".crop_cache_{self._cache_key()}"
+        return self.data_dir / f".crop_cache_{self._cache_key()}"
 
-    def _load_or_build_crop_grid(self) -> list[tuple[int, int, int, int]]:
-        cache_path = self._cache_path()
-        if cache_path.exists():
-            print(f"[TIF-LOG] Loading cached crop index: {cache_path}")
-            loaded = torch.load(cache_path, weights_only=True)
-            if isinstance(loaded, list):
-                return loaded
-            print("[TIF-LOG] Stale cache — rebuilding crop index")
+    def _cache_path_for_volume(self, vol_idx: int) -> Path:
+        return self._crop_cache_dir() / f"volume_{vol_idx:06d}.pt"
 
-        grid = self._build_crop_grid()
-        torch.save(grid, cache_path)
-        print(f"[TIF-LOG] Crop index cached to {cache_path}")
-        return grid
+    def cache_complete(self) -> bool:
+        return bool(self._file_paths) and all(
+            self._cache_path_for_volume(vol_idx).exists()
+            for vol_idx in range(self.file_count)
+        )
 
-    # ── volume I/O ───────────────────────────────────────────────
+    def requires_single_process_cache_build(self) -> bool:
+        return False
 
-    def _load_all_volumes(self) -> list[np.ndarray]:
-        """Load all downsampled volumes into RAM once for fast crop serving."""
-        volumes: list[np.ndarray] = []
-        loaded_paths: list[Path] = []
+    def requires_single_process_loading(self) -> bool:
+        return False
+
+    # ── metadata indexing ─────────────────────────────────────────
+
+    def _scan_volume_shapes(self) -> list[tuple[int, ...]]:
+        shapes: list[tuple[int, ...]] = []
+        readable_paths: list[Path] = []
         skipped = 0
-        total_bytes = 0
         for file_path in self._file_paths:
             try:
-                volume = self._load_volume(file_path)
+                shape = self._metadata_volume_shape(file_path)
             except Exception as exc:
                 skipped += 1
-                print(f"[TIF-LOG] WARNING: cannot load {file_path.name}, skipping: {exc}")
+                print(f"[TIF-LOG] WARNING: cannot inspect {file_path.name}, skipping: {exc}")
                 continue
-            volumes.append(volume)
-            loaded_paths.append(file_path)
-            total_bytes += int(volume.nbytes)
+            shapes.append(shape)
+            readable_paths.append(file_path)
 
-        if not volumes:
-            raise ValueError(f"No readable tif files found in {self.data_dir}")
-
+        if not shapes:
+            if self.file_count == 0 and self.config.max_files is not None and int(self.config.max_files) == 0:
+                print("[TIF-LOG] Hot dataset: 0 files requested (max_files=0), dataset is empty.")
+                return []
+        if not shapes:
+            raise ValueError(f"No metadata-readable tif files found in {self.data_dir}")
         if skipped:
-            self._file_paths = loaded_paths
-            self.file_count = len(volumes)
+            self._file_paths = readable_paths
+        return shapes
 
-        print(
-            f"[TIF-LOG] Eager-loaded {len(volumes)} volume(s) into RAM "
-            f"({total_bytes / (1024.0 ** 3):.2f} GiB)"
-        )
-        return volumes
+    def _metadata_volume_shape(self, file_path: Path) -> tuple[int, ...]:
+        with tifffile.TiffFile(file_path) as tif:
+            first_page = tif.pages[0]
+            first_shape = tuple(int(v) for v in first_page.shape)
+            page_count = self._estimate_page_count(file_path, first_shape, first_page.dtype)
 
-    def _get_volume(self, vol_idx: int) -> np.ndarray:
-        """Return resident volume *vol_idx* from RAM."""
-        return self.volumes[vol_idx]
-
-    def _load_volume(self, file_path: Path) -> np.ndarray:
-        volume = super()._load_volume(file_path)  # downsample + normalize + [-1,1] rescale
-        if volume.shape[0] < self.in_channels:
+        if len(first_shape) == 2:
+            raw_shape = (page_count, *first_shape)
+            channels = 1
+            spatial = raw_shape
+        elif len(first_shape) == 3 and first_shape[-1] <= 8:
+            raw_shape = (page_count, *first_shape)
+            channels = raw_shape[3]
+            spatial = raw_shape[:3]
+        elif len(first_shape) == 3 and page_count == 1:
+            raw_shape = first_shape
+            channels = 1
+            spatial = raw_shape
+        else:
             raise ValueError(
-                f"File {file_path} has {volume.shape[0]} channels, "
+                f"Expected 2D pages or channels-last 3D pages, got "
+                f"page_count={page_count}, first_page_shape={first_shape}"
+            )
+
+        if channels < self.in_channels:
+            raise ValueError(
+                f"File {file_path} has {channels} channels, "
                 f"smaller than requested in_channels={self.in_channels}"
             )
-        volume = volume[: self.in_channels]
-        volume = self._pad_full_volume_if_needed(volume)
-        return volume
 
-    # ── padding ───────────────────────────────────────────────────
+        downsampled = self._downsampled_spatial_shape(spatial)
+        padded = self._padded_spatial_shape(downsampled)
+        return (self.in_channels, *padded)
 
-    def _pad_full_volume_if_needed(self, volume: np.ndarray) -> np.ndarray:
-        """Pad spatial dims so the crop grid covers every voxel.
+    def _estimate_page_count(self, file_path: Path, first_shape: tuple[int, ...], dtype: np.dtype) -> int:
+        page_bytes = int(np.prod(first_shape)) * np.dtype(dtype).itemsize
+        if page_bytes <= 0:
+            raise ValueError(f"Invalid TIFF page byte size for {file_path}")
+        file_size = file_path.stat().st_size
+        if file_size < 64 * 1024 * 1024:
+            with tifffile.TiffFile(file_path) as tif:
+                return len(tif.pages)
+        ratio = file_size / float(page_bytes)
+        estimated = int(round(ratio))
+        if estimated >= 1 and abs(ratio - estimated) <= max(1.0, estimated * 0.05):
+            return estimated
+        with tifffile.TiffFile(file_path) as tif:
+            return len(tif.pages)
 
-        When ``crop_size`` is set, pads trailing edges so the last crop
-        exactly reaches the volume boundary (``_grid_starts`` uses integer
-        division which can leave a gap).  Padded voxels use the background
-        value (-1.0 for [-1,1] data, 0.0 for raw) so they are zero-filtered
-        later if empty.
-        """
-        _, D, H, W = volume.shape
+    def _downsampled_spatial_shape(self, spatial_shape: tuple[int, int, int]) -> tuple[int, int, int]:
+        factors = _try_integer_downscale_factors(self.scale_factor)
+        if factors is not None:
+            return tuple(int((dim + factor - 1) // factor) for dim, factor in zip(spatial_shape, factors))
+        return tuple(int(dim * scale) for dim, scale in zip(spatial_shape, self.scale_factor))
+
+    def _padded_spatial_shape(self, spatial_shape: tuple[int, int, int]) -> tuple[int, int, int]:
+        depth, height, width = spatial_shape
         pad_d = pad_h = pad_w = 0
-        pad_val = -1.0 if self.normalize else 0.0
 
         if self.crop_size is not None:
             cd, ch, cw = self.crop_size
             od, oh, ow = self.overlap
-            # stride = crop_size * (1 - overlap)
             stride_d = max(1, int(round(cd * (1.0 - od))))
             stride_h = max(1, int(round(ch * (1.0 - oh))))
             stride_w = max(1, int(round(cw * (1.0 - ow))))
@@ -200,31 +259,20 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
                 remainder = (dim_len - crop_len) % stride
                 return 0 if remainder == 0 else stride - remainder
 
-            pad_d = _pad_dim(D, cd, stride_d)
-            pad_h = _pad_dim(H, ch, stride_h)
-            pad_w = _pad_dim(W, cw, stride_w)
-
+            pad_d = _pad_dim(depth, cd, stride_d)
+            pad_h = _pad_dim(height, ch, stride_h)
+            pad_w = _pad_dim(width, cw, stride_w)
         elif self.pad_to_multiple is not None:
-            mult_depth, mult_height, mult_width = self.pad_to_multiple
-            pad_d = (mult_depth - (D % mult_depth)) % mult_depth
-            pad_h = (mult_height - (H % mult_height)) % mult_height
-            pad_w = (mult_width - (W % mult_width)) % mult_width
+            mult_d, mult_h, mult_w = self.pad_to_multiple
+            pad_d = (mult_d - (depth % mult_d)) % mult_d
+            pad_h = (mult_h - (height % mult_h)) % mult_h
+            pad_w = (mult_w - (width % mult_w)) % mult_w
 
-        if pad_d == 0 and pad_h == 0 and pad_w == 0:
-            return volume
-
-        return np.pad(
-            volume,
-            ((0, 0), (0, pad_d), (0, pad_h), (0, pad_w)),
-            mode="constant",
-            constant_values=pad_val,
-        )
+        return (depth + pad_d, height + pad_h, width + pad_w)
 
     # ── crop grid ─────────────────────────────────────────────────
 
-    def _grid_starts(
-        self, dim_length: int, crop_length: int, overlap_fraction: float, axis: int
-    ) -> list[int]:
+    def _grid_starts(self, dim_length: int, crop_length: int, overlap_fraction: float, axis: int) -> list[int]:
         if dim_length <= crop_length:
             return [0]
         stride = max(1, int(round(crop_length * (1.0 - overlap_fraction))))
@@ -237,92 +285,94 @@ class CropTifVolumeDataset(BaseTifVolumeDataset):
             starts = sorted(set((s // multiple) * multiple for s in starts))
         return starts
 
-    def _build_crop_grid(self) -> list[tuple[int, int, int, int]]:
-        """Full-pass: enumerate all resident volumes and filter empty crops."""
-        raw: list[tuple[int, int, int, int]] = []
-        for vol_idx in range(self.file_count):
-            try:
-                vol = self._get_volume(vol_idx)
-            except Exception:
-                print(f"[TIF-LOG] WARNING: cannot load {self._file_paths[vol_idx].name}, skipping")
-                continue
-            if self.crop_size is None:
-                raw.append((vol_idx, 0, 0, 0))
-                continue
-            _, depth, height, width = vol.shape
-            cd, ch, cw = self.crop_size
-            od, oh, ow = self.overlap
-            for sd in self._grid_starts(depth, cd, od, axis=0):
-                for sh in self._grid_starts(height, ch, oh, axis=1):
-                    for sw in self._grid_starts(width, cw, ow, axis=2):
-                        raw.append((vol_idx, sd, sh, sw))
-
-        filtered: list[tuple[int, int, int, int]] = []
-        empty = 0
-        for vol_idx, sd, sh, sw in raw:
-            vol = self._get_volume(vol_idx)
-            crop = self._extract_crop(vol, sd, sh, sw)
-            # Convert [-1,1] → [0,1] for emptiness check so background
-            # (~ -1) maps to ~0 and is correctly identified as empty.
-            if self.normalize:
-                crop_01 = (crop + 1.0) * 0.5
-            else:
-                crop_01 = crop
-            if np.any(crop_01):
-                filtered.append((vol_idx, sd, sh, sw))
-            else:
-                empty += 1
-
-        total = len(raw)
-        if total > 0:
-            print(
-                f"[TIF-LOG] Empty crop filter: {empty}/{total} "
-                f"({empty / total * 100:.2f}%) all-zero crops removed, "
-                f"{len(filtered)} retained"
-            )
-        return filtered
-
-    # ── crop extraction ───────────────────────────────────────────
-
-    def _extract_crop(
-        self, volume: np.ndarray, start_d: int, start_h: int, start_w: int
-    ) -> np.ndarray:
+    def _volume_starts_for_shape(self, shape: tuple[int, ...]) -> list[tuple[int, int, int]]:
         if self.crop_size is None:
-            return volume.astype(np.float32, copy=False)
-        _, depth, height, width = volume.shape
+            return [(0, 0, 0)]
+        _, depth, height, width = shape
         cd, ch, cw = self.crop_size
-        pad_d = max(0, cd - depth)
-        pad_h = max(0, ch - height)
-        pad_w = max(0, cw - width)
-        if pad_d > 0 or pad_h > 0 or pad_w > 0:
-            # Data is in [-1,1] when normalized → pad with -1.0 (background).
-            # Otherwise pad with 0.0 (raw intensity floor).
-            pad_val = -1.0 if self.normalize else 0.0
-            volume = np.pad(
-                volume,
-                ((0, 0), (0, pad_d), (0, pad_h), (0, pad_w)),
-                mode="constant",
-                constant_values=pad_val,
-            )
-        crop = volume[
-            :,
-            start_d : start_d + cd,
-            start_h : start_h + ch,
-            start_w : start_w + cw,
-        ]
-        return crop.astype(np.float32, copy=False)
+        od, oh, ow = self.overlap
+        starts: list[tuple[int, int, int]] = []
+        for start_d in self._grid_starts(depth, cd, od, axis=0):
+            for start_h in self._grid_starts(height, ch, oh, axis=1):
+                for start_w in self._grid_starts(width, cw, ow, axis=2):
+                    starts.append((start_d, start_h, start_w))
+        return starts
+
+    def _build_preserve_all_crop_grid(self) -> list[tuple[int, int, int, int]]:
+        grid: list[tuple[int, int, int, int]] = []
+        for vol_idx, shape in enumerate(self._vol_shapes):
+            self._volume_offsets.append(len(grid))
+            starts = self._volume_starts_for_shape(shape)
+            self._volume_crop_starts.append(starts)
+            for start_d, start_h, start_w in starts:
+                grid.append((vol_idx, start_d, start_h, start_w))
+        return grid
+
+    # ── eager preload ─────────────────────────────────────────────
+
+    def _eager_preload_volume_caches(self, max_workers: int = 8) -> None:
+        """Load every ``.pt`` cache into RAM via thread pool.
+
+        After this returns, ``__getitem__`` is a pure dict lookup — zero I/O.
+        """
+
+        def _load_one(vol_idx: int):
+            path = self._cache_path_for_volume(vol_idx)
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+            self._validate_cache_payload(vol_idx, payload, path)
+            return vol_idx, payload
+
+        worker_count = min(max_workers, self.file_count)
+        loaded = 0
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {executor.submit(_load_one, i): i for i in range(self.file_count)}
+            for future in as_completed(futures):
+                vol_idx = futures[future]
+                try:
+                    idx, payload = future.result()
+                    self._volume_crop_cache[idx] = payload
+                    loaded += 1
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to load hot crop cache for volume {vol_idx}: {exc}"
+                    ) from exc
+
+        print(
+            f"[TIF-LOG] Eager-preloaded {loaded}/{self.file_count} "
+            f"volume crop caches into RAM"
+        )
+
+    def _validate_cache_payload(self, vol_idx: int, payload: object, cache_path: Path) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid crop cache payload in {cache_path}")
+        expected_shape = tuple(int(v) for v in self._vol_shapes[vol_idx])
+        full_size = tuple(int(v) for v in payload.get("full_size", []))
+        if payload.get("version") != self.CACHE_VERSION:
+            raise ValueError(f"Unsupported crop cache version in {cache_path}")
+        if full_size != expected_shape:
+            raise ValueError(f"Stale crop cache full_size in {cache_path}")
+        starts = payload.get("starts")
+        crops = payload.get("crops")
+        if not isinstance(starts, torch.Tensor) or not isinstance(crops, torch.Tensor):
+            raise ValueError(f"Invalid crop tensors in {cache_path}")
+        if int(starts.shape[0]) != len(self._volume_crop_starts[vol_idx]):
+            raise ValueError(f"Stale crop cache starts in {cache_path}")
+        if int(crops.shape[0]) != len(self._volume_crop_starts[vol_idx]):
+            raise ValueError(f"Stale crop cache crop count in {cache_path}")
 
     # ── Dataset interface ─────────────────────────────────────────
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
-        vol_idx, sd, sh, sw = self.crop_grid[index]
-        volume = self._get_volume(vol_idx)
-        crop = self._extract_crop(volume, sd, sh, sw)
+        vol_idx, start_d, start_h, start_w = self.crop_grid[index]
+        local_idx = index - self._volume_offsets[vol_idx]
+        payload = self._volume_crop_cache[vol_idx]
+        crops = payload["crops"]
+        full_size = payload["full_size"]
         return {
-            "target": torch.from_numpy(crop.copy()),
+            "target": crops[local_idx].clone(),
             "fusion_id": vol_idx,
-            "pos_idx": torch.tensor([sd, sh, sw], dtype=torch.long),
-            "full_size": torch.tensor(volume.shape, dtype=torch.long),
+            "pos_idx": torch.tensor([start_d, start_h, start_w], dtype=torch.long),
+            "full_size": full_size.clone().to(dtype=torch.long),
         }
 
     def __len__(self) -> int:

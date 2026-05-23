@@ -26,7 +26,7 @@ class RuntimeEntryTest(unittest.TestCase):
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
-            "CropTifVolumeDataset", "DataLoader",
+            "CropTifVolumeHotDataset", "DataLoader",
         }
         import utils.runtime_factory as rf
         available = set(rf.__dict__)
