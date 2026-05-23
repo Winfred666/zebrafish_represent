@@ -155,13 +155,14 @@ If `logging.tracking_uri` is not set, the default local backend is under `result
 ## 7. File Structure
 
 ```text
-- `driver.py`: training entrypoint
-- `driver.py`: split-config loading and training orchestration
-- `modules/dit3d.py`: 3D DiT backbone
-- `modules/rect_flow.py`: rectified flow training module
-- `modules/ddpm.py`: DDPM training module
+- `driver.py`: training entrypoint and split-config orchestration
+- `modules/model/dit3d.py`: 3D DiT backbone
+- `modules/model/prdit.py`: PRDiT local denoiser model
+- `modules/framework/rect_flow.py`: rectified flow training
+- `modules/framework/ddpm.py`: DDPM training
+- `modules/framework/IaN_flow.py`: IaN flow training
 - `utils/sanitize/runtime_factory.py`: shared runtime builders
 - `utils/sanitize/param_class.py`: typed params injected into datasets/modules
-- `utils/dataset/`: TIF volume dataset code
-- `utils/display/`: MLflow artifact helpers and visualization helpers
+- `utils/dataset/`: TIF volume dataset + hot cache
+- `utils/display/`: MLflow artifact and visualization helpers
 ```

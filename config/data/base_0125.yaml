@@ -1,5 +1,5 @@
 train_dataset:
-  class_name: CropTifVolumeDataset
+  class_name: CropTifVolumeHotDataset
   params:
     data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_sm/train
     crop_size: [64, 64, 64]
@@ -28,7 +28,7 @@ train_dataloader:
     persistent_workers: true
 
 val_dataset:
-  class_name: CropTifVolumeDataset
+  class_name: CropTifVolumeHotDataset
   params:
     data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_sm/val
     crop_size: [64, 64, 64]

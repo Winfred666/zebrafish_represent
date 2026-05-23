@@ -1,0 +1,30 @@
+import_config: base_0125.yaml
+
+train_dataset:
+  params:
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full/train
+    cache_root: /tmp/zebrafish_represent_hot_cache/train
+    crop_size: [128, 128, 128]
+    scale_factor: [0.25, 0.25, 0.25]
+
+train_dataloader:
+  params:
+    batch_size: 16
+    num_workers: 2
+    prefetch_factor: 2
+    shuffle: false
+    persistent_workers: true
+
+val_dataset:
+  params:
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full/val
+    cache_root: /tmp/zebrafish_represent_hot_cache/val
+    crop_size: [128, 128, 128]
+    scale_factor: [0.25, 0.25, 0.25]
+
+val_dataloader:
+  params:
+    batch_size: 4
+    num_workers: 1
+    prefetch_factor: 2
+    persistent_workers: false

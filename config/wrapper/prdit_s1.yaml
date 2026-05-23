@@ -2,7 +2,7 @@ import_config: base.yaml
 
 trainer:
   params:
-    max_epochs: 20
+    max_epochs: 10
     accelerator: gpu
     # check_val_every_n_epoch: 1
 

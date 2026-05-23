@@ -1,0 +1,6 @@
+import_config: prdit_s1_sm.yaml
+
+model:
+  params:
+    depth: 4
+    load_from_ckpt: null # set to stage-1 .ckpt path, e.g. result/prdit_s1_IaN/prdit_s1/checkpoints/last.ckpt

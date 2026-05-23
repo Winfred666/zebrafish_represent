@@ -43,6 +43,7 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 - Use one-object parameter injection. Avoid long constructor or factory argument lists.
 - Persist checkpoints, config dumps, and generated samples through MLflow artifact helpers. Do not add config options like `output_root`, checkpoint `dirpath`, or sample output directories.
 - Keep reusable visualization and artifact code under `utils/display/`. Do not create one-off plotting scripts under `./script`.
+- **DDP-distributed validation**: When validation computation is expensive (e.g., iterative denoising), distribute work across all DDP ranks by striding `rank::world_size`, gather results with `dist.all_gather_object`, then merge and log only on rank 0. This keeps the per-rank memory envelope consistent with the main validation loop and avoids rank-0 bottlenecks.
 
 ## Dataset Terminology
 
@@ -50,9 +51,19 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 |------|-----------|--------|
 | **fusion** | One whole TIF volume (or downsampled) | `utils/dataset/base_volume.py` |
 | **crop** | One fixed-size training sample extracted on a regular grid with overlap, zero-filtering, and optional grid-snap | `utils/dataset/crop_volume.py` |
+| **hot cache** | Pre-materialized per-volume `.pt` crop files stored under `.crop_cache_<hash>/volume_XXXXXX.pt` inside the data directory. The hot dataset indexes from TIFF metadata only (no pixel I/O during init), then lazy-loads individual volume caches on first access. Subsequent runs skip TIFF loading entirely for cached volumes. | `utils/dataset/crop_volume_hot.py` |
 | **patch** | One token that `LocalDenoiser3D` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/model/local_denoiser.py` |
 
 Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.
+
+### Single-Process Dataset Protocol
+
+Datasets with worker-hostile I/O patterns (cache materialization races or multi-GB serialized payload stalls) signal to `driver.py` via boolean methods on the dataset instance:
+
+- `requires_single_process_cache_build()` — force `num_workers=0` while per-volume caches are still being created
+- `requires_single_process_loading()` — force `num_workers=0` when worker processes stall on large cache payload deserialization
+
+The driver checks these at startup and overrides the dataloader config for that run only. The steady-state YAML config is never modified.
 
 ## Data and Tensor Conventions
 
