@@ -131,10 +131,20 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         produces its share of the total ``num_samples``.
         """
         bs = batch["batch_size"]
-        batch_size = bs.item() if isinstance(bs, torch.Tensor) else int(bs)
+        batch_size = self._predict_scalar_int(bs)
         ss = batch["sample_steps"]
-        steps = ss.item() if isinstance(ss, torch.Tensor) else int(ss)
+        steps = self._predict_scalar_int(ss)
         return self.sample(batch_size=batch_size, steps=steps)
+
+    @staticmethod
+    def _predict_scalar_int(value) -> int:
+        if isinstance(value, torch.Tensor):
+            return int(value.reshape(-1)[0].item())
+        if isinstance(value, (list, tuple)):
+            if not value:
+                raise ValueError("Empty predict scalar value")
+            return BaseTrainingFramework._predict_scalar_int(value[0])
+        return int(value)
 
     @torch.no_grad()
     def _make_clean(self, noisy: Tensor, t_start: float) -> Tensor:
@@ -210,7 +220,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         """On the first validation epoch, build the noisy-crop bank for fusions 0–2.
 
         Only triggers when the batch carries ``fusion_id`` and ``pos_idx``
-        (i.e. from :class:`CropTifVolumeDataset`).
+        (i.e. from :class:`CropTifVolumeHotDataset`).
         """
         if "fusion_id" not in batch or "pos_idx" not in batch:
             return
@@ -300,14 +310,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         all_clean, all_noised = self._gather_fusion_crops(
             self.val_fusions_clean, self.val_fusions_noised
         )
-        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        if not is_rank0:
-            return
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        is_rank0 = rank == 0
 
         n_fusions = len(all_noised)
         if n_fusions == 0:
             return
         denoise_batch_size = self._validation_batch_size()
+        should_log = is_rank0 and self.logger is not None
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
             mse_sum = 0.0
@@ -319,37 +330,56 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 if not crop_dicts or not clean_crops:
                     continue
 
-                # Fuse clean reference
-                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
-
-                # Batch-denoise all noisy crops for this fusion + t-level
-                # Match validation batch size so fusion validation uses the same
-                # per-rank memory envelope as the validation loop.
-                all_denoised = []
-                for b_start in range(0, len(crop_dicts), denoise_batch_size):
-                    b_end = min(b_start + denoise_batch_size, len(crop_dicts))
-                    sub = crop_dicts[b_start:b_end]
+                # Split expensive denoising across DDP ranks. Every rank
+                # participates, then rank 0 fuses/logs the gathered result.
+                indexed_crops = list(enumerate(crop_dicts))
+                local_crops = indexed_crops[rank::world_size]
+                local_denoised = []
+                for b_start in range(0, len(local_crops), denoise_batch_size):
+                    b_end = min(b_start + denoise_batch_size, len(local_crops))
+                    sub = local_crops[b_start:b_end]
                     sub_batch = torch.stack(
-                        [c["target"] for c in sub], dim=0
+                        [c["target"] for _, c in sub], dim=0
                     ).to(self.device)
                     sub_denoised = self._make_clean(sub_batch, t_val)
-                    all_denoised.append(sub_denoised)
-                denoised_batch = torch.cat(all_denoised, dim=0)
+                    for (order, crop_dict), denoised in zip(sub, sub_denoised):
+                        local_denoised.append({
+                            "order": int(order),
+                            "target": denoised.detach().cpu(),
+                            "fusion_id": crop_dict["fusion_id"],
+                            "pos_idx": crop_dict["pos_idx"],
+                            "full_size": crop_dict["full_size"],
+                        })
 
+                if dist.is_initialized():
+                    gathered_denoised = [None] * world_size
+                    dist.all_gather_object(gathered_denoised, local_denoised)
+                    denoised_with_order = [
+                        item
+                        for rank_items in gathered_denoised
+                        for item in (rank_items or [])
+                    ]
+                else:
+                    denoised_with_order = local_denoised
+
+                if not is_rank0:
+                    continue
+
+                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
                 denoised_crops = []
-                for i, crop_dict in enumerate(crop_dicts):
+                for item in sorted(denoised_with_order, key=lambda entry: entry["order"]):
                     denoised_crops.append({
-                        "target": denoised_batch[i].detach().cpu(),
-                        "fusion_id": crop_dict["fusion_id"],
-                        "pos_idx": crop_dict["pos_idx"],
-                        "full_size": crop_dict["full_size"],
+                        "target": item["target"],
+                        "fusion_id": item["fusion_id"],
+                        "pos_idx": item["pos_idx"],
+                        "full_size": item["full_size"],
                     })
 
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
                 # mid_w slice panel
-                if self.logger is not None:
+                if should_log:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
                     mid_w = c0.shape[2] // 2
@@ -357,10 +387,17 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                         c0[:, :, mid_w], d0[:, :, mid_w], colorbar_limits=(-1.0, 1.0)
                     ))
 
-            self.log(f"val_fusion_mse_{t_key}", mse_sum / max(1, n_fusions),
-                     on_step=False, on_epoch=True, sync_dist=False)
+            if is_rank0:
+                self.log(
+                    f"val_fusion_mse_{t_key}",
+                    mse_sum / max(1, n_fusions),
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=False,
+                    rank_zero_only=True,
+                )
 
-            if panels and self.logger is not None:
+            if panels and should_log:
                 log_image_artifact(
                     self.logger, np.vstack(panels),
                     f"val_fusion_{t_key}",

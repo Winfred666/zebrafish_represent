@@ -7,6 +7,11 @@ from typing import Dict
 import torch
 from torch import Tensor
 
+# Background fill value for voxels not covered by any crop.
+# Normalized data lives in [-1, 1] with -1.0 signalling empty background
+# (matching the pad value in _pad_full_volume_if_needed / _extract_crop).
+_BACKGROUND = -1.0
+
 
 def volume_fuse(
     crops: list[Dict[str, Tensor]],
@@ -14,12 +19,12 @@ def volume_fuse(
 ) -> Tensor:
     """Fuse all crops belonging to *fusion_id* back into the full volume.
 
-    Overlapping voxels are averaged.  Missing voxels (not covered by any
-    crop) remain zero.
+    Overlapping voxels are averaged.  Voxels not covered by any crop are
+    filled with the background value (-1.0 for normalized [-1, 1] data).
 
     Args:
         crops: List of crop dicts as returned by
-               :class:`CropTifVolumeDataset.__getitem__`.
+               :class:`CropTifVolumeHotDataset.__getitem__`.
         fusion_id: The fusion index to reassemble.
 
     Returns:
@@ -59,7 +64,8 @@ def volume_fuse(
         accumulator[slices] += target_valid
         weight[slices] += 1.0
 
-    # Average overlapping regions; leave uncovered voxels as zero
+    # Average overlapping regions; fill uncovered voxels with background.
     mask = weight > 0
     accumulator[mask] /= weight[mask]
+    accumulator[~mask] = _BACKGROUND
     return accumulator
