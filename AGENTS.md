@@ -51,7 +51,7 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 |------|-----------|--------|
 | **fusion** | One whole TIF volume (or downsampled) | `utils/dataset/base_volume.py` |
 | **crop** | One fixed-size training sample extracted on a regular grid with overlap, zero-filtering, and optional grid-snap | `utils/dataset/crop_volume.py` |
-| **hot cache** | Pre-materialized per-volume `.pt` crop files stored under `.crop_cache_<hash>/volume_XXXXXX.pt` inside the data directory. The hot dataset indexes from TIFF metadata only (no pixel I/O during init), then lazy-loads individual volume caches on first access. Subsequent runs skip TIFF loading entirely for cached volumes. | `utils/dataset/crop_volume_hot.py` |
+| **hot cache** | Pre-materialized per-volume `.pt` crop files stored under `.crop_cache_<hash>/volume_XXXXXX.pt` inside the data directory. The dataset indexes from TIFF metadata only (no pixel I/O during init), then eagerly loads all caches into RAM via a thread pool. `__getitem__` is a pure in-memory dict lookup. | `utils/dataset/crop_volume.py` |
 | **patch** | One token that `LocalDenoiser3D` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/model/local_denoiser.py` |
 
 Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.

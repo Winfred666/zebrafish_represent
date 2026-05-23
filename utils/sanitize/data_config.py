@@ -9,8 +9,8 @@ from torch.utils.data import Dataset
 from utils.sanitize.param_class import IngestibleParams
 
 
-class CropTifVolumeDatasetParams(IngestibleParams):
-    """Params for CropTifVolumeDataset — grid-crop dataset with zero-filtering."""
+class CropTifVolumeHotDatasetParams(IngestibleParams):
+    """Params for CropTifVolumeHotDataset — fully pre-cached crop dataset."""
 
     data_dir: str
     crop_size: tuple[int, int, int] | None = None
@@ -18,12 +18,11 @@ class CropTifVolumeDatasetParams(IngestibleParams):
     scale_factor: tuple[float, float, float] = (0.5, 0.5, 0.5)
     normalize: bool = True
     clip_percentile: tuple[float, float] = (1.0, 99.0)
-    # Fraction of overlap between adjacent grid crops in each spatial dim.
-    # 0.0 = adjacent (no overlap), 0.5 = 50% overlap. Only used when crop_size is set.
     overlap: tuple[float, float, float] = (0.0, 0.0, 0.0)
     in_channels: int = Field(default=1, ge=1)
     pad_to_multiple: tuple[int, int, int] | None = None
     patch_grid_multiple: tuple[int, int, int] | None = None
+    cache_root: str | None = None
 
     @field_validator("data_dir")
     @classmethod
@@ -64,12 +63,6 @@ class CropTifVolumeDatasetParams(IngestibleParams):
         if not (0.0 <= o_d < 1.0 and 0.0 <= o_h < 1.0 and 0.0 <= o_w < 1.0):
             raise ValueError("overlap values must satisfy 0.0 <= v < 1.0")
         return (o_d, o_h, o_w)
-
-
-class CropTifVolumeHotDatasetParams(CropTifVolumeDatasetParams):
-    """Params for CropTifVolumeHotDataset — metadata-indexed crop cache dataset."""
-
-    cache_root: str | None = None
 
     @field_validator("cache_root")
     @classmethod

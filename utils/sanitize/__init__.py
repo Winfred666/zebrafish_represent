@@ -2,7 +2,6 @@
 
 from utils.sanitize.data_config import (
     DataLoaderParams,
-    CropTifVolumeDatasetParams,
     CropTifVolumeHotDatasetParams,
 )
 from utils.sanitize.framework_config import (
@@ -33,7 +32,6 @@ from utils.sanitize.wrapper_config import (
 
 __all__ = [
     "IngestibleParams",
-    "CropTifVolumeDatasetParams",
     "CropTifVolumeHotDatasetParams",
     "DataLoaderParams",
     "DiT3DParams",
