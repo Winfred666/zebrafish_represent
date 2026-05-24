@@ -191,7 +191,7 @@ class TestPatchMask3D:
         mask = PatchMask3D(mask_ratio=1.0)
         x = _random_128_cubes(2)
         xm, m = mask(x)
-        assert (xm == 0).all()
+        assert (xm == -1.0).all()  # mask value is background (-1), not 0
         assert (m == 1).all()
 
 

@@ -67,9 +67,12 @@ class PatchMask3D(nn.Module):
             mask_grid, size=(self.volume_size,) * 3,
             mode="trilinear", align_corners=False,
         )
-        mask_binary = (mask_volume > 0.5).float()
-        x_masked = x * (1.0 - mask_binary)
-        return x_masked, mask
+        mask_binary = (mask_volume > 0.5)
+        # Mask with -1.0 (background in [-1,1] normalised data), not 0.
+        # 0 would be mid-gray — an unnatural value that makes the
+        # reconstruction task artificially easy (model just looks for ≠ -1).
+        x_masked = x.masked_fill(mask_binary, -1.0)
+        return x_masked, mask.float()
 
 
 # ---------------------------------------------------------------------------
