@@ -146,14 +146,14 @@ class TestExtractPatchFeatures:
     """Tests for volume → patches → features pipeline."""
 
     def test_output_shape(self) -> None:
-        vols = _random_volume(n=2, d=200, h=200, w=200)
+        vols = _random_volume(n=2, d=140, h=140, w=140)
         feats = _extract_patch_features(vols)
         assert feats.shape[1] == 512
-        assert feats.shape[0] > 2  # more patches than volumes
+        assert feats.shape[0] > 0
         assert feats.dtype == torch.float64
 
     def test_single_volume(self) -> None:
-        vol = _random_volume(n=1, d=200, h=200, w=200)
+        vol = _random_volume(n=1, d=140, h=140, w=140)
         feats = _extract_patch_features(vol)
         assert feats.shape[1] == 512
         assert feats.shape[0] >= 1
@@ -362,11 +362,31 @@ class TestCovariance:
 # ---------------------------------------------------------------------------
 
 class TestComputeSampleQualityMetrics:
-    """Integration tests for the public API."""
+    """Integration tests for the public API.
+
+    Uses a class-scoped fixture so the 450 MB MedicalNet checkpoint is
+    loaded once and shared across all test methods.  Volumes are sized
+    down to ~140³ to minimise ResNet-10 forward passes while still
+    producing valid 128³ patches.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _setup_extractor(self) -> None:
+        """Pre-warm the singleton so all tests reuse the same model."""
+        import utils.eval.sample_quality as sq
+        sq._FEATURE_EXTRACTOR = None
+        # Trigger lazy init with a dummy call — the extractor stays alive
+        # for the entire test class.
+        dummy = _random_volume(n=1, d=140, h=140, w=140)
+        compute_sample_quality_metrics(dummy, dummy)
+
+    @staticmethod
+    def _small_vol(n: int = 2) -> torch.Tensor:
+        return _random_volume(n=n, d=140, h=140, w=140)
 
     def test_returns_expected_keys(self) -> None:
-        gen = _random_volume(n=4, d=200, h=200, w=200)
-        ref = _random_volume(n=4, d=200, h=200, w=200)
+        gen = self._small_vol(4)
+        ref = self._small_vol(4)
         metrics = compute_sample_quality_metrics(gen, ref)
         assert set(metrics.keys()) == {
             "generated_count", "reference_count",
@@ -375,20 +395,19 @@ class TestComputeSampleQualityMetrics:
         }
 
     def test_feature_dim_is_512(self) -> None:
-        gen = _random_volume(n=4, d=200, h=200, w=200)
-        ref = _random_volume(n=4, d=200, h=200, w=200)
+        gen = self._small_vol(3)
+        ref = self._small_vol(3)
         metrics = compute_sample_quality_metrics(gen, ref)
         assert metrics["feature_dim"] == 512
 
     def test_counts_match(self) -> None:
-        gen = _random_volume(n=3, d=200, h=200, w=200)
-        ref = _random_volume(n=5, d=200, h=200, w=200)
+        gen = self._small_vol(3)
+        ref = self._small_vol(5)
         metrics = compute_sample_quality_metrics(gen, ref)
         assert metrics["generated_count"] == 3
         assert metrics["reference_count"] == 5
 
     def test_patches_greater_than_volumes(self) -> None:
-        """Large volumes produce more patches than volumes."""
         gen = _random_volume(n=2, d=256, h=256, w=256)
         ref = _random_volume(n=2, d=256, h=256, w=256)
         metrics = compute_sample_quality_metrics(gen, ref)
@@ -396,8 +415,8 @@ class TestComputeSampleQualityMetrics:
         assert metrics["reference_patches"] > metrics["reference_count"]
 
     def test_all_zero_volumes(self) -> None:
-        gen = torch.zeros(2, 1, 200, 200, 200, dtype=torch.float32)
-        ref = torch.zeros(2, 1, 200, 200, 200, dtype=torch.float32)
+        gen = torch.zeros(2, 1, 140, 140, 140, dtype=torch.float32)
+        ref = torch.zeros(2, 1, 140, 140, 140, dtype=torch.float32)
         metrics = compute_sample_quality_metrics(gen, ref)
         assert not math.isnan(metrics["fid"])
         assert not math.isnan(metrics["mmd"])
@@ -413,8 +432,8 @@ class TestComputeSampleQualityMetrics:
         import utils.eval.sample_quality as sq
         sq._FEATURE_EXTRACTOR = None
         try:
-            gen = _random_volume(n=2, d=200, h=200, w=200)
-            ref = _random_volume(n=2, d=200, h=200, w=200)
+            gen = self._small_vol(2)
+            ref = self._small_vol(2)
             m1 = compute_sample_quality_metrics(gen, ref)
             extr1 = sq._FEATURE_EXTRACTOR
             m2 = compute_sample_quality_metrics(gen, ref)
