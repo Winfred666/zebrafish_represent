@@ -14,6 +14,28 @@ This repository trains a 3D generative representation model for zebrafish micros
 
 The previous UNet and `model/lightning/*` training paths are stale and must not be reintroduced on `main`.
 
+## Launch Protocol
+
+**Always use `torchrun` to launch any `driver.py` training**, regardless of GPU count.
+Do NOT rely on Lightning's internal `multiprocessing.spawn` — it is slow on shared
+filesystems (each forked child reloads libraries from NFS) and unreliable under `nohup`.
+`torchrun` uses independent subprocesses that load in parallel and is the PyTorch
+official recommendation.
+
+Single-GPU:
+```bash
+torchrun --nproc_per_node=1 driver.py --data-config ... --model-config ... --framework-config ... --wrapper-config ...
+```
+
+Multi-GPU (e.g. 4 GPUs on gpu07):
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 driver.py --data-config ... --model-config ... --framework-config ... --wrapper-config ...
+```
+
+Lightning detects `LOCAL_RANK` set by torchrun and uses the configured DDP strategy
+automatically — no code changes needed in `driver.py`. Always set
+`CUDA_VISIBLE_DEVICES` explicitly to avoid cross-job GPU contention.
+
 ## Python Binary to use
 
 - **gpu07**: `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python`
@@ -58,9 +80,9 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 | Term | Definition | Source |
 |------|-----------|--------|
 | **fusion** | One whole TIF volume (or downsampled) | `utils/dataset/base_volume.py` |
-| **crop** | One fixed-size training sample extracted on a regular grid with overlap, zero-filtering, and optional grid-snap | `utils/dataset/crop_volume.py` |
-| **hot cache** | Pre-materialized per-volume `.pt` crop files stored under `.crop_cache_<hash>/volume_XXXXXX.pt` inside the data directory. The dataset indexes from TIFF metadata only (no pixel I/O during init), then eagerly loads all caches into RAM via a thread pool. `__getitem__` is a pure in-memory dict lookup. | `utils/dataset/crop_volume.py` |
-| **patch** | One token that `LocalDenoiser3D` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/model/local_denoiser.py` |
+| **crop** | One fixed-size training sample served from a pre-materialized hot cache — no runtime grid computation or TIFF I/O | `utils/dataset/crop_volume.py` |
+| **hot cache** | Per-volume `.pt` files under `.crop_cache_<hash>/volume_XXXXXX.pt`, built offline by `utils/script/build_hot_cache.py`. The dataset eagerly loads all caches into RAM via a thread pool at init and builds a flat `(vol_idx, local_idx)` index from the payloads. `__getitem__` is a pure in-memory lookup — no disk I/O, no TIFF reading, no metadata scanning. | `utils/dataset/crop_volume.py` |
+| **patch** | One token that `PRDiT` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/block/encoder.py` |
 
 Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.
 
