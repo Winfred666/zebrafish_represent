@@ -1,4 +1,12 @@
-"""Self-contained post-fit sample quality metrics for 3D volumes."""
+"""Self-contained post-fit sample quality metrics for 3D volumes.
+
+FID and MMD use a 3D MedicalNet ResNet-10 feature extractor (512-D) applied to
+128³ patches extracted from each volume with 50% overlap.  This is the standard
+evaluation protocol for 3D generative models (matching PRDiT).
+
+MS-SSIM and Wasserstein distance operate directly on jointly-normalised volume
+pairs.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +15,34 @@ from typing import Sequence
 import torch
 import torch.nn.functional as F
 
+from utils.eval.feature_extractor import MedicalNetFeatureExtractor
+
+# Lazy singleton — the model is ~56 MB and takes ~1 s to load onto GPU.
+_FEATURE_EXTRACTOR: MedicalNetFeatureExtractor | None = None
+
+PATCH_SIZE = 128
+PATCH_STRIDE = 64  # 50 % overlap
+
+
+def _get_feature_extractor(device: str = "cuda") -> MedicalNetFeatureExtractor:
+    global _FEATURE_EXTRACTOR
+    if _FEATURE_EXTRACTOR is None:
+        # pretrained=False: MedicalNet weights are trained on CT/MRI/PET and
+        # produce feature collapse on zebrafish microscopy.  Random Kaiming
+        # init is slightly more discriminative.  Replace with pretrained=True
+        # after fine-tuning on zebrafish crops.
+        _FEATURE_EXTRACTOR = MedicalNetFeatureExtractor(device=device, pretrained=False)
+    return _FEATURE_EXTRACTOR
+
+
+# ---------------------------------------------------------------------------
+# Volume-space helpers (MS-SSIM, Wasserstein)
+# ---------------------------------------------------------------------------
 
 def _as_volume_batch(values: torch.Tensor | Sequence[float]) -> torch.Tensor:
     tensor = torch.as_tensor(values, dtype=torch.float32)
+    if tensor.numel() == 0:
+        raise ValueError("Volume batch must not be empty")
     if tensor.ndim == 4:
         tensor = tensor.unsqueeze(0)
     if tensor.ndim != 5:
@@ -27,17 +60,114 @@ def _normalize_pair(
     return (generated - low) / scale, (reference - low) / scale
 
 
-def _feature_pool_size(generated: torch.Tensor, reference: torch.Tensor, max_edge: int = 4) -> tuple[int, int, int]:
-    return tuple(
-        max(1, min(max_edge, int(generated.shape[axis]), int(reference.shape[axis])))
-        for axis in range(2, 5)
+def _resize_to_common_spatial(
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resize two 5-D tensors to a common spatial shape (min per dim)."""
+    if a.shape[2:] == b.shape[2:]:
+        return a, b
+    common = tuple(min(a.shape[axis], b.shape[axis]) for axis in range(2, 5))
+    return (
+        F.interpolate(a, size=common, mode="trilinear", align_corners=False),
+        F.interpolate(b, size=common, mode="trilinear", align_corners=False),
     )
 
 
-def _extract_features(volumes: torch.Tensor, pool_size: tuple[int, int, int]) -> torch.Tensor:
-    pooled = F.adaptive_avg_pool3d(volumes, pool_size)
-    return pooled.reshape(pooled.shape[0], -1).to(dtype=torch.float64)
+# ---------------------------------------------------------------------------
+# 128³ patch extraction
+# ---------------------------------------------------------------------------
 
+def _extract_128_patches(
+    volume: torch.Tensor,
+    stride: int = PATCH_STRIDE,
+) -> torch.Tensor:
+    """Slide a 128³ window over a single 5-D volume, returning all valid patches.
+
+    Dimensions smaller than 128 are padded with the volumeʼs minimum value
+    (background) so at least one patch is produced.
+
+    Parameters
+    ----------
+    volume : torch.Tensor
+        ``(1, C, D, H, W)`` float tensor.
+    stride : int
+        Step size between adjacent patch centres (default 64 = 50 % overlap).
+
+    Returns
+    -------
+    torch.Tensor
+        ``(N_patches, C, 128, 128, 128)``.
+    """
+    assert volume.ndim == 5 and volume.shape[0] == 1
+    _, C, D, H, W = volume.shape
+
+    # Pad dims smaller than 128
+    pad_d = max(0, PATCH_SIZE - D)
+    pad_h = max(0, PATCH_SIZE - H)
+    pad_w = max(0, PATCH_SIZE - W)
+    if pad_d > 0 or pad_h > 0 or pad_w > 0:
+        fill_val = volume.min()
+        volume = F.pad(volume, (0, pad_w, 0, pad_h, 0, pad_d), mode="constant", value=float(fill_val))
+        _, _, D, H, W = volume.shape
+
+    # Slide window
+    patches: list[torch.Tensor] = []
+    d_starts = list(range(0, D - PATCH_SIZE + 1, stride))
+    h_starts = list(range(0, H - PATCH_SIZE + 1, stride))
+    w_starts = list(range(0, W - PATCH_SIZE + 1, stride))
+    # Always include the last possible start to cover the trailing edge
+    if D > PATCH_SIZE and (D - PATCH_SIZE) not in d_starts:
+        d_starts.append(D - PATCH_SIZE)
+    if H > PATCH_SIZE and (H - PATCH_SIZE) not in h_starts:
+        h_starts.append(H - PATCH_SIZE)
+    if W > PATCH_SIZE and (W - PATCH_SIZE) not in w_starts:
+        w_starts.append(W - PATCH_SIZE)
+
+    for ds in d_starts:
+        for hs in h_starts:
+            for ws in w_starts:
+                patch = volume[:, :, ds:ds + PATCH_SIZE, hs:hs + PATCH_SIZE, ws:ws + PATCH_SIZE]
+                patches.append(patch)
+
+    return torch.cat(patches, dim=0)  # (N, C, 128, 128, 128)
+
+
+def _extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+    """Extract MedicalNet features from 128³ patches covering each volume.
+
+    Parameters
+    ----------
+    volumes : torch.Tensor
+        ``(N, C, D, H, W)`` batch.  Each volume may have a different spatial
+        shape.
+
+    Returns
+    -------
+    torch.Tensor
+        ``(total_patches, 512)`` float64 feature vectors — one per 128³ patch
+        across all volumes.
+    """
+    extractor = _get_feature_extractor(device=str(volumes.device))
+    all_features: list[torch.Tensor] = []
+
+    for i in range(volumes.shape[0]):
+        vol = volumes[i:i + 1]  # (1, C, D, H, W)
+        patches = _extract_128_patches(vol)  # (N_p, C, 128, 128, 128)
+        if patches.shape[0] == 0:
+            continue
+        feats = extractor(patches)  # (N_p, 512)
+        all_features.append(feats)
+
+    if not all_features:
+        raise ValueError("No 128³ patches could be extracted — volumes too small")
+
+    return torch.cat(all_features, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# FID
+# ---------------------------------------------------------------------------
 
 def _covariance(features: torch.Tensor) -> torch.Tensor:
     centered = features - features.mean(dim=0, keepdim=True)
@@ -71,6 +201,10 @@ def _frechet_distance(reference_features: torch.Tensor, generated_features: torc
     return float(torch.clamp(fid, min=0.0).item())
 
 
+# ---------------------------------------------------------------------------
+# MMD
+# ---------------------------------------------------------------------------
+
 def _mmd(reference_features: torch.Tensor, generated_features: torch.Tensor) -> float:
     combined = torch.cat([reference_features, generated_features], dim=0)
     if combined.shape[0] <= 1:
@@ -92,6 +226,10 @@ def _mmd(reference_features: torch.Tensor, generated_features: torch.Tensor) -> 
     return float(torch.sqrt(torch.clamp(mmd2, min=0.0)).item())
 
 
+# ---------------------------------------------------------------------------
+# Wasserstein distance (1-D)
+# ---------------------------------------------------------------------------
+
 def _quantile_from_sorted(sorted_values: torch.Tensor, probabilities: torch.Tensor) -> torch.Tensor:
     if sorted_values.numel() == 1:
         return sorted_values.expand_as(probabilities)
@@ -107,11 +245,16 @@ def _wasserstein_distance_1d(reference: torch.Tensor, generated: torch.Tensor) -
     ref_sorted = torch.sort(reference.reshape(-1).to(dtype=torch.float64)).values
     gen_sorted = torch.sort(generated.reshape(-1).to(dtype=torch.float64)).values
     resolution = min(4096, max(ref_sorted.numel(), gen_sorted.numel()))
-    probabilities = (torch.arange(resolution, dtype=torch.float64) + 0.5) / resolution
+    device = ref_sorted.device
+    probabilities = (torch.arange(resolution, dtype=torch.float64, device=device) + 0.5) / resolution
     ref_quantiles = _quantile_from_sorted(ref_sorted, probabilities)
     gen_quantiles = _quantile_from_sorted(gen_sorted, probabilities)
     return float(torch.mean(torch.abs(ref_quantiles - gen_quantiles)).item())
 
+
+# ---------------------------------------------------------------------------
+# MS-SSIM
+# ---------------------------------------------------------------------------
 
 def _ssim3d(reference: torch.Tensor, generated: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     c1 = 0.01**2
@@ -161,29 +304,53 @@ def _ms_ssim(reference: torch.Tensor, generated: torch.Tensor) -> float:
     return float(score.mean().item())
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def compute_sample_quality_metrics(
     generated: torch.Tensor | Sequence[float],
     reference: torch.Tensor | Sequence[float],
 ) -> dict[str, float | int | list[int]]:
-    """Compute self-contained 3D quality metrics between generated and reference volumes."""
+    """Compute 3D quality metrics between generated and reference volumes.
+
+    FID and MMD extract 128³ patches from each volume with 50 % overlap, run
+    each patch through a MedicalNet ResNet-10, and treat all patch features as
+    samples from the distribution.  This is the standard evaluation protocol
+    for 3D generative models (matching PRDiT).
+
+    MS-SSIM and Wasserstein distance use joint-normalised volume pairs.
+    """
     generated_batch = _as_volume_batch(generated)
     reference_batch = _as_volume_batch(reference)
+
+    # ---- feature-space metrics (FID, MMD) via 128³ patches ----
+    generated_features = _extract_patch_features(generated_batch)
+    reference_features = _extract_patch_features(reference_batch)
+    feature_dim = int(generated_features.shape[1])
+    gen_patch_count = int(generated_features.shape[0])
+    ref_patch_count = int(reference_features.shape[0])
+
+    # ---- volume-space metrics (MS-SSIM, Wasserstein) ----
     generated_norm, reference_norm = _normalize_pair(generated_batch, reference_batch)
-
-    pool_size = _feature_pool_size(generated_norm, reference_norm)
-    generated_features = _extract_features(generated_norm, pool_size)
-    reference_features = _extract_features(reference_norm, pool_size)
-
+    generated_norm, reference_norm = _resize_to_common_spatial(generated_norm, reference_norm)
     pair_count = min(generated_norm.shape[0], reference_norm.shape[0])
+
     if pair_count <= 0:
         raise ValueError("At least one generated and one reference volume are required for sample metrics.")
 
     return {
         "generated_count": int(generated_norm.shape[0]),
         "reference_count": int(reference_norm.shape[0]),
-        "feature_pool_size": [int(value) for value in pool_size],
+        "generated_patches": gen_patch_count,
+        "reference_patches": ref_patch_count,
+        "feature_dim": feature_dim,
         "fid": _frechet_distance(reference_features, generated_features),
         "mmd": _mmd(reference_features, generated_features),
         "ms_ssim": _ms_ssim(reference_norm[:pair_count], generated_norm[:pair_count]),
-        "wasserstein_distance": _wasserstein_distance_1d(reference_norm, generated_norm),
+        # wasserstein_distance: sorts all voxel values across every reference
+        # volume (3.9B float32 → 31 GB float64 for 1854 crops), OOMs on 24 GB
+        # GPU and takes ~20 min/call on CPU — disabled until a batched/subsampled
+        # variant is available.
+        # "wasserstein_distance": _wasserstein_distance_1d(reference_norm, generated_norm),
     }

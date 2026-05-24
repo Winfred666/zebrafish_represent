@@ -183,7 +183,8 @@ def _log_postfit_sample_metrics(
                 "sample_fid": float(quality_metrics["fid"]),
                 "sample_mmd": float(quality_metrics["mmd"]),
                 "sample_ms_ssim": float(quality_metrics["ms_ssim"]),
-                "sample_wasserstein_distance": float(quality_metrics["wasserstein_distance"]),
+                # wasserstein_distance disabled — sorts all voxels O(3.9B), OOMs GPU
+                # "sample_wasserstein_distance": float(quality_metrics["wasserstein_distance"]),
             }
         )
         summary_artifact["reference_splits"] = {
@@ -269,25 +270,20 @@ def train(
         print(f"[TEST] sample generation took {gen_elapsed:.1f}s "
               f"({num_samples} samples, {sample_steps} steps)")
 
-        # Incrementally accumulate val crops file-by-file so FID/MMD/MS-SSIM
-        # evolve with growing reference coverage.
+        framework_module.log_sample_slices(samples, tag="test_sample")
+
+        # Compute FID / MMD / MS-SSIM against the full validation set once.
         val_dataset = runtime.objects.get("val_dataset")
         if val_dataset is not None:
-            total_crops = len(val_dataset)
-            file_count = val_dataset.file_count
-            crops_per_step = max(1, total_crops // file_count)
             reference_crops: list[torch.Tensor] = []
-            for step in range(file_count):
-                start = step * crops_per_step
-                end = total_crops if step == file_count - 1 else start + crops_per_step
-                for idx in range(start, end):
-                    reference_crops.append(val_dataset[idx]["target"])
-                _log_postfit_sample_metrics(
-                    runtime=runtime,
-                    sample_tensor=samples,
-                    reference_targets={"val": torch.stack(reference_crops, dim=0)},
-                    step=step,
-                )
+            for idx in range(len(val_dataset)):
+                reference_crops.append(val_dataset[idx]["target"])
+            _log_postfit_sample_metrics(
+                runtime=runtime,
+                sample_tensor=samples,
+                reference_targets={"val": torch.stack(reference_crops, dim=0)},
+                step=0,
+            )
             t2 = time.time()
             total_elapsed = t2 - t0
             ref_elapsed = t2 - t1
@@ -300,8 +296,6 @@ def train(
             runtime.logger.log_metrics(
                 {"test_sample_gen_time": float(gen_elapsed)}, step=0,
             )
-
-        framework_module.log_sample_slices(samples, tag="test_sample")
 
     if runtime.artifact_manager is not None:
         runtime.artifact_manager.cleanup_temp_folder()
