@@ -48,8 +48,11 @@ def variance_loss(z: Tensor, eps: float = 1e-4) -> Tensor:
     """Hinge loss on standard deviation — prevent collapse.
 
     Penalises per-dimension standard deviations below 1.0.
+    Uses Bessel correction only when batch_size ≥ 2 to avoid NaN.
     """
-    std = torch.sqrt(z.var(dim=0) + eps)
+    n = z.shape[0]
+    correction = 1 if n >= 2 else 0
+    std = torch.sqrt(z.var(dim=0, correction=correction) + eps)
     return torch.mean(F.relu(1.0 - std))
 
 
@@ -121,8 +124,9 @@ class VICRegModule(L.LightningModule):
 
     Parameters
     ----------
-    encoder : MedicalNetEncoder
-        Pretrained or randomly-initialised 3D ResNet-10 encoder.
+    model : MedicalNetEncoder
+        Pretrained or randomly-initialised 3D ResNet-10 encoder
+        (resolved from ``runtime.model`` by the runtime factory).
     sim_weight : float
         Weight of the invariance (MSE) term (default 25.0).
     var_weight : float
@@ -133,29 +137,25 @@ class VICRegModule(L.LightningModule):
         Learning rate for AdamW (default 1e-4).
     weight_decay : float
         Weight decay (default 1e-6).
-    max_epochs : int
-        Total epochs for cosine annealing (default 300).
     """
 
     def __init__(
         self,
-        encoder: MedicalNetEncoder,
+        model: MedicalNetEncoder,
         sim_weight: float = 25.0,
         var_weight: float = 25.0,
         cov_weight: float = 1.0,
         lr: float = 1e-4,
         weight_decay: float = 1e-6,
-        max_epochs: int = 300,
     ):
         super().__init__()
-        self.encoder = encoder
+        self.encoder = model
         self.projector = Projector()
         self.sim_weight = sim_weight
         self.var_weight = var_weight
         self.cov_weight = cov_weight
         self.lr = lr
         self.weight_decay = weight_decay
-        self.max_epochs = max_epochs
 
     # ---- helpers -----------------------------------------------------
 
@@ -247,6 +247,6 @@ class VICRegModule(L.LightningModule):
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=self.max_epochs,
+            T_max=self.trainer.max_epochs,
         )
         return [optimizer], [scheduler]

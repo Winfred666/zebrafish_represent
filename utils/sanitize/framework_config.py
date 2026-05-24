@@ -91,4 +91,3 @@ class VICRegModuleParams(IngestibleParams):
     cov_weight: float = 1.0
     lr: float = 1e-4
     weight_decay: float = 1e-6
-    max_epochs: int = 300
