@@ -4,10 +4,8 @@ trainer:
   params:
     max_epochs: 10
     accelerator: gpu
-    devices: 4
-    strategy: ddp_find_unused_parameters_false
+    devices: 1
     check_val_every_n_epoch: 5
-    num_sanity_val_steps: 10
     limit_val_batches: 0.5
 
 logging:

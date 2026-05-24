@@ -16,7 +16,7 @@ trainer:
   params:
     max_epochs: 1
     accelerator: auto
-    devices: 4 # WARNING: 4 gpus by default
+    devices: 1 # DDP NOT ALLOWED on gpu07 (Blackwell SIGKILL). Use ddp_ variant if multi-GPU needed.
     precision: "bf16"
     check_val_every_n_epoch: 1
     enable_checkpointing: true
