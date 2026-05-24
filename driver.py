@@ -112,6 +112,29 @@ def _flatten_dict(d: dict, prefix: str = "") -> dict[str, str]:
     return result
 
 
+def _upload_checkpoints(runtime) -> None:
+    """Upload ModelCheckpoint .ckpt files to MLflow artifacts."""
+    import mlflow
+
+    ckpt_callback = getattr(runtime.trainer, "checkpoint_callback", None)
+    if ckpt_callback is None:
+        return
+    checkpoint_dir = Path(ckpt_callback.dirpath) if ckpt_callback.dirpath else None
+    if checkpoint_dir is None or not checkpoint_dir.exists():
+        return
+    ckpt_files = sorted(checkpoint_dir.glob("*.ckpt"))
+    if not ckpt_files:
+        return
+    run_id = getattr(runtime.logger, "run_id", None)
+    if not run_id:
+        return
+    tracking_uri = getattr(runtime.logger, "_tracking_uri", None) or None
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    for ckpt_path in ckpt_files:
+        client.log_artifact(run_id, str(ckpt_path), artifact_path="checkpoints")
+    print(f"[MLFLOW] Uploaded {len(ckpt_files)} checkpoint(s) to artifacts/checkpoints")
+
+
 def _log_config_params(logger, config: dict) -> None:
     """Flatten the merged runtime config into MLflow run parameters."""
     import mlflow
@@ -214,6 +237,10 @@ def train(
     )
 
     print("\nTraining complete")
+
+    # Upload ModelCheckpoint .ckpt files to MLflow artifacts.
+    if runtime.logger is not None and runtime.artifact_manager is not None:
+        _upload_checkpoints(runtime)
 
     testing_section = config.get("testing", {})
     if testing_section.get("run_sampling_after_fit", True):
