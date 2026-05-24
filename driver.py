@@ -97,6 +97,37 @@ def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
     return changed
 
 
+def _flatten_dict(d: dict, prefix: str = "") -> dict[str, str]:
+    """Recursively flatten nested dicts with dot-separated keys."""
+    result: dict[str, str] = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            result.update(_flatten_dict(v, prefix=key))
+        else:
+            val = str(v)
+            if len(val) > 500:
+                val = val[:497] + "..."
+            result[key] = val
+    return result
+
+
+def _log_config_params(logger, config: dict) -> None:
+    """Flatten the merged runtime config into MLflow run parameters."""
+    import mlflow
+
+    params: dict[str, str] = {}
+    for section_key, section_val in config.items():
+        if isinstance(section_val, dict):
+            params.update(_flatten_dict(section_val, prefix=section_key))
+        else:
+            val = str(section_val)
+            if len(val) > 500:
+                val = val[:497] + "..."
+            params[section_key] = val
+    mlflow.log_params(params)
+
+
 def _log_postfit_sample_metrics(
     *,
     runtime,
@@ -165,33 +196,11 @@ def train(
     print(f"  model_config: {runtime.paths.model}")
     print(f"  framework_config: {runtime.paths.framework}")
     print(f"  wrapper_config: {runtime.paths.wrapper}")
-    print(f"  framework: {config.get('framework', {}).get('class_name', 'unknown')}")
-    print(f"  backbone: {config.get('model', {}).get('class_name', 'unknown')}")
-    print(f"  dataset: {config.get('train_dataset', {}).get('class_name', 'unknown')}")
-    print(f"  accelerator: {config.get('trainer', {}).get('params', {}).get('accelerator', 'unknown')}")
-
-    train_ds = runtime.train_loader.dataset if runtime.train_loader is not None else None
-    empty_pct = getattr(train_ds, "empty_filtered_pct", None)
-    if empty_pct is not None:
-        print(
-            f"  empty-crops filtered: {train_ds.empty_filtered_count} "
-            f"({empty_pct:.2f}%)"
-        )
 
     if runtime.logger is not None:
-        print(f"[MLFLOW] artifact_root={runtime.artifact_manager.root_dir}")
-        print(f"[MLFLOW] checkpoint_dir={runtime.artifact_manager.checkpoint_dir}")
-
-    print("\nTraining configuration:")
-    print(f"  Framework: {config.get('framework', {}).get('class_name', 'unknown')}")
-    print(f"  Max epochs: {runtime.trainer.max_epochs}")
-    print(f"  Learning rate: {config.get('framework', {}).get('params', {}).get('learning_rate', 'unknown')}")
-    print(f"  Batch size: {config.get('train_dataloader', {}).get('batch_size', 'unknown')}")
-    print(f"  Accelerator: {runtime.trainer.accelerator}")
-    print(f"  Devices: {runtime.trainer.num_devices}")
+        _log_config_params(runtime.logger, config)
 
     framework_module = runtime.objects["framework"]
-    print(f"  Model parameters: {framework_module.model.get_num_params():,}")
 
     resume_ckpt = config.get("resume_ckpt_path")
     if resume_ckpt:
