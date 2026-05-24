@@ -1,0 +1,10 @@
+import_config: lg_025.yaml
+
+train_dataloader:
+  params:
+    batch_size: 32
+    shuffle: false
+
+val_dataloader:
+  params:
+    batch_size: 32

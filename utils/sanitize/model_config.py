@@ -9,6 +9,13 @@ from pydantic import Field, model_validator
 from utils.sanitize.param_class import IngestibleParams
 
 
+class MedicalNetEncoderParams(IngestibleParams):
+    """Params for MedicalNetEncoder (3D ResNet-10 feature extractor)."""
+
+    in_channels: int = 1
+    pretrained: bool = False
+
+
 class DiT3DParams(IngestibleParams):
     """Params for the DiT3D backbone."""
 

@@ -15,23 +15,56 @@ from typing import Sequence
 import torch
 import torch.nn.functional as F
 
-from utils.eval.feature_extractor import MedicalNetFeatureExtractor
+from modules.model.medical_net import MedicalNetEncoder, MEDICALNET_FEATURE_DIM
 
-# Lazy singleton — the model is ~56 MB and takes ~1 s to load onto GPU.
-_FEATURE_EXTRACTOR: MedicalNetFeatureExtractor | None = None
+# Lazy singleton — model is ~14M params, loads in ~1 s.
+_FEATURE_EXTRACTOR = None
 
 PATCH_SIZE = 128
 PATCH_STRIDE = 64  # 50 % overlap
 
 
-def _get_feature_extractor(device: str = "cuda") -> MedicalNetFeatureExtractor:
+class _FeatureExtractor:
+    """Thin wrapper: MedicalNetEncoder → z-norm → pool → 512-D vectors."""
+
+    def __init__(self, device: str = "cuda", checkpoint_path: str | None = None):
+        class _Cfg:
+            in_channels = 1
+            pretrained = (checkpoint_path is None)
+        self.encoder = MedicalNetEncoder(_Cfg())
+        if checkpoint_path is not None:
+            self.encoder.load_ckpt(checkpoint_path)
+        self.encoder.eval()
+        self.encoder.to(device)
+        self._device = device
+        self.feature_dim = MEDICALNET_FEATURE_DIM
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+
+    @torch.no_grad()
+    def __call__(self, volumes: torch.Tensor) -> torch.Tensor:
+        x = volumes.to(dtype=torch.float32, device=self._device)
+        if x.ndim == 4:
+            x = x.unsqueeze(1)
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+        # Per-sample z-normalisation (MedicalNet convention)
+        mean = x.reshape(x.shape[0], -1).mean(dim=1).view(-1, 1, 1, 1, 1)
+        std = x.reshape(x.shape[0], -1).std(dim=1).view(-1, 1, 1, 1, 1).clamp(min=1e-6)
+        x = (x - mean) / std
+        feats = self.encoder(x)
+        pooled = F.adaptive_avg_pool3d(feats, (1, 1, 1))
+        return pooled.reshape(pooled.shape[0], -1).to(dtype=torch.float64)
+
+
+def _get_feature_extractor(device: str = "cuda",
+                           checkpoint_path: str | None = None) -> _FeatureExtractor:
     global _FEATURE_EXTRACTOR
     if _FEATURE_EXTRACTOR is None:
-        # pretrained=False: MedicalNet weights are trained on CT/MRI/PET and
-        # produce feature collapse on zebrafish microscopy.  Random Kaiming
-        # init is slightly more discriminative.  Replace with pretrained=True
-        # after fine-tuning on zebrafish crops.
-        _FEATURE_EXTRACTOR = MedicalNetFeatureExtractor(device=device, pretrained=False)
+        # pretrained=False (default): MedicalNet CT/MRI/PET weights produce
+        # feature collapse on zebrafish microscopy.  Pass a fine-tuned
+        # checkpoint_path after running medical_net_finetune.py.
+        _FEATURE_EXTRACTOR = _FeatureExtractor(device=device, checkpoint_path=checkpoint_path)
     return _FEATURE_EXTRACTOR
 
 

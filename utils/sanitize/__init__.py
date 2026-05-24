@@ -9,11 +9,14 @@ from utils.sanitize.framework_config import (
     DDPMModuleParams,
     IaNFlowModuleParams,
     IaNDiffusionParams,
+    MAEFinetuneModuleParams,
+    MAEParams,
     OptimizationParams,
     RectifiedFlowModuleParams,
 )
 from utils.sanitize.model_config import (
     DiT3DParams,
+    MedicalNetEncoderParams,
     PRDiTParams,
 )
 from utils.sanitize.param_class import IngestibleParams
@@ -35,11 +38,14 @@ __all__ = [
     "CropTifVolumeHotDatasetParams",
     "DataLoaderParams",
     "DiT3DParams",
+    "MedicalNetEncoderParams",
     "PRDiTParams",
     "OptimizationParams",
     "DDPMDiffusionParams",
     "IaNFlowModuleParams",
     "IaNDiffusionParams",
+    "MAEFinetuneModuleParams",
+    "MAEParams",
     "RectifiedFlowModuleParams",
     "DDPMModuleParams",
     "MLFlowLoggerParams",

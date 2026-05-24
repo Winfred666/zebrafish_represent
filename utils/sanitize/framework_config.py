@@ -66,3 +66,17 @@ class IaNFlowModuleParams(BaseFrameworkParams):
 
     diffusion: IaNDiffusionParams = IaNDiffusionParams()
     stage: int = Field(default=1, ge=1, le=2)
+
+
+class MAEParams(IngestibleParams):
+    """MAE-specific parameters for masked-autoencoder fine-tuning."""
+
+    mask_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    foreground_weight: float = Field(default=10.0, ge=1.0)
+    foreground_percentile: float = Field(default=85.0, ge=0.0, le=100.0)
+
+
+class MAEFinetuneModuleParams(BaseFrameworkParams):
+    """Params for MAEFinetuneModule — model reference resolved at build time."""
+
+    mae: MAEParams = MAEParams()

@@ -9,11 +9,8 @@ train_dataset:
 
 train_dataloader:
   params:
-    batch_size: 8
-    num_workers: 2
-    prefetch_factor: 2
+    batch_size: 8 # 8 bs per device, 32 total for 4 devices.
     shuffle: false
-    persistent_workers: true
 
 val_dataset:
   params:
@@ -25,6 +22,3 @@ val_dataset:
 val_dataloader:
   params:
     batch_size: 4
-    num_workers: 1
-    prefetch_factor: 2
-    persistent_workers: false

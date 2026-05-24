@@ -96,8 +96,18 @@ class CropTifVolumeHotDataset(Dataset):
     # ── cache identity ────────────────────────────────────────────
 
     def _cache_key(self) -> str:
+        # Discover ALL files (ignoring max_files) and apply the same sort +
+        # deterministic shuffle as _discover_files so the cache key is stable
+        # regardless of max_files.  The key matches what build_hot_cache.py
+        # would produce with max_files=None.
+        all_files = sorted(
+            list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
+        )
+        import random
+        rng = random.Random(42)
+        rng.shuffle(all_files)
         files = []
-        for path in self._file_paths:
+        for path in all_files:
             try:
                 stat = path.stat()
                 rel_path = path.relative_to(self.data_dir).as_posix()

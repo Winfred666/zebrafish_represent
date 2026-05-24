@@ -21,11 +21,10 @@ train_dataloader:
   params:
     dataset: runtime.train_dataset
     batch_size: 256
-    num_workers: 8
-    prefetch_factor: 4
+    num_workers: 2
     shuffle: true
     pin_memory: true
-    persistent_workers: true
+    persistent_workers: false
 
 val_dataset:
   class_name: CropTifVolumeHotDataset
@@ -46,8 +45,7 @@ val_dataloader:
   params:
     dataset: runtime.val_dataset
     batch_size: 2
-    num_workers: 4
-    prefetch_factor: 2
+    num_workers: 2
     shuffle: false
     pin_memory: true
     persistent_workers: false
