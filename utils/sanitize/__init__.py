@@ -13,6 +13,7 @@ from utils.sanitize.framework_config import (
     MAEParams,
     OptimizationParams,
     RectifiedFlowModuleParams,
+    VICRegModuleParams,
 )
 from utils.sanitize.model_config import (
     DiT3DParams,
@@ -47,6 +48,7 @@ __all__ = [
     "MAEFinetuneModuleParams",
     "MAEParams",
     "RectifiedFlowModuleParams",
+    "VICRegModuleParams",
     "DDPMModuleParams",
     "MLFlowLoggerParams",
     "ModelCheckpointParams",

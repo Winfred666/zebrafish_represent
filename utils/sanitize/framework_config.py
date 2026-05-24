@@ -80,3 +80,15 @@ class MAEFinetuneModuleParams(BaseFrameworkParams):
     """Params for MAEFinetuneModule — model reference resolved at build time."""
 
     mae: MAEParams = MAEParams()
+
+
+class VICRegModuleParams(IngestibleParams):
+    """Params for VICRegModule — standalone LightningModule (not BaseFramework)."""
+
+    model: object = None
+    sim_weight: float = 25.0
+    var_weight: float = 25.0
+    cov_weight: float = 1.0
+    lr: float = 1e-4
+    weight_decay: float = 1e-6
+    max_epochs: int = 300

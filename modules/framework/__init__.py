@@ -5,6 +5,7 @@ from modules.framework.ddpm import DDPMModule
 from modules.framework.IaN_flow import IaNFlowModule
 from modules.framework.mae import MAEFinetuneModule
 from modules.framework.rect_flow import RectifiedFlowModule
+from modules.framework.vic_reg import VICRegModule
 
 __all__ = [
     "BaseTrainingFramework",
@@ -12,4 +13,5 @@ __all__ = [
     "IaNFlowModule",
     "MAEFinetuneModule",
     "RectifiedFlowModule",
+    "VICRegModule",
 ]
