@@ -210,10 +210,7 @@ class VICRegModule(L.LightningModule):
             paired_norm = F.normalize(paired, dim=2)
             cosine = (paired_norm[0] * paired_norm[1]).sum(dim=1).mean()
 
-        try:
-            bs = self.trainer.batch_size
-        except RuntimeError:
-            bs = x.shape[0]
+        bs = x.shape[0]
         self.log(f"{phase}_loss", total, on_step=(phase == "train"),
                  on_epoch=True, prog_bar=True, batch_size=bs)
         self.log(f"{phase}_inv_loss", inv, on_step=False, on_epoch=True,
