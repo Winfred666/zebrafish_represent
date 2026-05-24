@@ -67,11 +67,6 @@ class CropTifVolumeHotDataset(Dataset):
             else self._vol_shapes[0][1:]
         )
 
-        self._volume_crop_starts: list[list[tuple[int, int, int]]] = []
-        self._volume_offsets: list[int] = []
-        self.crop_grid: list[tuple[int, int, int, int]] = self._build_preserve_all_crop_grid()
-        self._volume_offsets.append(len(self.crop_grid))
-
         if not self.cache_complete():
             missing = [
                 i for i in range(self.file_count)
@@ -85,6 +80,7 @@ class CropTifVolumeHotDataset(Dataset):
             )
 
         self._eager_preload_volume_caches()
+        self._rebuild_grid_from_caches()
 
         print(
             f"[TIF-LOG] Hot dataset indexed {self.file_count} file(s) from metadata, "
@@ -298,15 +294,42 @@ class CropTifVolumeHotDataset(Dataset):
                     starts.append((start_d, start_h, start_w))
         return starts
 
-    def _build_preserve_all_crop_grid(self) -> list[tuple[int, int, int, int]]:
+    def _build_all_crop_grid(self) -> tuple[
+        list[list[tuple[int, int, int]]],
+        list[int],
+        list[tuple[int, int, int, int]],
+    ]:
+        """Build full crop grid from metadata (includes empty crops).
+
+        Used by ``build_hot_cache.py`` to enumerate all possible crops.
+        The dataset itself uses :meth:`_rebuild_grid_from_caches` instead,
+        which only includes crops that survived empty-crop filtering.
+        """
+        starts_list: list[list[tuple[int, int, int]]] = []
+        offsets: list[int] = []
         grid: list[tuple[int, int, int, int]] = []
         for vol_idx, shape in enumerate(self._vol_shapes):
-            self._volume_offsets.append(len(grid))
+            offsets.append(len(grid))
             starts = self._volume_starts_for_shape(shape)
-            self._volume_crop_starts.append(starts)
+            starts_list.append(starts)
             for start_d, start_h, start_w in starts:
                 grid.append((vol_idx, start_d, start_h, start_w))
-        return grid
+        offsets.append(len(grid))
+        return starts_list, offsets, grid
+
+    def _rebuild_grid_from_caches(self) -> None:
+        """Build crop grid from cache contents (empty crops already filtered out)."""
+        self._volume_crop_starts = []
+        self._volume_offsets = []
+        self.crop_grid = []
+        for vol_idx in range(self.file_count):
+            payload = self._volume_crop_cache[vol_idx]
+            starts_list = [tuple(int(v) for v in s) for s in payload["starts"]]
+            self._volume_offsets.append(len(self.crop_grid))
+            self._volume_crop_starts.append(starts_list)
+            for start_d, start_h, start_w in starts_list:
+                self.crop_grid.append((vol_idx, start_d, start_h, start_w))
+        self._volume_offsets.append(len(self.crop_grid))
 
     # ── eager preload ─────────────────────────────────────────────
 
@@ -355,10 +378,8 @@ class CropTifVolumeHotDataset(Dataset):
         crops = payload.get("crops")
         if not isinstance(starts, torch.Tensor) or not isinstance(crops, torch.Tensor):
             raise ValueError(f"Invalid crop tensors in {cache_path}")
-        if int(starts.shape[0]) != len(self._volume_crop_starts[vol_idx]):
-            raise ValueError(f"Stale crop cache starts in {cache_path}")
-        if int(crops.shape[0]) != len(self._volume_crop_starts[vol_idx]):
-            raise ValueError(f"Stale crop cache crop count in {cache_path}")
+        if int(crops.shape[0]) != int(starts.shape[0]):
+            raise ValueError(f"Crop/starts count mismatch in {cache_path}")
 
     # ── Dataset interface ─────────────────────────────────────────
 

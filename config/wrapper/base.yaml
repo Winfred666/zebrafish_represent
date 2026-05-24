@@ -35,7 +35,7 @@ trainer:
           save_top_k: 1
           save_last: true
           filename: "epoch{epoch:03d}-step{step:06d}"
-          dirpath: null
+          dirpath: /tmp/mlflow_checkpoints
       - class_name: IntegratedGPUMemoryMonitor
         params:
           log_frequency_mins: 1
@@ -56,4 +56,4 @@ trainer:
 testing:
   run_sampling_after_fit: true
   num_samples: 100 # at last keep the same test generation quality.
-  sample_steps: framework.optimization.sample_steps
+  sample_steps: 1000

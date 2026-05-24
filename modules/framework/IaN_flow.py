@@ -61,7 +61,7 @@ class IaNFlowModule(BaseTrainingFramework):
         noise = torch.randn_like(clean_volume) * self._noise_w
         noisy_volume = self._q_sample(clean_volume, timesteps, noise)
 
-        prediction = self(noisy_volume, timesteps)
+        prediction = self(noisy_volume, timesteps * self.optimization.sample_steps)
         eps_recon, img_recon = prediction.chunk(2, dim=1)
 
         noise_loss = self._loss_fn(eps_recon - noise).mean()
@@ -93,7 +93,7 @@ class IaNFlowModule(BaseTrainingFramework):
         next_timestep = max(-1, min(T - 1, next_timestep))
 
         t_tensor = torch.full((batch_size,), t_val, device=noisy.device)
-        prediction = self(noisy, t_tensor)
+        prediction = self(noisy, t_tensor * self.optimization.sample_steps)
         eps_recon, img_recon = prediction.chunk(2, dim=1)
 
         if next_timestep < 0:

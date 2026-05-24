@@ -31,10 +31,7 @@ def _build_dummy_cache(data_dir: Path, params: dict) -> None:
     ds.file_count = len(ds._file_paths)
     ds._vol_shapes = ds._scan_volume_shapes()
 
-    ds._volume_crop_starts = []
-    ds._volume_offsets = []
-    ds.crop_grid = ds._build_preserve_all_crop_grid()
-    ds._volume_offsets.append(len(ds.crop_grid))
+    ds._volume_crop_starts, ds._volume_offsets, ds.crop_grid = ds._build_all_crop_grid()
 
     cache_dir = ds._crop_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)

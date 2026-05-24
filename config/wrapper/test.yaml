@@ -11,6 +11,3 @@ logging:
     run_name: test
     tags:
       job_type: test
-
-testing:
-  sample_steps: 100
