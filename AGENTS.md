@@ -18,18 +18,38 @@ The previous UNet and `model/lightning/*` training paths are stale and must not 
 
 **Always use `torchrun` to launch any `driver.py` training**, regardless of GPU count.
 Do NOT rely on Lightning's internal `multiprocessing.spawn` — it is slow on shared
-filesystems (each forked child reloads libraries from NFS) and unreliable under `nohup`.
+filesystems (each forked child reloads libraries from NFS).
 `torchrun` uses independent subprocesses that load in parallel and is the PyTorch
 official recommendation.
 
+**Never use `nohup`.** It breaks stdout/stderr redirection to log files — output is
+silently lost. Use a plain background process with `PYTHONUNBUFFERED=1` and `disown`:
+
+```bash
+export PYTHONUNBUFFERED=1
+python -m torch.distributed.run --nproc_per_node=N driver.py \
+  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
+  > /tmp/training.log 2>&1 &
+disown
+```
+
+Always write logs to `/tmp/` (local NVMe, 6 GB/s) — NOT to `result/logs/` (NFS, 51 MB/s).
+Symlink to `result/logs/` for easy access: `ln -sf /tmp/training.log result/logs/training.log`.
+
 Single-GPU:
 ```bash
-torchrun --nproc_per_node=1 driver.py --data-config ... --model-config ... --framework-config ... --wrapper-config ...
+export PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0
+python -m torch.distributed.run --nproc_per_node=1 driver.py \
+  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
+  > /tmp/training.log 2>&1 & disown
 ```
 
 Multi-GPU (e.g. 4 GPUs on gpu07):
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 driver.py --data-config ... --model-config ... --framework-config ... --wrapper-config ...
+export PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0,1,2,3
+python -m torch.distributed.run --nproc_per_node=4 driver.py \
+  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
+  > /tmp/training.log 2>&1 & disown
 ```
 
 Lightning detects `LOCAL_RANK` set by torchrun and uses the configured DDP strategy
