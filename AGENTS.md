@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## Critical Rule
+
+**Never delete data, logs, checkpoints, cache files, or results unless explicitly asked.**  
+**Never kill a busy process (training, cache build, data load) you did not start, unless explicitly asked.**
+
+Deleting caches or killing long-running processes destroys hours or days of work.  
+If you think a destructive action is needed, ask first — confirm with the user before proceeding.
+
 ## Repository Scope
 
 This repository trains a 3D generative representation model for zebrafish microscopy volumes using a 3D DiT backbone with rectified flow or DDPM training, orchestrated by PyTorch Lightning.
