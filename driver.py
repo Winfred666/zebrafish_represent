@@ -167,8 +167,11 @@ def train(
     print("\nTraining complete")
 
     # Upload ModelCheckpoint .ckpt files to MLflow artifacts.
-    if runtime.logger is not None and runtime.artifact_manager is not None:
-        _upload_checkpoints(runtime)
+    try:
+        if runtime.logger is not None and runtime.artifact_manager is not None:
+            _upload_checkpoints(runtime)
+    except Exception as exc:
+        print(f"WARNING: failed to upload checkpoints: {exc}", flush=True)
 
     testing_section = config.get("testing", {})
     if testing_section.get("run_sampling_after_fit", True):
