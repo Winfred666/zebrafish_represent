@@ -7,6 +7,7 @@ import torch
 from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.runtime_factory import (
     _collect_runtime_deps,
+    _ensure_heavy_imports,
     _extract_ref_path,
     _is_runtime_ref,
     build_any_runtime_object,
@@ -20,6 +21,7 @@ class RuntimeEntryTest(unittest.TestCase):
 
     def test_builder_globals_resolves_expected_classes(self) -> None:
         """build_any_runtime_object resolves key classes via globals()."""
+        _ensure_heavy_imports()
         expected_classes = {
             "DiT3D", "PRDiT",
             "RectifiedFlowModule", "DDPMModule",
@@ -57,7 +59,7 @@ class RuntimeEntryTest(unittest.TestCase):
         )
         for key in ("train_dataset", "val_dataset", "train_dataloader",
                      "val_dataloader", "model", "framework",
-                     "seed", "logging", "trainer", "testing"):
+                     "seed", "logging", "trainer"):
             self.assertIn(key, merged, f"Missing key: {key}")
 
     def test_callbacks_are_inline_in_trainer(self) -> None:

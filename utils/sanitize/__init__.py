@@ -13,6 +13,7 @@ from utils.sanitize.framework_config import (
     MAEParams,
     OptimizationParams,
     RectifiedFlowModuleParams,
+    TestingParams,
     VICRegModuleParams,
 )
 from utils.sanitize.model_config import (

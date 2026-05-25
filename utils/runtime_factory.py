@@ -204,19 +204,51 @@ def _any_unresolved_refs(section: dict[str, Any]) -> bool:
     return _walk(section)
 
 
-# ── Imports needed by build_any_runtime_object for globals() class resolution ──
+# ── Lazy heavy imports (16+ s) — only loaded when building runtime objects ──
 
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import MLFlowLogger
-from torch.utils.data import DataLoader
+_HEAVY_IMPORTS_DONE = False
 
-from utils.display.log_artifact import ArtifactManager
-from utils.display.log_gpu import IntegratedGPUMemoryMonitor
-from utils.dataset import *
-from modules.framework import *
-from modules.model import *  # DiT3D, PRDiT, BaseVolumeModel
-from utils.sanitize import *  # all Params classes
+
+def _ensure_heavy_imports() -> None:
+    """Populate module globals with classes needed by build_any_runtime_object.
+
+    Deferred so that config-loading and ref-utility tests stay sub-second
+    instead of paying the pytorch_lightning/torch import tax upfront.
+    """
+    global _HEAVY_IMPORTS_DONE
+    if _HEAVY_IMPORTS_DONE:
+        return
+
+    import pytorch_lightning as _pl
+    import pytorch_lightning.callbacks as _plc
+    import pytorch_lightning.loggers as _pll
+    import torch.utils.data as _tud
+    import utils.display.log_artifact as _la
+    import utils.display.log_gpu as _lg
+    import utils.dataset as _ds
+    import modules.framework as _fw
+    import modules.model as _md
+    import utils.sanitize as _sn
+
+    _g = globals()
+    _g["Trainer"] = _pl.Trainer
+    _g["EarlyStopping"] = _plc.EarlyStopping
+    _g["LearningRateMonitor"] = _plc.LearningRateMonitor
+    _g["ModelCheckpoint"] = _plc.ModelCheckpoint
+    _g["MLFlowLogger"] = _pll.MLFlowLogger
+    _g["DataLoader"] = _tud.DataLoader
+    _g["ArtifactManager"] = _la.ArtifactManager
+    _g["IntegratedGPUMemoryMonitor"] = _lg.IntegratedGPUMemoryMonitor
+
+    # Replicate the former ``from X import *`` effect
+    for _mod in (_ds, _fw, _md, _sn):
+        _names = getattr(_mod, "__all__", None) or [
+            n for n in dir(_mod) if not n.startswith("_")
+        ]
+        for _name in _names:
+            _g[_name] = getattr(_mod, _name)
+
+    _HEAVY_IMPORTS_DONE = True
 
 
 # ── Build item descriptor ──
@@ -255,6 +287,7 @@ def build_any_runtime_object(config: dict[str, Any], class_registry: dict[str, t
     falls back to this module's globals.  If no Params class is found the raw
     params dict is passed through unvalidated.
     """
+    _ensure_heavy_imports()
     if "class_name" not in config:
         raise ValueError("Config dict must contain 'class_name' key")
 

@@ -56,10 +56,6 @@ Lightning detects `LOCAL_RANK` set by torchrun and uses the configured DDP strat
 automatically — no code changes needed in `driver.py`. Always set
 `CUDA_VISIBLE_DEVICES` explicitly to avoid cross-job GPU contention.
 
-**gpu07 (Blackwell B200) does not support DDP.** NCCL hangs on Blackwell GPUs with
-the current CUDA driver. All training on gpu07 must use single-GPU (`--nproc_per_node=1`,
-`devices=1`). Multi-GPU DDP is only available on gpu04/gpu05 (RTX 3090/4090).
-
 ## Python Binary to use
 
 - **gpu07**: `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python`
