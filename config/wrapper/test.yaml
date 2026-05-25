@@ -6,7 +6,12 @@ trainer:
   params:
     max_epochs: 0
     devices: 1
-    limit_val_batches: 0.1 # only for num_sanity_val_steps pre validate to see fusion result
+    limit_val_batches: 0.1
+
+testing:
+  run_sampling_after_fit: true
+  num_samples: 4
+  sample_steps: 50
 
 logging:
   params:
