@@ -23,12 +23,21 @@ class CommonDiffusionParams(IngestibleParams):
     timestep_respacing: int | None = None
 
 
+class TestingParams(IngestibleParams):
+    """Post-fit testing params — run after training, before logger closes."""
+
+    run_sampling_after_fit: bool = True
+    num_samples: int = 4
+    sample_steps: int = 50
+
+
 class BaseFrameworkParams(IngestibleParams):
     """Shared base params for all training frameworks."""
 
     model: object = None
     optimization: OptimizationParams
-    diffusion: CommonDiffusionParams  # framework-specific diffusion params, but with common noise schedule
+    diffusion: CommonDiffusionParams
+    testing: TestingParams = TestingParams()
 
 
 class DDPMDiffusionParams(CommonDiffusionParams):

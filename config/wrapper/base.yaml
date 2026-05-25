@@ -16,7 +16,7 @@ trainer:
   params:
     max_epochs: 20
     accelerator: auto
-    devices: 1 # DDP NOT ALLOWED on gpu07 (Blackwell SIGKILL). Use ddp_ variant if multi-GPU needed.
+    devices: 1
     precision: "bf16"
     check_val_every_n_epoch: 1
     enable_checkpointing: true
@@ -52,8 +52,3 @@ trainer:
       - class_name: LearningRateMonitor
         params:
           logging_interval: epoch
-
-testing:
-  run_sampling_after_fit: true
-  num_samples: 100 # at last keep the same test generation quality.
-  sample_steps: 1000

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+import torch
 import yaml
+from torch.utils.data import DataLoader
 
 
 @dataclass
@@ -115,3 +118,105 @@ def log_image_artifact(
         step=int(step),
         synchronous=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# post-fit testing helpers (used by BaseTrainingFramework.on_train_end)
+# ---------------------------------------------------------------------------
+
+def upload_checkpoints(trainer, logger) -> None:
+    """Upload ModelCheckpoint .ckpt files to MLflow artifacts."""
+    import mlflow
+
+    ckpt_callback = getattr(trainer, "checkpoint_callback", None)
+    if ckpt_callback is None:
+        return
+    checkpoint_dir = Path(ckpt_callback.dirpath) if ckpt_callback.dirpath else None
+    if checkpoint_dir is None or not checkpoint_dir.exists():
+        return
+    ckpt_files = sorted(checkpoint_dir.glob("*.ckpt"))
+    if not ckpt_files:
+        return
+    run_id = getattr(logger, "run_id", None)
+    if not run_id:
+        return
+    tracking_uri = getattr(logger, "_tracking_uri", None) or None
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    for ckpt_path in ckpt_files:
+        client.log_artifact(run_id, str(ckpt_path), artifact_path="checkpoints")
+    print(f"[MLFLOW] Uploaded {len(ckpt_files)} checkpoint(s) to artifacts/checkpoints")
+
+
+def run_postfit_testing(framework_module, trainer, logger,
+                        artifact_manager, val_dataset,
+                        num_samples: int, sample_steps: int) -> None:
+    """Generate samples, compute FID/MMD/MS-SSIM, log to MLflow.
+
+    Called from ``on_train_end`` while the logger is still alive.
+    """
+    from utils.eval.sample_quality import compute_sample_quality_metrics
+
+    devices = max(1, trainer.num_devices)
+    batch_sizes: list[int] = []
+    base = num_samples // devices
+    rem = num_samples % devices
+    for d in range(devices):
+        n = base + (1 if d < rem else 0)
+        if n > 0:
+            batch_sizes.append(n)
+
+    predict_loader = DataLoader(
+        [{"batch_size": n, "sample_steps": sample_steps} for n in batch_sizes],
+        batch_size=1,
+    )
+    t0 = time.time()
+    predictions = trainer.predict(framework_module, dataloaders=predict_loader)
+    samples = torch.cat(predictions, dim=0)
+    t1 = time.time()
+    gen_elapsed = t1 - t0
+    print(f"[TEST] sample generation took {gen_elapsed:.1f}s "
+          f"({num_samples} samples, {sample_steps} steps)")
+
+    framework_module.log_sample_slices(samples, tag="test_sample")
+
+    if val_dataset is None or len(val_dataset) == 0:
+        logger.log_metrics({"test_sample_gen_time": float(gen_elapsed)}, step=0)
+        return
+
+    reference_crops: list[torch.Tensor] = []
+    for idx in range(len(val_dataset)):
+        reference_crops.append(val_dataset[idx]["target"])
+
+    sample_array = samples.detach().cpu().numpy()
+    sample_path = artifact_manager.write_numpy_artifact(
+        sample_array, "samples/generated_samples.npy",
+    )
+    print(f"Saved generated samples to: {sample_path}")
+
+    metrics_to_log: dict[str, float] = {
+        "sample_min": float(sample_array.min()),
+        "sample_max": float(sample_array.max()),
+        "sample_mean": float(sample_array.mean()),
+    }
+    summary_artifact: dict[str, object] = {
+        "sample_path": str(sample_path),
+        "sample_summary": metrics_to_log.copy(),
+    }
+
+    combined_reference = torch.cat(reference_crops, dim=0)
+    quality_metrics = compute_sample_quality_metrics(
+        samples.detach().cpu(), combined_reference,
+    )
+    metrics_to_log.update({
+        "sample_fid": float(quality_metrics["fid"]),
+        "sample_mmd": float(quality_metrics["mmd"]),
+        "sample_ms_ssim": float(quality_metrics["ms_ssim"]),
+    })
+    summary_artifact["reference_splits"] = {"val": int(combined_reference.shape[0])}
+    summary_artifact["sample_quality"] = quality_metrics
+
+    artifact_manager.write_yaml_artifact(summary_artifact, "samples/sample_quality_metrics.yaml")
+    logger.log_metrics(metrics_to_log, step=0)
+    t2 = time.time()
+    print(f"[TEST] reference collection + metrics took {t2 - t1:.1f}s")
+    print(f"[TEST] total test phase took {t2 - t0:.1f}s")

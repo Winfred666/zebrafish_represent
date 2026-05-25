@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from pathlib import Path
 from typing import Sequence
 
-import torch
-from torch.utils.data import DataLoader
-
 sys.path.append(str(Path(__file__).parent))
 
-from utils.eval.sample_quality import compute_sample_quality_metrics
 from utils.path_io import load_dotenv
 from utils.runtime_factory import build_training_runtime_from_files
 
@@ -43,29 +38,6 @@ def _flatten_dict(d: dict, prefix: str = "") -> dict[str, str]:
     return result
 
 
-def _upload_checkpoints(runtime) -> None:
-    """Upload ModelCheckpoint .ckpt files to MLflow artifacts."""
-    import mlflow
-
-    ckpt_callback = getattr(runtime.trainer, "checkpoint_callback", None)
-    if ckpt_callback is None:
-        return
-    checkpoint_dir = Path(ckpt_callback.dirpath) if ckpt_callback.dirpath else None
-    if checkpoint_dir is None or not checkpoint_dir.exists():
-        return
-    ckpt_files = sorted(checkpoint_dir.glob("*.ckpt"))
-    if not ckpt_files:
-        return
-    run_id = getattr(runtime.logger, "run_id", None)
-    if not run_id:
-        return
-    tracking_uri = getattr(runtime.logger, "_tracking_uri", None) or None
-    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
-    for ckpt_path in ckpt_files:
-        client.log_artifact(run_id, str(ckpt_path), artifact_path="checkpoints")
-    print(f"[MLFLOW] Uploaded {len(ckpt_files)} checkpoint(s) to artifacts/checkpoints")
-
-
 def _log_config_params(logger, config: dict) -> None:
     """Flatten the merged runtime config into MLflow run parameters."""
     params: dict[str, str] = {}
@@ -78,51 +50,6 @@ def _log_config_params(logger, config: dict) -> None:
                 val = val[:497] + "..."
             params[section_key] = val
     logger.log_hyperparams(params)
-
-
-def _log_postfit_sample_metrics(
-    *,
-    runtime,
-    sample_tensor: torch.Tensor,
-    reference_targets: dict[str, torch.Tensor],
-    step: int = 0,
-) -> None:
-    sample_array = sample_tensor.detach().cpu().numpy()
-    sample_path = runtime.artifact_manager.write_numpy_artifact(
-        sample_array,
-        "samples/generated_samples.npy",
-    )
-    print(f"Saved generated samples to: {sample_path}")
-
-    metrics_to_log: dict[str, float] = {
-        "sample_min": float(sample_array.min()),
-        "sample_max": float(sample_array.max()),
-        "sample_mean": float(sample_array.mean()),
-    }
-    summary_artifact: dict[str, object] = {
-        "sample_path": str(sample_path),
-        "sample_summary": metrics_to_log.copy(),
-    }
-
-    if reference_targets:
-        combined_reference = torch.cat(list(reference_targets.values()), dim=0)
-        quality_metrics = compute_sample_quality_metrics(sample_tensor.detach().cpu(), combined_reference)
-        metrics_to_log.update(
-            {
-                "sample_fid": float(quality_metrics["fid"]),
-                "sample_mmd": float(quality_metrics["mmd"]),
-                "sample_ms_ssim": float(quality_metrics["ms_ssim"]),
-                # wasserstein_distance disabled — sorts all voxels O(3.9B), OOMs GPU
-                # "sample_wasserstein_distance": float(quality_metrics["wasserstein_distance"]),
-            }
-        )
-        summary_artifact["reference_splits"] = {
-            split: int(target.shape[0]) for split, target in reference_targets.items()
-        }
-        summary_artifact["sample_quality"] = quality_metrics
-
-    runtime.artifact_manager.write_yaml_artifact(summary_artifact, "samples/sample_quality_metrics.yaml")
-    runtime.logger.log_metrics(metrics_to_log, step=step)
 
 
 def train(
@@ -165,64 +92,6 @@ def train(
     )
 
     print("\nTraining complete")
-
-    # Upload ModelCheckpoint .ckpt files to MLflow artifacts.
-    if runtime.logger is not None and runtime.artifact_manager is not None:
-        _upload_checkpoints(runtime)
-
-    testing_section = config.get("testing", {})
-    if testing_section.get("run_sampling_after_fit", True):
-        num_samples: int = testing_section.get("num_samples", 1)
-        sample_steps: int = testing_section.get("sample_steps", 50)
-
-        # Split across devices so each GPU generates its share
-        devices = max(1, runtime.trainer.num_devices)
-        batch_sizes: list[int] = []
-        base = num_samples // devices
-        rem = num_samples % devices
-        for d in range(devices):
-            n = base + (1 if d < rem else 0)
-            if n > 0:
-                batch_sizes.append(n)
-
-        predict_loader = DataLoader(
-            [{"batch_size": n, "sample_steps": sample_steps} for n in batch_sizes],
-            batch_size=1,
-        )
-        t0 = time.time()
-        predictions = runtime.trainer.predict(framework_module, dataloaders=predict_loader)
-        samples = torch.cat(predictions, dim=0)
-        t1 = time.time()
-        gen_elapsed = t1 - t0
-        print(f"[TEST] sample generation took {gen_elapsed:.1f}s "
-              f"({num_samples} samples, {sample_steps} steps)")
-
-        framework_module.log_sample_slices(samples, tag="test_sample")
-
-        # Compute FID / MMD / MS-SSIM against the full validation set once.
-        val_dataset = runtime.objects.get("val_dataset")
-        if val_dataset is not None and len(val_dataset) > 0:
-            reference_crops: list[torch.Tensor] = []
-            for idx in range(len(val_dataset)):
-                reference_crops.append(val_dataset[idx]["target"])
-            _log_postfit_sample_metrics(
-                runtime=runtime,
-                sample_tensor=samples,
-                reference_targets={"val": torch.stack(reference_crops, dim=0)},
-                step=0,
-            )
-            t2 = time.time()
-            total_elapsed = t2 - t0
-            ref_elapsed = t2 - t1
-            print(f"[TEST] reference collection + metrics took {ref_elapsed:.1f}s")
-            print(f"[TEST] total test phase took {total_elapsed:.1f}s")
-            runtime.logger.log_metrics(
-                {"test_sample_gen_time": float(gen_elapsed)}, step=0,
-            )
-        else:
-            runtime.logger.log_metrics(
-                {"test_sample_gen_time": float(gen_elapsed)}, step=0,
-            )
 
     if runtime.artifact_manager is not None:
         runtime.artifact_manager.cleanup_temp_folder()

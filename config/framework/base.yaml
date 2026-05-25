@@ -8,5 +8,9 @@ framework:
       loss_type: mse
       sample_steps: 4
     diffusion:
-      timestep_respacing: null # faster infer sampling by skipping steps in the noise schedule;
+      timestep_respacing: null
       gen_noise_weight: 0.5
+    testing:
+      run_sampling_after_fit: true
+      num_samples: 100
+      sample_steps: 1000

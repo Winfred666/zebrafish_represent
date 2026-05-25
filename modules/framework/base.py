@@ -437,6 +437,51 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if self.val_fusions_noised:
             self._log_fusion_validation()
 
+    def on_train_end(self) -> None:
+        """Post-fit testing: upload checkpoints, generate samples, compute FID."""
+        from utils.display.log_artifact import upload_checkpoints, run_postfit_testing
+
+        trainer = self.trainer
+        logger = self.logger
+        if logger is None:
+            return
+
+        # Upload checkpoints
+        if hasattr(trainer, "checkpoint_callback"):
+            upload_checkpoints(trainer, logger)
+
+        # Post-fit sampling + FID/MMD/MS-SSIM (if testing enabled)
+        testing = getattr(self.config, "testing", None)
+        if testing is None or not testing.run_sampling_after_fit:
+            return
+
+        val_dataset = getattr(trainer, "val_dataloaders", None)
+        if val_dataset is not None and hasattr(val_dataset, "dataset"):
+            val_dataset = val_dataset.dataset
+        else:
+            val_dataset = None
+
+        artifact_manager = None
+        for callback in getattr(trainer, "callbacks", []):
+            from utils.display.log_artifact import ArtifactManager
+            if isinstance(callback, ArtifactManager):
+                artifact_manager = callback
+                break
+
+        if artifact_manager is None:
+            print("WARNING: ArtifactManager callback not found, skipping post-fit testing")
+            return
+
+        run_postfit_testing(
+            framework_module=self,
+            trainer=trainer,
+            logger=logger,
+            artifact_manager=artifact_manager,
+            val_dataset=val_dataset,
+            num_samples=testing.num_samples,
+            sample_steps=testing.sample_steps,
+        )
+
     def _run_fixed_seed_generation(
         self, batch_size: int, sample_steps: int
     ) -> dict[str, float]:
