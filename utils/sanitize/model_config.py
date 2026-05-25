@@ -88,3 +88,18 @@ class PRDiTParams(IngestibleParams):
                     f"Axis={axis}, actual={actual_grid}, expected={expected_grid}"
                 )
         return self
+
+
+class VQVAEParams(IngestibleParams):
+    """Params for the VQ-VAE model."""
+
+    n_hiddens: int = Field(default=64, ge=1)
+    downsample: tuple[int, int, int] = (8, 8, 8)
+    image_channel: int = Field(default=1, ge=1)
+    embedding_dim: int = Field(default=8, ge=1)
+    n_codes: int = Field(default=512, ge=1)
+    norm_type: str = "group"
+    num_groups: int = Field(default=32, ge=1)
+    no_random_restart: bool = False
+    restart_thres: float = Field(default=1.0, gt=0.0)
+    patch_size: int = Field(default=64, ge=1)
