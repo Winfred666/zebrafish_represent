@@ -1,5 +1,7 @@
 import_config: prdit_s1.yaml
 
+resume_ckpt_path: null
+
 trainer:
   params:
     max_epochs: 0
