@@ -100,3 +100,33 @@ class VICRegModuleParams(IngestibleParams):
     cov_weight: float = 1.0
     lr: float = 1e-4
     weight_decay: float = 1e-6
+
+
+class VQVAES1ModuleParams(IngestibleParams):
+    """Params for VQVAES1Module (stage 1 full VQ-VAE training)."""
+
+    model: object = None
+    lr: float = Field(default=1e-4, gt=0.0)
+    l1_weight: float = Field(default=1.0, ge=0.0)
+    perceptual_weight: float = Field(default=1.0, ge=0.0)
+    volume_gan_weight: float = Field(default=0.1, ge=0.0)
+    gan_feat_weight: float = Field(default=1.0, ge=0.0)
+    discriminator_iter_start: int = Field(default=30000, ge=0)
+    disc_loss_type: str = "vanilla"
+    disc_channels: int = Field(default=64, ge=1)
+    disc_layers: int = Field(default=3, ge=1)
+
+
+class VQVAES2ModuleParams(IngestibleParams):
+    """Params for VQVAES2Module (stage 2 decoder fine-tuning)."""
+
+    model: object = None
+    lr: float = Field(default=1e-4, gt=0.0)
+    l1_weight: float = Field(default=1.0, ge=0.0)
+    perceptual_weight: float = Field(default=1.0, ge=0.0)
+    volume_gan_weight: float = Field(default=0.1, ge=0.0)
+    gan_feat_weight: float = Field(default=1.0, ge=0.0)
+    discriminator_iter_start: int = Field(default=30000, ge=0)
+    disc_loss_type: str = "vanilla"
+    disc_channels: int = Field(default=64, ge=1)
+    disc_layers: int = Field(default=3, ge=1)
