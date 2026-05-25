@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 import os as _os
 _MEDICALNET_DIR = _os.path.dirname(_os.path.abspath(__file__))
-MEDICALNET_CKPT_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_MEDICALNET_DIR)), "result", "checkpoints", "medicalnet_resnet10_23dataset.pth")
+MEDICALNET_CKPT_PATH = _os.path.join(_os.path.dirname(_os.path.dirname(_MEDICALNET_DIR)), "result", "checkpoints", "medicalnet_resnet10_vicregfinetune.ckpt")
 MEDICALNET_FEATURE_DIM = 512
 
 
@@ -149,7 +149,7 @@ class ResNet10(nn.Module):
 
 class MedicalNetEncoder(BaseVolumeModel):
     """MedicalNet 3D ResNet-10 encoder registered as a BaseVolumeModel.
-
+    WARNING: if too cheap and simple, use ResNet-18 or -34 instead !!
     Parameters
     ----------
     config : MedicalNetEncoderParams
