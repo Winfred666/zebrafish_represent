@@ -84,7 +84,7 @@ def vicreg_loss(
     cov : Tensor, scalar
         Covariance component.
     """
-    inv = invariance_loss(z1, z2)
+    inv = invariance_loss(z1, z2) # Important: this is the only term that directly pulls the two views together.
     var = 0.5 * (variance_loss(z1) + variance_loss(z2))
     cov = 0.5 * (covariance_loss(z1) + covariance_loss(z2))
     total = sim_weight * inv + var_weight * var + cov_weight * cov
@@ -96,17 +96,23 @@ def vicreg_loss(
 # ---------------------------------------------------------------------------
 
 class Projector(nn.Module):
-    """3-layer MLP: encoder-dim → hidden → hidden → out-dim."""
+    """3-layer MLP: encoder-dim → hidden → hidden → out-dim.
+
+    Output dim matches encoder dim (512) to keep the covariance matrix
+    small — a 2048×2048 matrix would have 4.2M off-diagonal entries,
+    producing an unmanageably large (and unstable) covariance loss with
+    our batch sizes.
+    """
 
     def __init__(self, in_dim: int = MEDICALNET_FEATURE_DIM,
-                 hidden_dim: int = 2048, out_dim: int = 2048):
+                 hidden_dim: int = 1024, out_dim: int = MEDICALNET_FEATURE_DIM):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim, track_running_stats=False),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim, track_running_stats=False),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, out_dim),
         )

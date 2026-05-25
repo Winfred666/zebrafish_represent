@@ -166,10 +166,10 @@ class TestVICRegLoss:
 
 class TestProjector:
     def test_output_shape(self) -> None:
-        proj = Projector(in_dim=512, hidden_dim=2048, out_dim=2048)
+        proj = Projector(in_dim=512, hidden_dim=1024, out_dim=512)
         x = torch.randn(8, 512)
         out = proj(x)
-        assert tuple(out.shape) == (8, 2048)
+        assert tuple(out.shape) == (8, 512)
 
     def test_gradients_flow(self) -> None:
         proj = Projector()
