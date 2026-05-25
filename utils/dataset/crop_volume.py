@@ -32,7 +32,6 @@ _INDEX_ITEMSIZE = torch.empty((), dtype=_INDEX_STORAGE_DTYPE).element_size()
 @dataclass(frozen=True)
 class _VolumeIndexEntry:
     fusion_id: int
-    file_name: str
     crop_count: int
     crop_shape: tuple[int, ...]
     crop_numel: int
@@ -68,7 +67,7 @@ class CropTifVolumeHotDataset(Dataset):
             f"[TIF-LOG] Hot dataset indexed {self.file_count} file(s), "
             f"crop_size={self.crop_size}, overlap={self.overlap}, "
             f"total_crops={self._total_crops}, "
-            f"cache_complete={self.cache_complete()}, "
+            f"cache_complete=True, "
             f"cache_dir={self._crop_cache_dir()}"
         )
 
@@ -96,11 +95,23 @@ class CropTifVolumeHotDataset(Dataset):
         self.cache_root = Path(config.cache_root) if getattr(config, "cache_root", None) else None
         self._file_paths = self._discover_files() if discover_files else []
         self.file_count = len(self._file_paths)
+        self._selected_file_keys_value = self._build_selected_file_keys()
+        self._cache_key_value = self._build_cache_key()
+        self._crop_cache_dir_value = (
+            self.cache_root / f".crop_cache_{self._cache_key_value}"
+            if self.cache_root is not None
+            else self.data_dir / f".crop_cache_{self._cache_key_value}"
+        )
+        self._manifest_path_value = self._crop_cache_dir_value / self.MANIFEST_FILE_NAME
+        self._crops_path_value = self._crop_cache_dir_value / self.CROPS_FILE_NAME
+        self._starts_path_value = self._crop_cache_dir_value / self.STARTS_FILE_NAME
+        self._full_sizes_path_value = self._crop_cache_dir_value / self.FULL_SIZES_FILE_NAME
+        self._warmed_path_value = self._crop_cache_dir_value / self.WARMED_FILE_NAME
+        self._warm_lock_path_value = self._crop_cache_dir_value / self.WARM_LOCK_NAME
 
         self._volume_entries: list[_VolumeIndexEntry] = []
         self._cumulative_crop_counts: list[int] = []
         self._total_crops = 0
-        self._manifest: dict = {}
         self._crop_storage = torch.empty(0, dtype=_CROP_STORAGE_DTYPE)
         self._starts_storage = torch.empty((0, 3), dtype=_INDEX_STORAGE_DTYPE)
         self._full_sizes_storage = torch.empty((0, 4), dtype=_INDEX_STORAGE_DTYPE)
@@ -131,7 +142,7 @@ class CropTifVolumeHotDataset(Dataset):
 
     # ── cache identity ────────────────────────────────────────────
 
-    def _cache_key(self) -> str:
+    def _build_cache_key(self) -> str:
         # Discover ALL files (ignoring max_files) and apply the same sort +
         # deterministic shuffle as _discover_files so the cache key is stable
         # regardless of max_files. The key matches what build_hot_cache.py
@@ -170,7 +181,10 @@ class CropTifVolumeHotDataset(Dataset):
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
 
-    def _selected_file_keys(self) -> list[str]:
+    def _cache_key(self) -> str:
+        return self._cache_key_value
+
+    def _build_selected_file_keys(self) -> list[str]:
         keys: list[str] = []
         for path in self._file_paths:
             try:
@@ -179,28 +193,29 @@ class CropTifVolumeHotDataset(Dataset):
                 keys.append(str(path))
         return keys
 
+    def _selected_file_keys(self) -> list[str]:
+        return self._selected_file_keys_value
+
     def _crop_cache_dir(self) -> Path:
-        if self.cache_root is not None:
-            return self.cache_root / f".crop_cache_{self._cache_key()}"
-        return self.data_dir / f".crop_cache_{self._cache_key()}"
+        return self._crop_cache_dir_value
 
     def _manifest_path(self) -> Path:
-        return self._crop_cache_dir() / self.MANIFEST_FILE_NAME
+        return self._manifest_path_value
 
     def _crops_path(self) -> Path:
-        return self._crop_cache_dir() / self.CROPS_FILE_NAME
+        return self._crops_path_value
 
     def _starts_path(self) -> Path:
-        return self._crop_cache_dir() / self.STARTS_FILE_NAME
+        return self._starts_path_value
 
     def _full_sizes_path(self) -> Path:
-        return self._crop_cache_dir() / self.FULL_SIZES_FILE_NAME
+        return self._full_sizes_path_value
 
     def _warmed_path(self) -> Path:
-        return self._crop_cache_dir() / self.WARMED_FILE_NAME
+        return self._warmed_path_value
 
     def _warm_lock_path(self) -> Path:
-        return self._crop_cache_dir() / self.WARM_LOCK_NAME
+        return self._warm_lock_path_value
 
     def cache_complete(self) -> bool:
         if not self._file_paths:
@@ -303,7 +318,6 @@ class CropTifVolumeHotDataset(Dataset):
 
     def _attach_cache(self, *, enable_warmup: bool) -> None:
         manifest = self._load_manifest()
-        self._manifest = manifest
 
         self._volume_entries = []
         self._cumulative_crop_counts = []
@@ -311,7 +325,6 @@ class CropTifVolumeHotDataset(Dataset):
         for raw_entry in manifest["volumes"]:
             entry = _VolumeIndexEntry(
                 fusion_id=int(raw_entry["fusion_id"]),
-                file_name=str(raw_entry["file_name"]),
                 crop_count=int(raw_entry["crop_count"]),
                 crop_shape=tuple(int(dim) for dim in raw_entry["crop_shape"]),
                 crop_numel=int(raw_entry["crop_numel"]),
