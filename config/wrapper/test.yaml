@@ -15,6 +15,5 @@ testing:
 
 logging:
   params:
-    run_name: null  # auto-generate unique name to avoid deleted-run collision
     tags:
       job_type: test
