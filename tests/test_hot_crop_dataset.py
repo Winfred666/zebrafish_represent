@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,63 +9,73 @@ from pathlib import Path
 import numpy as np
 import tifffile
 import torch
+from torch.utils.data import DataLoader
 
 from utils.dataset.crop_volume import CropTifVolumeHotDataset
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
 
-def _build_dummy_cache(data_dir: Path, params: dict) -> None:
-    """Build minimal .pt cache files so the dataset can eager-load."""
+def _build_dummy_cache_bundle(data_dir: Path, params: dict) -> None:
+    """Build a minimal mmap-ready cache bundle for the dataset tests."""
     config = CropTifVolumeHotDatasetParams.model_validate(params)
-    # Use a partial dataset instance just for file discovery and cache paths.
-    ds = CropTifVolumeHotDataset.__new__(CropTifVolumeHotDataset)
-    ds.CACHE_VERSION = CropTifVolumeHotDataset.CACHE_VERSION
-    ds.config = config
-    ds.normalize = bool(config.normalize)
-    ds.clip_percentile = config.clip_percentile
-    ds.in_channels = int(config.in_channels)
-    ds.crop_size = config.crop_size
-    ds.overlap = config.overlap
-    ds.scale_factor = config.scale_factor
-    ds.pad_to_multiple = config.pad_to_multiple
-    ds.patch_grid_multiple = config.patch_grid_multiple
-    ds.data_dir = Path(config.data_dir)
-    ds.cache_root = Path(config.cache_root) if getattr(config, "cache_root", None) else None
-    ds._file_paths = ds._discover_files()
-    ds.file_count = len(ds._file_paths)
+    ds = CropTifVolumeHotDataset.build_stub(config)
 
     cache_dir = ds._crop_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # For a 2-page TIFF with shape (2, 4, 2) at scale=1 and crop=(2,2,2):
-    # the downsampled shape is (2, 4, 2), padded to (2, 4, 2).
-    # Grid starts: D=[0], H=[0,2], W=[0] → 2 crops of (1, 2, 2, 2).
-    cs = config.crop_size  # (2, 2, 2) in tests
+    total_crops = 0
+    total_crop_elements = 0
+    volume_entries: list[dict[str, object]] = []
+    crop_chunks: list[np.ndarray] = []
+    starts_chunks: list[np.ndarray] = []
+    full_sizes_chunks: list[np.ndarray] = []
+
+    crop_size = config.crop_size
     for vol_idx in range(ds.file_count):
-        # Use a known simple grid: 2 crops at D=0, H=0 and H=2, W=0
-        full_size = (config.in_channels, 2, 4, 2)
-        starts = [(0, 0, 0), (0, 2, 0)] if cs == (2, 2, 2) else [(0, 0, 0)]
-        # For larger crop sizes, grid has 1 crop
-        if cs is not None and cs[0] > 2:
+        full_size = np.asarray((config.in_channels, 2, 4, 2), dtype=np.int64)
+        starts = [(0, 0, 0), (0, 2, 0)] if crop_size == (2, 2, 2) else [(0, 0, 0)]
+        if crop_size is not None and crop_size[0] > 2:
             starts = [(0, 0, 0)]
-        n_crops = len(starts)
-        crop_shape = (config.in_channels, *cs) if cs else full_size
-        crops = torch.zeros(n_crops, *crop_shape)
-        crops.fill_(-1.0)
-        payload = {
-            "version": ds.CACHE_VERSION,
-            "fusion_id": int(vol_idx),
+        crop_shape = (config.in_channels, *crop_size) if crop_size else tuple(full_size.tolist())
+        crops = np.full((len(starts), *crop_shape), fill_value=-1.0, dtype=np.float32)
+        starts_array = np.asarray(starts, dtype=np.int64)
+        crop_numel = int(np.prod(crop_shape, dtype=np.int64))
+
+        crop_chunks.append(crops)
+        starts_chunks.append(starts_array)
+        full_sizes_chunks.append(full_size)
+        volume_entries.append({
+            "fusion_id": vol_idx,
             "file_name": ds._file_paths[vol_idx].name,
-            "full_size": torch.tensor(full_size, dtype=torch.long),
-            "starts": torch.tensor(starts, dtype=torch.long),
-            "crops": crops,
-        }
-        torch.save(payload, ds._cache_path_for_volume(vol_idx))
+            "crop_count": int(crops.shape[0]),
+            "crop_shape": list(crop_shape),
+            "crop_numel": crop_numel,
+            "crop_offset": total_crop_elements,
+            "starts_offset": total_crops,
+        })
+        total_crops += int(crops.shape[0])
+        total_crop_elements += int(crops.shape[0]) * crop_numel
+
+    np.concatenate([chunk.reshape(-1) for chunk in crop_chunks]).tofile(ds._crops_path())
+    np.concatenate(starts_chunks, axis=0).tofile(ds._starts_path())
+    np.stack(full_sizes_chunks, axis=0).tofile(ds._full_sizes_path())
+
+    manifest = {
+        "version": ds.CACHE_VERSION,
+        "mode": ds.CACHE_MODE,
+        "cache_key": ds._cache_key(),
+        "selected_files": ds._selected_file_keys(),
+        "file_count": ds.file_count,
+        "total_crops": total_crops,
+        "total_crop_elements": total_crop_elements,
+        "volumes": volume_entries,
+    }
+    ds._manifest_path().write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
 
 class HotCropDatasetTest(unittest.TestCase):
     def _params(self, data_dir: Path, **overrides) -> dict:
-        p = {
+        params = {
             "data_dir": str(data_dir),
             "crop_size": (2, 2, 2),
             "scale_factor": (1.0, 1.0, 1.0),
@@ -71,20 +83,19 @@ class HotCropDatasetTest(unittest.TestCase):
             "clip_percentile": (0.0, 100.0),
             "overlap": (0.0, 0.0, 0.0),
             "in_channels": 1,
+            "cache_root": str(data_dir / "cache_root"),
         }
-        p.update(overrides)
-        return p
+        params.update(overrides)
+        return params
 
     def _make_dataset(self, data_dir: Path, **overrides) -> CropTifVolumeHotDataset:
         params = self._params(data_dir, **overrides)
-        _build_dummy_cache(data_dir, params)
+        _build_dummy_cache_bundle(data_dir, params)
         return CropTifVolumeHotDataset(
             CropTifVolumeHotDatasetParams.model_validate(params)
         )
 
-    # ── basic construction ─────────────────────────────────────────
-
-    def test_eager_cache_load_and_getitem(self) -> None:
+    def test_eager_attach_and_getitem(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
@@ -92,10 +103,12 @@ class HotCropDatasetTest(unittest.TestCase):
 
             self.assertTrue(dataset.cache_complete())
             self.assertGreater(len(dataset), 0)
+            self.assertTrue(dataset._manifest_path().exists())
 
             item = dataset[0]
             self.assertEqual(tuple(item["target"].shape), (1, 2, 2, 2))
             self.assertEqual(item["fusion_id"], 0)
+            self.assertTrue(torch.equal(item["pos_idx"], torch.tensor([0, 0, 0])))
             self.assertIsInstance(item["full_size"], torch.Tensor)
 
     def test_incomplete_cache_raises(self) -> None:
@@ -107,8 +120,6 @@ class HotCropDatasetTest(unittest.TestCase):
                 CropTifVolumeHotDataset(
                     CropTifVolumeHotDatasetParams.model_validate(params)
                 )
-
-    # ── len and item fields ────────────────────────────────────────
 
     def test_len_matches_crop_grid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,8 +137,6 @@ class HotCropDatasetTest(unittest.TestCase):
             for key in ("target", "fusion_id", "pos_idx", "full_size"):
                 self.assertIn(key, item, f"missing key: {key}")
 
-    # ── file discovery ─────────────────────────────────────────────
-
     def test_discover_files_max_files_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -141,8 +150,6 @@ class HotCropDatasetTest(unittest.TestCase):
             files = ds._discover_files()
             self.assertEqual(files, [])
 
-    # ── multiple volumes ───────────────────────────────────────────
-
     def test_multiple_volumes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -153,8 +160,6 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(len(dataset), 4)
             ids = {dataset[i]["fusion_id"] for i in range(len(dataset))}
             self.assertEqual(ids, {0, 1})
-
-    # ── parameter propagation ──────────────────────────────────────
 
     def test_params_propagated_from_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,6 +178,57 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(dataset.overlap, (0.25, 0.25, 0.25))
             self.assertEqual(dataset.in_channels, 1)
             self.assertTrue(dataset.normalize)
+
+    def test_cache_bundle_reused_by_second_dataset_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            params = self._params(data_dir)
+            _build_dummy_cache_bundle(data_dir, params)
+            config = CropTifVolumeHotDatasetParams.model_validate(params)
+
+            dataset_a = CropTifVolumeHotDataset(config)
+            warmed_path = dataset_a._warmed_path()
+            warmed_mtime = warmed_path.stat().st_mtime_ns
+
+            dataset_b = CropTifVolumeHotDataset(config)
+            self.assertEqual(dataset_a._crop_cache_dir(), dataset_b._crop_cache_dir())
+            self.assertEqual(warmed_path.stat().st_mtime_ns, warmed_mtime)
+            self.assertTrue(torch.equal(dataset_a[1]["target"], dataset_b[1]["target"]))
+
+    def test_pickled_dataset_reattaches_shared_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            dataset = self._make_dataset(data_dir)
+
+            restored = pickle.loads(pickle.dumps(dataset))
+            self.assertEqual(len(restored), len(dataset))
+            self.assertTrue(torch.equal(restored[0]["target"], dataset[0]["target"]))
+
+    def test_multi_worker_dataloader_reads_mmap_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "a.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            tifffile.imwrite(data_dir / "b.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            dataset = self._make_dataset(data_dir)
+
+            loader = DataLoader(
+                dataset,
+                batch_size=2,
+                num_workers=2,
+                persistent_workers=True,
+                pin_memory=False,
+            )
+            iterator = iter(loader)
+            try:
+                batch = next(iterator)
+            finally:
+                if hasattr(iterator, "_shutdown_workers"):
+                    iterator._shutdown_workers()
+
+            self.assertEqual(tuple(batch["target"].shape), (2, 1, 2, 2, 2))
+            self.assertEqual(tuple(batch["pos_idx"].shape), (2, 3))
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 |------|-----------|--------|
 | **fusion** | One whole TIF volume (or downsampled) | `utils/dataset/base_volume.py` |
 | **crop** | One fixed-size training sample served from a pre-materialized hot cache — no runtime grid computation or TIFF I/O | `utils/dataset/crop_volume.py` |
-| **hot cache** | Per-volume `.pt` files under `.crop_cache_<hash>/volume_XXXXXX.pt`, built offline by `utils/script/build_hot_cache.py`. The dataset eagerly loads all caches into RAM via a thread pool at init and builds a flat `(vol_idx, local_idx)` index from the payloads. `__getitem__` is a pure in-memory lookup — no disk I/O, no TIFF reading, no metadata scanning. | `utils/dataset/crop_volume.py` |
+| **hot cache** | One mmap-ready bundle under `.crop_cache_<hash>/` with `manifest.json`, `crops.bin`, `starts.bin`, and `full_sizes.bin`, built offline by `utils/script/build_hot_cache.py`. The dataset validates the bundle, warms the mapped files once, and serves read-only shared views so DDP ranks and DataLoader workers attach the same OS-backed pages instead of building per-process Python caches. | `utils/dataset/crop_volume.py` |
 | **patch** | One token that `PRDiT` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/block/encoder.py` |
 
 Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.

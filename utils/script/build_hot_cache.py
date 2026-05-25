@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
-"""Build per-volume hot crop cache ``.pt`` files for a data config.
+"""Build mmap-ready binary hot crop caches for a data config.
 
 Usage::
 
     python utils/script/build_hot_cache.py --data-config config/data/xxs_test.yaml
 
-After this, the dataset directory will contain a ``.crop_cache_<hash>/``
-subdirectory with one ``volume_XXXXXX.pt`` per TIF file, and
-``CropTifVolumeHotDataset`` will eager-load from those caches.
+After this, the cache directory will contain a ``.crop_cache_<hash>/``
+subdirectory with:
+
+- ``manifest.json``
+- ``crops.bin``
+- ``starts.bin``
+- ``full_sizes.bin``
+
+`CropTifVolumeHotDataset` mmaps those files directly during training.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import os
 import sys
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import tifffile
-import torch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -28,7 +38,16 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from utils.dataset.crop_volume import CropTifVolumeHotDataset
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 from utils.runtime_factory import load_yaml_config
-from utils.tif2volume import process_tif_to_array, _try_integer_downscale_factors
+from utils.tif2volume import _try_integer_downscale_factors, process_tif_to_array
+
+
+@dataclass(frozen=True)
+class VolumeCacheArrays:
+    fusion_id: int
+    file_name: str
+    crops: np.ndarray
+    starts: np.ndarray
+    full_size: np.ndarray
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -262,7 +281,7 @@ def _materialize_one_volume(
     ds: CropTifVolumeHotDataset,
     vol_idx: int,
     all_starts: list[tuple[int, int, int]],
-) -> None:
+) -> VolumeCacheArrays:
     file_path = ds._file_paths[vol_idx]
     print(f"  [{vol_idx:04d}] {file_path.name} ...")
 
@@ -288,7 +307,7 @@ def _materialize_one_volume(
     )
 
     # ── extract & filter crops ──
-    kept_crops: list[torch.Tensor] = []
+    kept_crops: list[np.ndarray] = []
     kept_starts: list[tuple[int, int, int]] = []
     empty_count = 0
     for start_d, start_h, start_w in all_starts:
@@ -296,7 +315,7 @@ def _materialize_one_volume(
         if ds.normalize and not np.any(crop_np > -0.999):
             empty_count += 1
             continue
-        kept_crops.append(torch.from_numpy(crop_np.copy()))
+        kept_crops.append(crop_np.copy())
         kept_starts.append((start_d, start_h, start_w))
 
     if empty_count:
@@ -306,27 +325,165 @@ def _materialize_one_volume(
     if not kept_crops:
         raise ValueError(f"All {len(all_starts)} crops are empty for {file_path.name}")
 
-    crop_tensor = torch.stack(kept_crops, dim=0)
-    actual_shape = tuple(volume.shape)
-
-    payload: dict = {
-        "version": ds.CACHE_VERSION,
-        "fusion_id": int(vol_idx),
-        "file_name": file_path.name,
-        "full_size": torch.tensor(actual_shape, dtype=torch.long),
-        "starts": torch.tensor(kept_starts, dtype=torch.long),
-        "crops": crop_tensor,
-    }
-
-    cache_path = ds._cache_path_for_volume(vol_idx)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_name(
-        f".{cache_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    crop_array = np.stack(kept_crops, axis=0).astype(np.float32, copy=False)
+    starts_array = np.asarray(kept_starts, dtype=np.int64)
+    full_size_array = np.asarray(volume.shape, dtype=np.int64)
+    print(
+        f"    materialized {crop_array.shape[0]} crops "
+        f"({crop_array.nbytes / 1024**2:.1f} MB)"
     )
-    torch.save(payload, tmp_path)
-    os.replace(tmp_path, cache_path)
-    print(f"    saved {cache_path} ({crop_tensor.shape[0]} crops, "
-          f"{(os.path.getsize(cache_path) / 1024**2):.1f} MB)")
+    return VolumeCacheArrays(
+        fusion_id=vol_idx,
+        file_name=file_path.name,
+        crops=crop_array,
+        starts=starts_array,
+        full_size=full_size_array,
+    )
+
+
+@contextmanager
+def _exclusive_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _flush_file(handle) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def write_cache_bundle_from_volumes(
+    ds: CropTifVolumeHotDataset,
+    volumes: Iterable[VolumeCacheArrays],
+) -> None:
+    cache_dir = ds._crop_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir.parent / f".{cache_dir.name}.build.lock"
+
+    with _exclusive_lock(lock_path):
+        if ds.cache_complete():
+            manifest = ds._load_manifest()
+            print(
+                f"  cache bundle ready at {cache_dir} "
+                f"({manifest['total_crops']} crops), skip"
+            )
+            return
+
+        tag = f"{os.getpid()}.{uuid.uuid4().hex}"
+        crops_tmp = cache_dir / f"{ds.CROPS_FILE_NAME}.{tag}.tmp"
+        starts_tmp = cache_dir / f"{ds.STARTS_FILE_NAME}.{tag}.tmp"
+        full_sizes_tmp = cache_dir / f"{ds.FULL_SIZES_FILE_NAME}.{tag}.tmp"
+        manifest_tmp = cache_dir / f"{ds.MANIFEST_FILE_NAME}.{tag}.tmp"
+
+        total_crops = 0
+        total_crop_elements = 0
+        volume_entries: list[dict[str, object]] = []
+
+        try:
+            with (
+                crops_tmp.open("wb") as crops_handle,
+                starts_tmp.open("wb") as starts_handle,
+                full_sizes_tmp.open("wb") as full_sizes_handle,
+            ):
+                for vol_idx, volume_arrays in enumerate(volumes):
+                    crop_array = volume_arrays.crops
+                    starts_array = volume_arrays.starts
+                    full_size_array = volume_arrays.full_size
+                    crop_count = int(crop_array.shape[0])
+                    crop_shape = tuple(int(dim) for dim in crop_array.shape[1:])
+                    crop_numel = int(np.prod(crop_shape, dtype=np.int64))
+
+                    if crop_count <= 0:
+                        raise ValueError(f"Volume {vol_idx} has no crops to write")
+                    if starts_array.shape != (crop_count, 3):
+                        raise ValueError(
+                            f"Volume {vol_idx} has invalid starts shape {starts_array.shape}"
+                        )
+                    if full_size_array.shape != (4,):
+                        raise ValueError(
+                            f"Volume {vol_idx} has invalid full_size shape {full_size_array.shape}"
+                        )
+
+                    crop_array.tofile(crops_handle)
+                    starts_array.tofile(starts_handle)
+                    full_size_array.tofile(full_sizes_handle)
+
+                    volume_entries.append({
+                        "fusion_id": int(volume_arrays.fusion_id),
+                        "file_name": volume_arrays.file_name,
+                        "crop_count": crop_count,
+                        "crop_shape": list(crop_shape),
+                        "crop_numel": crop_numel,
+                        "crop_offset": total_crop_elements,
+                        "starts_offset": total_crops,
+                    })
+                    total_crops += crop_count
+                    total_crop_elements += crop_count * crop_numel
+
+                _flush_file(crops_handle)
+                _flush_file(starts_handle)
+                _flush_file(full_sizes_handle)
+
+            if len(volume_entries) != ds.file_count:
+                raise ValueError(
+                    f"Expected {ds.file_count} volumes, wrote {len(volume_entries)}"
+                )
+
+            manifest = {
+                "version": ds.CACHE_VERSION,
+                "mode": ds.CACHE_MODE,
+                "cache_key": ds._cache_key(),
+                "selected_files": ds._selected_file_keys(),
+                "file_count": ds.file_count,
+                "total_crops": total_crops,
+                "total_crop_elements": total_crop_elements,
+                "volumes": volume_entries,
+            }
+            manifest_tmp.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            os.replace(crops_tmp, ds._crops_path())
+            os.replace(starts_tmp, ds._starts_path())
+            os.replace(full_sizes_tmp, ds._full_sizes_path())
+            os.replace(manifest_tmp, ds._manifest_path())
+            if ds._warmed_path().exists():
+                ds._warmed_path().unlink()
+
+            bundle_bytes = (
+                ds._crops_path().stat().st_size
+                + ds._starts_path().stat().st_size
+                + ds._full_sizes_path().stat().st_size
+            )
+            print(
+                f"  wrote {cache_dir} ({total_crops} crops, "
+                f"{bundle_bytes / 1024**3:.2f} GiB)"
+            )
+        finally:
+            for tmp_path in (crops_tmp, starts_tmp, full_sizes_tmp, manifest_tmp):
+                if tmp_path.exists():
+                    tmp_path.unlink()
+
+
+def _write_cache_bundle(
+    ds: CropTifVolumeHotDataset,
+    starts_list: list[list[tuple[int, int, int]]],
+) -> None:
+    def _iter_volumes():
+        for vol_idx in range(ds.file_count):
+            yield _materialize_one_volume(
+                ds=ds,
+                vol_idx=vol_idx,
+                all_starts=starts_list[vol_idx],
+            )
+
+    write_cache_bundle_from_volumes(ds, _iter_volumes())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -340,29 +497,14 @@ def build_cache_for_config(data_config_path: str) -> None:
         section = config_dict.get(section_key, {})
         if not section:
             continue
-        params = CropTifVolumeHotDatasetParams.model_validate(
-            {**section.get("params", {}), "class_name": section.get("class_name", "CropTifVolumeHotDataset")}
-        )
+        params = CropTifVolumeHotDatasetParams.model_validate(section.get("params", {}))
 
         print(f"\nBuilding cache for {section_key}: {params.data_dir}")
 
-        ds = CropTifVolumeHotDataset.__new__(CropTifVolumeHotDataset)
-        ds.config = params
-        ds.normalize = bool(params.normalize)
-        ds.clip_percentile = params.clip_percentile
-        ds.in_channels = int(params.in_channels)
-        ds.crop_size = params.crop_size
-        ds.overlap = params.overlap
-        ds.scale_factor = params.scale_factor
-        ds.pad_to_multiple = params.pad_to_multiple
-        ds.patch_grid_multiple = params.patch_grid_multiple
-        ds.data_dir = Path(params.data_dir)
-        ds.cache_root = Path(params.cache_root) if getattr(params, "cache_root", None) else None
-        ds._file_paths = ds._discover_files()
-        ds.file_count = len(ds._file_paths)
+        ds = CropTifVolumeHotDataset.build_stub(params)
 
         if ds.file_count == 0:
-            print(f"  No files found, skipping.")
+            print("  No files found, skipping.")
             continue
 
         vol_shapes, ds._file_paths = _scan_volume_shapes(
@@ -375,16 +517,12 @@ def build_cache_for_config(data_config_path: str) -> None:
             vol_shapes, ds.crop_size, ds.overlap, ds.patch_grid_multiple,
         )
 
-        built = 0
-        for vol_idx in range(ds.file_count):
-            cache_path = ds._cache_path_for_volume(vol_idx)
-            if cache_path.exists():
-                print(f"  [{vol_idx:04d}] {ds._file_paths[vol_idx].name} -- cached, skip")
-                continue
-            _materialize_one_volume(ds=ds, vol_idx=vol_idx, all_starts=starts_list[vol_idx])
-            built += 1
-
-        print(f"  {section_key}: {built} new, {ds.file_count - built} already cached")
+        _write_cache_bundle(ds, starts_list)
+        manifest = ds._load_manifest()
+        print(
+            f"  {section_key}: {manifest['total_crops']} crops across "
+            f"{manifest['file_count']} volumes"
+        )
 
     print("\nDone.")
 

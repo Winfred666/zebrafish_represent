@@ -15,6 +15,7 @@ train_dataset:
     # stretch the value range. Applied before scaling to [0, 1].
     clip_percentile: [1.0, 99.0]
     pad_to_multiple: null
+    cache_root: /tmp/zebrafish_hot_mmap
 
 train_dataloader:
   class_name: DataLoader
@@ -24,7 +25,7 @@ train_dataloader:
     num_workers: 2
     shuffle: true
     pin_memory: true
-    persistent_workers: false
+    persistent_workers: true
 
 val_dataset:
   class_name: CropTifVolumeHotDataset
@@ -39,6 +40,7 @@ val_dataset:
     normalize: true
     clip_percentile: [1.0, 99.0]
     pad_to_multiple: null
+    cache_root: /tmp/zebrafish_hot_mmap
 
 val_dataloader:
   class_name: DataLoader
@@ -48,4 +50,4 @@ val_dataloader:
     num_workers: 2
     shuffle: false
     pin_memory: true
-    persistent_workers: false
+    persistent_workers: true
