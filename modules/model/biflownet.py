@@ -153,7 +153,6 @@ class BiFlowNet(BaseVolumeModel):
         cond_classes: int | None = None,
         res_condition: bool = True,
         learn_sigma: bool = False,
-        **kwargs,
     ):
         super().__init__()
         self.in_channels = int(in_channels)

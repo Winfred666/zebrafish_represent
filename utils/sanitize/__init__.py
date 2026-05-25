@@ -17,6 +17,7 @@ from utils.sanitize.framework_config import (
     VICRegModuleParams,
 )
 from utils.sanitize.model_config import (
+    BiFlowNetParams,
     DiT3DParams,
     MedicalNetEncoderParams,
     PRDiTParams,
@@ -39,6 +40,7 @@ __all__ = [
     "IngestibleParams",
     "CropTifVolumeHotDatasetParams",
     "DataLoaderParams",
+    "BiFlowNetParams",
     "DiT3DParams",
     "MedicalNetEncoderParams",
     "PRDiTParams",
