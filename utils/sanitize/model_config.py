@@ -103,3 +103,36 @@ class VQVAEParams(IngestibleParams):
     no_random_restart: bool = False
     restart_thres: float = Field(default=1.0, gt=0.0)
     patch_size: int = Field(default=64, ge=1)
+
+
+class BiFlowNetParams(IngestibleParams):
+    """Params for the BiFlowNet dual-path diffusion model."""
+
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=1, ge=1)
+    input_size: tuple[int, int, int]
+    dim: int = Field(default=64, ge=1)
+    dim_mults: tuple[int, ...] = (1, 1, 2, 4, 8)
+    sub_volume_size: tuple[int, int, int] = (8, 8, 8)
+    patch_size: int = Field(default=2, ge=1)
+    attn_heads: int = Field(default=8, ge=1)
+    init_dim: int | None = None
+    init_kernel_size: int = 3
+    use_sparse_linear_attn: tuple[int, ...] = (0, 0, 0, 1, 1)
+    resnet_groups: int = Field(default=24, ge=1)
+    dit_num_heads: int = Field(default=8, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0)
+    num_mid_dit: int = Field(default=1, ge=0)
+    cond_classes: int | None = None
+    res_condition: bool = True
+    learn_sigma: bool = False
+
+    @model_validator(mode="after")
+    def _validate_sub_volume(self) -> "BiFlowNetParams":
+        for axis, (in_sz, sub_sz) in enumerate(zip(self.input_size, self.sub_volume_size), start=1):
+            if in_sz % sub_sz != 0:
+                raise ValueError(
+                    f"input_size must be divisible by sub_volume_size. "
+                    f"Axis={axis}, input={in_sz}, sub_volume={sub_sz}"
+                )
+        return self
