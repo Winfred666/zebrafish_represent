@@ -200,7 +200,10 @@ def train(
         print(f"[TEST] sample generation took {gen_elapsed:.1f}s "
               f"({num_samples} samples, {sample_steps} steps)")
 
-        framework_module.log_sample_slices(samples, tag="test_sample")
+        try:
+            framework_module.log_sample_slices(samples, tag="test_sample")
+        except Exception as exc:
+            print(f"WARNING: log_sample_slices failed: {exc}", flush=True)
 
         # Compute FID / MMD / MS-SSIM against the full validation set once.
         val_dataset = runtime.objects.get("val_dataset")
@@ -219,10 +222,11 @@ def train(
             ref_elapsed = t2 - t1
             print(f"[TEST] reference collection + metrics took {ref_elapsed:.1f}s")
             print(f"[TEST] total test phase took {total_elapsed:.1f}s")
-            runtime.logger.log_metrics(
-                {"test_sample_gen_time": float(gen_elapsed)}, step=0,
-            )
-        else:
+            if runtime.logger is not None:
+                runtime.logger.log_metrics(
+                    {"test_sample_gen_time": float(gen_elapsed)}, step=0,
+                )
+        elif runtime.logger is not None:
             runtime.logger.log_metrics(
                 {"test_sample_gen_time": float(gen_elapsed)}, step=0,
             )
