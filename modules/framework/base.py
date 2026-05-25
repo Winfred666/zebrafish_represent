@@ -29,7 +29,7 @@ def _build_pos_idx(D: int, H: int, W: int, device: torch.device) -> torch.Tensor
     )
     return coords.reshape(-1, 3)
 
-
+# This is generative Training framework, not representative.
 class BaseTrainingFramework(L.LightningModule, ABC):
     """Shared training infrastructure.
 

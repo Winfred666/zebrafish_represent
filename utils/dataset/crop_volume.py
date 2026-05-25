@@ -142,21 +142,20 @@ class CropTifVolumeHotDataset(Dataset):
         return self._crop_cache_dir() / f"volume_{vol_idx:06d}.pt"
 
     def cache_complete(self) -> bool:
-        return bool(self._file_paths) and all(
+        if not self._file_paths:
+            return True  # max_files=0 → trivially complete
+        return all(
             self._cache_path_for_volume(vol_idx).exists()
             for vol_idx in range(self.file_count)
         )
-
-    def requires_single_process_cache_build(self) -> bool:
-        return False
-
-    def requires_single_process_loading(self) -> bool:
-        return False
 
     # ── eager preload ─────────────────────────────────────────────
 
     def _eager_preload_volume_caches(self, max_workers: int = 8) -> None:
         """Load every ``.pt`` cache into RAM via thread pool."""
+        if self.file_count == 0:
+            print("[TIF-LOG] Eager-preloaded 0/0 volume crop caches into RAM")
+            return
 
         def _load_one(vol_idx: int):
             path = self._cache_path_for_volume(vol_idx)

@@ -108,14 +108,6 @@ class HotCropDatasetTest(unittest.TestCase):
                     CropTifVolumeHotDatasetParams.model_validate(params)
                 )
 
-    def test_requires_single_process_returns_false(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp)
-            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
-            dataset = self._make_dataset(data_dir)
-            self.assertFalse(dataset.requires_single_process_cache_build())
-            self.assertFalse(dataset.requires_single_process_loading())
-
     # ── len and item fields ────────────────────────────────────────
 
     def test_len_matches_crop_grid(self) -> None:

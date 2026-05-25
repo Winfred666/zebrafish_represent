@@ -61,9 +61,9 @@ def _get_feature_extractor(device: str = "cuda",
                            checkpoint_path: str | None = None) -> _FeatureExtractor:
     global _FEATURE_EXTRACTOR
     if _FEATURE_EXTRACTOR is None:
-        # pretrained=False (default): MedicalNet CT/MRI/PET weights produce
-        # feature collapse on zebrafish microscopy.  Pass a fine-tuned
-        # checkpoint_path after running medical_net_finetune.py.
+        # pretrained=True when no checkpoint is supplied: MedicalNet CT/MRI/PET
+        # weights can collapse on zebrafish microscopy, so prefer a fine-tuned
+        # checkpoint_path from medical_net_finetune.py when available.
         _FEATURE_EXTRACTOR = _FeatureExtractor(device=device, checkpoint_path=checkpoint_path)
     return _FEATURE_EXTRACTOR
 

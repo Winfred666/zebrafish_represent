@@ -27,75 +27,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _dataset_requires_single_process_cache_build(dataset: object) -> bool:
-    checker = getattr(dataset, "requires_single_process_cache_build", None)
-    return callable(checker) and bool(checker())
-
-
-def _dataset_requires_single_process_loading(dataset: object) -> bool:
-    checker = getattr(dataset, "requires_single_process_loading", None)
-    return callable(checker) and bool(checker())
-
-
-def _rebuild_dataloader_with_zero_workers(
-    loader: DataLoader,
-    params: dict,
-) -> DataLoader:
-    """Rebuild a configured DataLoader for deterministic hot-cache access."""
-    dataloader_kwargs = {
-        "dataset": loader.dataset,
-        "batch_size": params.get("batch_size", loader.batch_size),
-        "shuffle": bool(params.get("shuffle", False)),
-        "num_workers": 0,
-        "prefetch_factor": None,
-        "pin_memory": bool(params.get("pin_memory", loader.pin_memory)),
-        "persistent_workers": False,
-        "collate_fn": loader.collate_fn,
-        "drop_last": bool(params.get("drop_last", getattr(loader, "drop_last", False))),
-        "timeout": getattr(loader, "timeout", 0),
-        "worker_init_fn": getattr(loader, "worker_init_fn", None),
-        "generator": getattr(loader, "generator", None),
-    }
-    return DataLoader(**dataloader_kwargs)
-
-
-def _apply_hot_cache_dataloader_override(runtime) -> list[str]:
-    """Force num_workers=0 for hot crop cache build/read paths.
-
-    The steady-state dataloader config stays in YAML.  This runtime-only
-    override avoids worker-process cache races during first cache materialization
-    and worker-process stalls on multi-GB cache payload reads.
-    """
-    changed: list[str] = []
-    for object_key, config_key in (
-        ("train_dataloader", "train_dataloader"),
-        ("val_dataloader", "val_dataloader"),
-    ):
-        loader = runtime.objects.get(object_key)
-        if loader is None:
-            continue
-        dataset = getattr(loader, "dataset", None)
-        if not (
-            _dataset_requires_single_process_cache_build(dataset)
-            or _dataset_requires_single_process_loading(dataset)
-        ):
-            continue
-        if int(getattr(loader, "num_workers", 0)) == 0:
-            continue
-        params = (
-            runtime.runtime_config
-            .get(config_key, {})
-            .get("params", {})
-        )
-        runtime.objects[object_key] = _rebuild_dataloader_with_zero_workers(loader, params)
-        changed.append(object_key)
-    if changed:
-        print(
-            "[HOT-CACHE] Overriding "
-            f"{', '.join(changed)} num_workers=0 for this run."
-        )
-    return changed
-
 
 def _flatten_dict(d: dict, prefix: str = "") -> dict[str, str]:
     """Recursively flatten nested dicts with dot-separated keys."""
@@ -137,8 +68,6 @@ def _upload_checkpoints(runtime) -> None:
 
 def _log_config_params(logger, config: dict) -> None:
     """Flatten the merged runtime config into MLflow run parameters."""
-    import mlflow
-
     params: dict[str, str] = {}
     for section_key, section_val in config.items():
         if isinstance(section_val, dict):
@@ -148,7 +77,7 @@ def _log_config_params(logger, config: dict) -> None:
             if len(val) > 500:
                 val = val[:497] + "..."
             params[section_key] = val
-    mlflow.log_params(params)
+    logger.log_hyperparams(params)
 
 
 def _log_postfit_sample_metrics(
@@ -211,8 +140,6 @@ def train(
         framework_config_path=framework_config_path,
         wrapper_config_path=wrapper_config_path,
     )
-    _apply_hot_cache_dataloader_override(runtime)
-
     config = runtime.runtime_config
 
     print("Configuration loaded")
@@ -274,7 +201,7 @@ def train(
 
         # Compute FID / MMD / MS-SSIM against the full validation set once.
         val_dataset = runtime.objects.get("val_dataset")
-        if val_dataset is not None:
+        if val_dataset is not None and len(val_dataset) > 0:
             reference_crops: list[torch.Tensor] = []
             for idx in range(len(val_dataset)):
                 reference_crops.append(val_dataset[idx]["target"])

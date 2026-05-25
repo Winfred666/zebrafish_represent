@@ -11,6 +11,6 @@ framework:
       timestep_respacing: null
       gen_noise_weight: 0.001
     mae:
-      mask_ratio: 0.5
+      mask_ratio: 0.3
       foreground_weight: 10.0
       foreground_percentile: 85.0

@@ -1,5 +1,7 @@
 import_config: base.yaml
 
+resume_ckpt_path: /tmp/mlflow_checkpoints/last-v8.ckpt
+
 trainer:
   params:
     max_epochs: 10

@@ -56,6 +56,10 @@ Lightning detects `LOCAL_RANK` set by torchrun and uses the configured DDP strat
 automatically — no code changes needed in `driver.py`. Always set
 `CUDA_VISIBLE_DEVICES` explicitly to avoid cross-job GPU contention.
 
+**gpu07 (Blackwell B200) does not support DDP.** NCCL hangs on Blackwell GPUs with
+the current CUDA driver. All training on gpu07 must use single-GPU (`--nproc_per_node=1`,
+`devices=1`). Multi-GPU DDP is only available on gpu04/gpu05 (RTX 3090/4090).
+
 ## Python Binary to use
 
 - **gpu07**: `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python`
@@ -106,14 +110,6 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 
 Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.
 
-### Single-Process Dataset Protocol
-
-Datasets with worker-hostile I/O patterns (cache materialization races or multi-GB serialized payload stalls) signal to `driver.py` via boolean methods on the dataset instance:
-
-- `requires_single_process_cache_build()` — force `num_workers=0` while per-volume caches are still being created
-- `requires_single_process_loading()` — force `num_workers=0` when worker processes stall on large cache payload deserialization
-
-The driver checks these at startup and overrides the dataloader config for that run only. The steady-state YAML config is never modified.
 
 ## Data and Tensor Conventions
 
@@ -150,7 +146,8 @@ The driver checks these at startup and overrides the dataloader config for that 
 
 Smoke run (adjust Python binary per node — see Python Binary section above):
 ```
-/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python driver.py \
+export CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1
+python -m torch.distributed.run --nproc_per_node=1 driver.py \
   --data-config config/data/base_0125.yaml \
   --model-config config/model/base.yaml \
   --framework-config config/framework/base.yaml \

@@ -9,7 +9,7 @@ train_dataset:
 
 train_dataloader:
   params:
-    batch_size: 8 # 8 bs per device, 32 total for 4 devices.
+    batch_size: 96
     shuffle: false
 
 val_dataset:
