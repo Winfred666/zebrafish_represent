@@ -1,0 +1,15 @@
+# VQ-VAE Stage 2 framework config (decoder fine-tuning).
+# Usage: --framework-config config/framework/vq_vae_s2.yaml
+framework:
+  class_name: VQVAES2Module
+  params:
+    model: runtime.model
+    lr: 0.0001
+    l1_weight: 1.0
+    perceptual_weight: 1.0
+    volume_gan_weight: 0.1
+    gan_feat_weight: 1.0
+    discriminator_iter_start: 30000
+    disc_loss_type: "vanilla"
+    disc_channels: 64
+    disc_layers: 3

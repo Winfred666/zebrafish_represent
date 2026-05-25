@@ -1,0 +1,15 @@
+# VQ-VAE model configuration.
+# Usage: --model-config config/model/vqvae.yaml
+model:
+  class_name: VQVAE
+  params:
+    n_hiddens: 64
+    downsample: [8, 8, 8]
+    image_channel: 1
+    embedding_dim: 8
+    n_codes: 512
+    norm_type: "group"
+    num_groups: 32
+    no_random_restart: false
+    restart_thres: 1.0
+    patch_size: 64
