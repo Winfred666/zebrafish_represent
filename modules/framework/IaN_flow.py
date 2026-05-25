@@ -95,6 +95,11 @@ class IaNFlowModule(BaseTrainingFramework):
         t_tensor = torch.full((batch_size,), t_val, device=noisy.device)
         prediction = self(noisy, t_tensor * self.optimization.sample_steps)
         eps_recon, img_recon = prediction.chunk(2, dim=1)
+        # WARNING: Clamp image component to [-1, 1] at each step to prevent
+        # out-of-distribution drift.  The model was trained on [-1, 1]
+        # data and cannot correct values outside this range, so errors
+        # compound across steps without clamping.
+        img_recon = img_recon.clamp(-1.0, 1.0)
 
         if next_timestep < 0:
             return img_recon
