@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from utils.sanitize.param_class import IngestibleParams
 
@@ -136,3 +136,10 @@ class BiFlowNetParams(IngestibleParams):
                     f"Axis={axis}, input={in_sz}, sub_volume={sub_sz}"
                 )
         return self
+
+    @field_validator("init_kernel_size")
+    @classmethod
+    def _validate_init_kernel_size(cls, v: int) -> int:
+        if v % 2 != 1:
+            raise ValueError(f"init_kernel_size must be odd, got {v}")
+        return v

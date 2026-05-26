@@ -15,12 +15,15 @@ from utils.sanitize.framework_config import (
     RectifiedFlowModuleParams,
     TestingParams,
     VICRegModuleParams,
+    VQVAES1ModuleParams,
+    VQVAES2ModuleParams,
 )
 from utils.sanitize.model_config import (
     BiFlowNetParams,
     DiT3DParams,
     MedicalNetEncoderParams,
     PRDiTParams,
+    VQVAEParams,
 )
 from utils.sanitize.param_class import IngestibleParams
 from utils.sanitize.wrapper_config import (
@@ -52,6 +55,9 @@ __all__ = [
     "MAEParams",
     "RectifiedFlowModuleParams",
     "VICRegModuleParams",
+    "VQVAEParams",
+    "VQVAES1ModuleParams",
+    "VQVAES2ModuleParams",
     "DDPMModuleParams",
     "MLFlowLoggerParams",
     "ModelCheckpointParams",

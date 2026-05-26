@@ -32,10 +32,6 @@ from modules.model.base import BaseVolumeModel
 # helpers (ported from reference BiFlowNet.py)
 # ---------------------------------------------------------------------------
 
-def _is_odd(n: int) -> bool:
-    return (n % 2) == 1
-
-
 def _default(val, d):
     if val is not None:
         return val
@@ -164,7 +160,6 @@ class BiFlowNet(BaseVolumeModel):
         out_dim = 2 * out_channels if learn_sigma else out_channels
         self.dim = dim
         init_dim = _default(init_dim, dim)
-        assert _is_odd(init_kernel_size)
 
         init_padding = init_kernel_size // 2
         self.init_conv = nn.Conv3d(
