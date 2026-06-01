@@ -1,0 +1,10 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    accelerator: gpu
+    devices: 4
+
+logging:
+  params:
+    experiment_name: medical_resnet_ft

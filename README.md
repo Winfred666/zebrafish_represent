@@ -60,12 +60,7 @@ Training writes metrics and artifacts to MLflow. Start the tracking server befor
 No external services required — SQLite metadata + local file artifacts:
 
 ```bash
-uv run mlflow server \
-  --backend-store-uri sqlite:///result/mlflow/mlflow.db \
-  --host 0.0.0.0 \
-  --port 5000 \
-  --serve-artifacts \
-  --artifacts-destination result/mlflow/artifacts
+uv run python -c from utils.mlflow_setup import serve; serve()
 ```
 
 Dashboard: `http://<server-ip>:5000`
@@ -158,11 +153,16 @@ If `logging.tracking_uri` is not set, the default local backend is under `result
 - `driver.py`: training entrypoint and split-config orchestration
 - `modules/model/dit3d.py`: 3D DiT backbone
 - `modules/model/prdit.py`: PRDiT local denoiser model
+- `modules/model/biflownet.py`: BiFlowNet dual-path UNet diffusion model
+- `modules/block/unet.py`: 3D CNN UNet building blocks
 - `modules/framework/rect_flow.py`: rectified flow training
 - `modules/framework/ddpm.py`: DDPM training
 - `modules/framework/IaN_flow.py`: IaN flow training
+- `modules/framework/vic_reg.py`: VICReg self-supervised finetuning
+- `modules/framework/mae.py`: MAE masked-autoencoder finetuning
 - `utils/sanitize/runtime_factory.py`: shared runtime builders
 - `utils/sanitize/param_class.py`: typed params injected into datasets/modules
 - `utils/dataset/`: TIF volume dataset + hot cache
 - `utils/display/`: MLflow artifact and visualization helpers
+- `utils/eval/`: sample quality metrics (FID, MMD, MS-SSIM)
 ```

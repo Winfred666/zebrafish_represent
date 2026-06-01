@@ -15,6 +15,7 @@ import pytorch_lightning as L
 
 from modules.block.discriminator import NLayerDiscriminator3D
 from modules.framework.vq_vae_common import (
+    MedicalNetPerceptualLoss,
     feature_matching_loss,
     generator_gan_loss,
     hinge_d_loss,
@@ -62,8 +63,7 @@ class VQVAES1Module(L.LightningModule):
             input_nc=1, ndf=disc_channels, n_layers=disc_layers,
         )
 
-        # perceptual loss - use L1 in pixel space as simple perceptual proxy
-        self.perceptual_loss_fn = lambda x, y: F.l1_loss(x, y)
+        self.perceptual_loss_fn = MedicalNetPerceptualLoss()
 
         # select disc loss
         if disc_loss_type == "hinge":

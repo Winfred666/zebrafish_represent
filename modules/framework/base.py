@@ -45,8 +45,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     _noise_w: float
 
     # ── fusion validation protocol ───────────────────────────────
-    FUSION_T_KEYS = ["t005", "t025", "t050", "t075", "t095"]
-    FUSION_T_VALS = [0.05, 0.25, 0.5, 0.75, 0.95]
+    FUSION_T_KEYS = ("t100",)
+    FUSION_T_VALS = (1.0,)
+    FUSION_NUMBER = 8
+    FUSION_SLICE_NUMBER = 8
 
     def __init__(self, config: BaseFrameworkParams):
         super().__init__()
@@ -58,7 +60,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
 
         # ── fusion validation state ──────────────────────────────
-        # 3 hard-fixed fusions: val_fusions_clean[i] = list of clean crop dicts
+        # FUSION_NUMBER hard-fixed fusions: val_fusions_clean[i] = list of clean crop dicts
         # val_fusions_noised[i][t_key] = list of noisy crop dicts at that t-level
         self.val_fusions_clean: list[list] = []
         self.val_fusions_noised: list[dict[str, list]] = []
@@ -179,16 +181,17 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             weight_decay=self.optimization.weight_decay,
             betas=(0.9, 0.95),
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            T_max=self.trainer.max_epochs,
-            eta_min=1e-7,
+            start_factor=1e-6,
+            end_factor=1.0,
+            total_iters=500,
         )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "epoch",
+                "interval": "step",
                 "frequency": 1,
             },
         }
@@ -217,7 +220,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── fusion validation (crop-based datasets) ──────────────────
 
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
-        """On the first validation epoch, build the noisy-crop bank for fusions 0–2.
+        """On the first validation epoch, build the noisy-crop bank for all fusions.
 
         Only triggers when the batch carries ``fusion_id`` and ``pos_idx``
         (i.e. from :class:`CropTifVolumeHotDataset`).
@@ -229,12 +232,12 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
         if not self.val_fusions_noised:
             self.val_fusions_noised = [
-                {k: [] for k in self.FUSION_T_KEYS} for _ in range(3)
+                {k: [] for k in self.FUSION_T_KEYS} for _ in range(self.FUSION_NUMBER)
             ]
-            self.val_fusions_clean = [[] for _ in range(3)]
+            self.val_fusions_clean = [[] for _ in range(self.FUSION_NUMBER)]
             self._fusion_collecting = True
 
-        for fusion_idx in range(3):
+        for fusion_idx in range(self.FUSION_NUMBER):
             fusion_mask = batch["fusion_id"] == fusion_idx
             if not fusion_mask.any():
                 continue
@@ -301,7 +304,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
-        """Denoise, fuse, log MSE + vstacked mid_w panels for 3 fusions."""
+        """Denoise, fuse, log MSE + matrix panels (rows=w-slices, cols=fusions)."""
         import torch.distributed as dist
 
         if not self.val_fusions_clean or not self.val_fusions_noised:
@@ -322,7 +325,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
             mse_sum = 0.0
-            panels: list[np.ndarray] = []
+            fusion_slice_panels: list[list[np.ndarray]] = []
 
             for fi in range(n_fusions):
                 clean_crops = all_clean[fi]
@@ -378,14 +381,21 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
-                # mid_w slice panel
+                # FUSION_SLICE_NUMBER w-slices per fusion
                 if should_log:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
-                    mid_w = c0.shape[2] // 2
-                    panels.append(fix_2d_scalar(
-                        c0[:, :, mid_w], d0[:, :, mid_w], colorbar_limits=(-1.0, 1.0)
-                    ))
+                    w_size = c0.shape[2]
+                    if w_size > self.FUSION_SLICE_NUMBER + 1:
+                        w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
+                    else:
+                        w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER, dtype=int)
+                    slice_panels = []
+                    for wi in w_indices:
+                        slice_panels.append(fix_2d_scalar(
+                            c0[:, :, wi], d0[:, :, wi], colorbar_limits=(-1.0, 1.0)
+                        ))
+                    fusion_slice_panels.append(slice_panels)
 
             if is_rank0:
                 self.log(
@@ -397,9 +407,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     rank_zero_only=True,
                 )
 
-            if panels and should_log:
+            if fusion_slice_panels and should_log:
+                # Build matrix: rows = w-slices, columns = fusions
+                n_slices = len(fusion_slice_panels[0])
+                matrix_rows = []
+                for si in range(n_slices):
+                    row_panels = [fusion_slice_panels[fi][si] for fi in range(len(fusion_slice_panels))]
+                    matrix_rows.append(np.hstack(row_panels))
                 log_image_artifact(
-                    self.logger, np.vstack(panels),
+                    self.logger, np.vstack(matrix_rows),
                     f"val_fusion_{t_key}",
                     self.global_step,
                 )
@@ -535,21 +551,21 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if batch_idx == 1 and self.logger is not None:
             try:
                 n_show = min(clean.shape[0], 5)
-                t_tensor = torch.full((n_show,), 0.5, device=clean.device)
+                t_tensor = torch.full((n_show,), 1.0, device=clean.device)
                 noisy, _ = self._make_noisy(clean[:n_show], t_tensor)
-                denoised = self._make_clean(noisy, 0.5)
+                denoised = self._make_clean(noisy, 1.0)
 
                 panels = []
                 for i in range(n_show):
                     c0 = clean[i, 0].detach().float().cpu().numpy()
                     d0 = denoised[i, 0].detach().float().cpu().numpy()
                     mid_w = c0.shape[2] // 2
-                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w]))
+                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], show_residual=True))
 
                 if panels:
                     log_image_artifact(
                         self.logger, np.vstack(panels),
-                        "val_yz_midw_t50_batch_1",
+                        "val_yz_midw_t100_batch_1",
                         self.global_step,
                     )
             except Exception:

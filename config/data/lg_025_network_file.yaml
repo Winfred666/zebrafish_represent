@@ -7,3 +7,7 @@ train_dataset:
 val_dataset:
   params:
     cache_root: null
+
+train_dataloader:
+  params:
+    batch_size: 16

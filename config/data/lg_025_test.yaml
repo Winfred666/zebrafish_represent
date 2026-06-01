@@ -9,3 +9,4 @@ train_dataloader:
   params:
     batch_size: 1
     num_workers: 0
+    persistent_workers: false

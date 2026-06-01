@@ -21,8 +21,8 @@ train_dataloader:
   class_name: DataLoader
   params:
     dataset: runtime.train_dataset
-    batch_size: 256
-    num_workers: 2
+    batch_size: 32
+    num_workers: 8 # num worker is totally.
     shuffle: true
     pin_memory: true
     persistent_workers: true
@@ -46,8 +46,8 @@ val_dataloader:
   class_name: DataLoader
   params:
     dataset: runtime.val_dataset
-    batch_size: 2
-    num_workers: 2
+    batch_size: 4
+    num_workers: 4
     shuffle: false
     pin_memory: true
     persistent_workers: true

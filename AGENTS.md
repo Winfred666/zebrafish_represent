@@ -10,9 +10,14 @@ If you think a destructive action is needed, ask first — confirm with the user
 
 ## Repository Scope
 
-This repository trains a 3D generative representation model for zebrafish microscopy volumes using a 3D DiT backbone with rectified flow or DDPM training, orchestrated by PyTorch Lightning.
+This repository trains 3D generative representation models for zebrafish microscopy volumes, orchestrated by PyTorch Lightning. Two model architectures are supported:
 
-The previous UNet and `model/lightning/*` training paths are stale and must not be reintroduced on `main`.
+- **PRDiT** — 3D DiT backbone with local denoising (`modules/model/prdit.py`)
+- **BiFlowNet** — dual-path 3D UNet diffusion model (`modules/model/biflownet.py`)
+
+Training objectives: rectified flow, DDPM, IaN flow. Framework modules live under `modules/framework/`.
+
+The previous `model/lightning/*` and old UNet training paths are stale and must not be reintroduced on `main`. The current 3D CNN UNet blocks in `modules/block/unet.py` are part of BiFlowNet and are the supported UNet implementation.
 
 ## Launch Protocol
 

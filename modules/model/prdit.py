@@ -137,7 +137,7 @@ class PRDiT(BaseVolumeModel):
             self._load_stage1_ckpt(load_from_ckpt)
 
     def _load_stage1_ckpt(self, ckpt_path: str) -> None:
-        """Load stage-1 weights and re-freeze the coarse path."""
+        """Load stage-1 weights. Only freezes coarse path at stage 2 (depth > 0)."""
         import logging
         logger = logging.getLogger(__name__)
         ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -149,9 +149,10 @@ class PRDiT(BaseVolumeModel):
         logger.info("Loaded stage-1 checkpoint from %s", ckpt_path)
         logger.info("  Missing keys: %s", missing if missing else "(none)")
         logger.info("  Unexpected keys: %s", unexpected if unexpected else "(none)")
-        # Re-freeze after loading (load_state_dict resets requires_grad)
-        self._freeze_coarse_path()
-        logger.info("Coarse path re-frozen after checkpoint load")
+        if self.depth > 0:
+            # Re-freeze after loading (load_state_dict resets requires_grad)
+            self._freeze_coarse_path()
+            logger.info("Coarse path re-frozen after checkpoint load")
 
     # --- weight initialization ---
 

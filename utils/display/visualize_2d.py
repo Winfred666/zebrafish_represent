@@ -102,43 +102,50 @@ def fix_2d_scalar(
     dpi: int = _PANEL_DPI,
     colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
     residual_limits: tuple[float, float] | None = (-1.0, 1.0),
+    show_residual: bool = False,
 ) -> np.ndarray:
-    """Render gt, pred, and residual (gt - pred) side-by-side in a single row.
+    """Render gt and pred side-by-side in a single row with a shared colorbar.
 
     Args:
         gt: 2D ground-truth slice, shape (X, Y).
         pred: 2D prediction slice, same shape as gt.
         close_fig: Whether to close the matplotlib figure after rendering.
         cmap: Colormap for gt and pred scalar panels.
-        residual_cmap: Colormap for the residual panel.
+        residual_cmap: Colormap for the residual panel (only used if
+            ``show_residual=True``).
         dpi: Render DPI.
         colorbar_limits: Optional (vmin, vmax) shared by gt and pred panels.
         residual_limits: Optional (vmin, vmax) for the residual panel.
+        show_residual: If True, also render the residual (gt - pred) panel.
 
     Returns:
-        np.ndarray: RGB image array with three panels in a row.
+        np.ndarray: RGB image array with gt and pred in one row, optionally
+        followed by the residual panel.
     """
     gt_np = _coerce_field(gt)
     pred_np = _coerce_field(pred)
+
+    combined = np.hstack([gt_np, pred_np])
+    main_rgb = _render_panel_rgb(
+        field=combined,
+        cmap=cmap,
+        colorbar_limits=colorbar_limits,
+        close_fig=close_fig,
+        dpi=int(dpi),
+    )
+
+    if not show_residual:
+        return main_rgb
+
     residual = (gt_np - pred_np).astype(np.float32, copy=False)
-
-    panels: list[np.ndarray] = []
-    for field, limits, colormap in [
-        (gt_np, colorbar_limits, cmap),
-        (pred_np, colorbar_limits, cmap),
-        (residual, residual_limits, residual_cmap),
-    ]:
-        panels.append(
-            _render_panel_rgb(
-                field=field,
-                cmap=str(colormap),
-                colorbar_limits=limits,
-                close_fig=close_fig,
-                dpi=int(dpi),
-            )
-        )
-
-    return np.hstack(panels)
+    residual_rgb = _render_panel_rgb(
+        field=residual,
+        cmap=str(residual_cmap),
+        colorbar_limits=residual_limits,
+        close_fig=close_fig,
+        dpi=int(dpi),
+    )
+    return np.hstack([main_rgb, residual_rgb])
 
 
 def render_slice(

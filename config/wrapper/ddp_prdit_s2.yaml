@@ -1,6 +1,0 @@
-import_config: prdit_s2.yaml
-
-trainer:
-  params:
-    devices: 4
-    strategy: ddp_find_unused_parameters_false

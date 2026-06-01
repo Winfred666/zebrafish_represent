@@ -3,4 +3,4 @@ import_config: prdit_s1.yaml
 model:
   params:
     depth: 4
-    load_from_ckpt: /home/ym.xiao/workspace/zebrafish_represent/result/checkpoints/prdit_s1.ckpt
+    load_from_ckpt: /home/ym.xiao/workspace/zebrafish_represent/result/checkpoints/prdit_s1_pretrain.ckpt

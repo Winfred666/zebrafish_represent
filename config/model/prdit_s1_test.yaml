@@ -1,0 +1,5 @@
+import_config: prdit_s1.yaml
+
+model:
+  params:
+    load_from_ckpt: result/checkpoints/prdit_s1_pretrain.ckpt

@@ -2,13 +2,13 @@ import_config: base.yaml
 
 trainer:
   params:
-    max_epochs: 10
+    max_epochs: 1
     accelerator: gpu
     devices: 1
 
 logging:
   params:
-    experiment_name: prdit_s2_IaN
-    run_name: prdit_s2
+    experiment_name: prdit_s1_IaN
+    run_name: prdit_s1_test
     tags:
-      stage: "2"
+      stage: "test"

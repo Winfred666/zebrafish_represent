@@ -9,7 +9,6 @@ train_dataset:
 
 train_dataloader:
   params:
-    batch_size: 8
     shuffle: false
 
 val_dataset:
@@ -22,3 +21,4 @@ val_dataset:
 val_dataloader:
   params:
     batch_size: 4
+

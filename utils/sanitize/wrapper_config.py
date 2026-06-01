@@ -85,13 +85,8 @@ class ModelCheckpointParams(IngestibleParams):
 
 
 class EarlyStoppingParams(IngestibleParams):
-    """Params for EarlyStopping callback.
+    """Params for EarlyStopping callback."""
 
-    `enabled` is a project-level switch (not a Lightning parameter).
-    When False the callback is skipped entirely.
-    """
-
-    enabled: bool = True
     monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     patience: int = Field(default=5, ge=0)

@@ -6,7 +6,7 @@ framework:
     model: runtime.model
     lr: 0.0001
     l1_weight: 1.0
-    perceptual_weight: 1.0
+    perceptual_weight: 0.1
     volume_gan_weight: 0.1
     gan_feat_weight: 1.0
     discriminator_iter_start: 30000

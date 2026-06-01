@@ -1,0 +1,14 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    accelerator: gpu
+    strategy: ddp_find_unused_parameters_false
+    devices: 4
+
+logging:
+  params:
+    experiment_name: prdit_s1_IaN
+    run_name: prdit_s1
+    tags:
+      stage: "1"

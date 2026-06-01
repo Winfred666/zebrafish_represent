@@ -41,14 +41,14 @@ trainer:
           log_frequency_mins: 1
       
       # enabled = false just means comment out the callback, uncomment if want enable in the future
-      # - class_name: EarlyStopping
-      #   params:
-      #     monitor: val_loss
-      #     mode: min
-      #     patience: 5
-      #     min_delta: 1.0e-5
-      #     strict: false
-      #     check_finite: true
+      - class_name: EarlyStopping
+        params:
+          monitor: val_loss
+          mode: min
+          patience: 4
+          min_delta: 1.0e-5
+          strict: false
+          check_finite: true
       - class_name: LearningRateMonitor
         params:
           logging_interval: epoch

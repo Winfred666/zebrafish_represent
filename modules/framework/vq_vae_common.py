@@ -2,9 +2,66 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+
+from modules.model.medical_net import MedicalNetEncoder
+
+
+# ---------------------------------------------------------------------------
+# perceptual loss
+# ---------------------------------------------------------------------------
+
+def _mednet_norm(x: Tensor, eps: float = 1.0e-5) -> Tensor:
+    mean = x.mean()
+    std = x.std()
+    return (x - mean) / (std + eps)
+
+
+def _l2_normalize(x: Tensor, eps: float = 1.0e-7) -> Tensor:
+    norm = torch.sqrt(torch.sum(x ** 2, dim=1, keepdim=True))
+    return x / (norm + eps)
+
+
+class MedicalNetPerceptualLoss(nn.Module):
+    """Feature-space perceptual loss backed by a frozen pretrained MedicalNet."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = MedicalNetEncoder(
+            SimpleNamespace(in_channels=1, pretrained=True)
+        )
+        self.backbone.eval()
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+    def train(self, mode: bool = True) -> "MedicalNetPerceptualLoss":
+        super().train(mode)
+        self.backbone.eval()
+        return self
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        input_features: list[Tensor] = []
+        target_features: list[Tensor] = []
+        backbone_dtype = next(self.backbone.parameters()).dtype
+
+        for channel_idx in range(input.shape[1]):
+            input_channel = _mednet_norm(
+                input[:, channel_idx, ...], eps=1.0e-5
+            ).unsqueeze(1).to(dtype=backbone_dtype)
+            target_channel = _mednet_norm(
+                target[:, channel_idx, ...], eps=1.0e-5
+            ).unsqueeze(1).to(dtype=backbone_dtype)
+            input_features.append(self.backbone(input_channel))
+            target_features.append(self.backbone(target_channel))
+
+        feat_in = _l2_normalize(torch.cat(input_features, dim=1), eps=1.0e-7)
+        feat_tgt = _l2_normalize(torch.cat(target_features, dim=1), eps=1.0e-7)
+        return F.mse_loss(feat_in, feat_tgt)
 
 
 # ---------------------------------------------------------------------------
