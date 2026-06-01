@@ -1,4 +1,4 @@
-"""VICReg (Variance-Invariance-Covariance Regularization) for 3D ResNet-10.
+"""VICReg (Variance-Invariance-Covariance Regularization) for 3D feature encoders.
 
 VICReg is the gold-standard self-supervised method for 3D CNNs.  It avoids
 negative pairs, large batches, and momentum encoders — making it DDP-friendly.
@@ -7,8 +7,8 @@ Reference: Bardes et al., "VICReg: Variance-Invariance-Covariance
 Regularization for Self-Supervised Learning", ICLR 2022.
 
 Architecture
-    Encoder (3D ResNet-10) → AdaptiveAvgPool3d(1) → 512-D features →
-    3-layer projector MLP (512→2048→2048→2048) → 2048-D embeddings.
+    Encoder → AdaptiveAvgPool3d(1) → feature vector →
+    3-layer projector MLP → projected embeddings.
 
     Two augmented views of the same volume are encoded and projected.
     The VICReg loss combines three terms on the paired embeddings:
@@ -26,7 +26,7 @@ from torch import Tensor
 
 import pytorch_lightning as L
 
-from modules.model.medical_net import MEDICALNET_FEATURE_DIM, MedicalNetEncoder
+from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM, PerceptualNetEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +104,8 @@ class Projector(nn.Module):
     our batch sizes.
     """
 
-    def __init__(self, in_dim: int = MEDICALNET_FEATURE_DIM,
-                 hidden_dim: int = 1024, out_dim: int = MEDICALNET_FEATURE_DIM):
+    def __init__(self, in_dim: int = PERCEPTUALNET_FEATURE_DIM,
+                 hidden_dim: int = 1024, out_dim: int = PERCEPTUALNET_FEATURE_DIM):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -126,12 +126,12 @@ class Projector(nn.Module):
 # ---------------------------------------------------------------------------
 
 class VICRegModule(L.LightningModule):
-    """VICReg self-supervised module for 3D ResNet-10 fine-tuning.
+    """VICReg self-supervised module for 3D feature-encoder fine-tuning.
 
     Parameters
     ----------
-    model : MedicalNetEncoder
-        Pretrained or randomly-initialised 3D ResNet-10 encoder
+    model : PerceptualNetEncoder
+        Pretrained or randomly-initialised 3D feature encoder
         (resolved from ``runtime.model`` by the runtime factory).
     sim_weight : float
         Weight of the invariance (MSE) term (default 25.0).
@@ -147,7 +147,7 @@ class VICRegModule(L.LightningModule):
 
     def __init__(
         self,
-        model: MedicalNetEncoder,
+        model: PerceptualNetEncoder,
         sim_weight: float = 25.0,
         var_weight: float = 25.0,
         cov_weight: float = 1.0,
@@ -156,7 +156,8 @@ class VICRegModule(L.LightningModule):
     ):
         super().__init__()
         self.encoder = model
-        self.projector = Projector()
+        feature_dim = int(getattr(model, "out_channels", PERCEPTUALNET_FEATURE_DIM))
+        self.projector = Projector(in_dim=feature_dim, out_dim=feature_dim)
         self.sim_weight = sim_weight
         self.var_weight = var_weight
         self.cov_weight = cov_weight

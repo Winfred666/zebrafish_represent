@@ -1,0 +1,5 @@
+model:
+  class_name: PerceptualNetEncoder
+  params:
+    backbone: resnet10
+    pretrained: true

@@ -9,11 +9,15 @@ from pydantic import Field, field_validator, model_validator
 from utils.sanitize.param_class import IngestibleParams
 
 
-class MedicalNetEncoderParams(IngestibleParams):
-    """Params for MedicalNetEncoder (3D ResNet-10 feature extractor)."""
+class PerceptualNetEncoderParams(IngestibleParams):
+    """Params for PerceptualNetEncoder MONAI feature extractor."""
 
+    backbone: str = "resnet10"
     in_channels: int = 1
+    spatial_dims: int = 3
     pretrained: bool = False
+    checkpoint_path: str | None = None
+    feature_index: int = -1
 
 
 class DiT3DParams(IngestibleParams):

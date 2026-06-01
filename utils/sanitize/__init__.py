@@ -21,7 +21,7 @@ from utils.sanitize.framework_config import (
 from utils.sanitize.model_config import (
     BiFlowNetParams,
     DiT3DParams,
-    MedicalNetEncoderParams,
+    PerceptualNetEncoderParams,
     PRDiTParams,
     VQVAEParams,
 )
@@ -45,7 +45,7 @@ __all__ = [
     "DataLoaderParams",
     "BiFlowNetParams",
     "DiT3DParams",
-    "MedicalNetEncoderParams",
+    "PerceptualNetEncoderParams",
     "PRDiTParams",
     "OptimizationParams",
     "DDPMDiffusionParams",

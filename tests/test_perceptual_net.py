@@ -1,4 +1,4 @@
-"""Tests for MedicalNet ResNet-10 model and MAE fine-tuning framework."""
+"""Tests for MONAI perceptual encoder and MAE fine-tuning framework."""
 from __future__ import annotations
 
 import math
@@ -9,11 +9,10 @@ import pytest
 import torch
 
 from modules.framework.mae import MAEDecoder, MAEFinetuneModule, PatchMask3D
-from modules.model.medical_net import (
-    MEDICALNET_CKPT_PATH,
-    MEDICALNET_FEATURE_DIM,
-    MedicalNetEncoder,
-    ResNet10,
+from modules.model.perceptual_net import (
+    PERCEPTUALNET_CKPT_PATH,
+    PERCEPTUALNET_FEATURE_DIM,
+    PerceptualNetEncoder,
 )
 
 
@@ -26,52 +25,24 @@ def _random_128_cubes(n: int, c: int = 1) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# ResNet10
+# PerceptualNetEncoder
 # ---------------------------------------------------------------------------
 
-class TestResNet10:
-    def test_output_shape(self) -> None:
-        net = ResNet10(in_channels=1)
-        x = _random_128_cubes(2)
-        out = net(x)
-        assert tuple(out.shape) == (2, 512, 16, 16, 16)
-
-    def test_multichannel_input(self) -> None:
-        net = ResNet10(in_channels=3)
-        x = torch.randn(2, 3, 128, 128, 128, dtype=torch.float32)
-        out = net(x)
-        assert tuple(out.shape) == (2, 512, 16, 16, 16)
-
-    def test_gradients_flow(self) -> None:
-        net = ResNet10(in_channels=1)
-        x = _random_128_cubes(2)
-        x.requires_grad = True
-        out = net(x)
-        loss = out.sum()
-        loss.backward()
-        assert x.grad is not None
-        assert torch.isfinite(x.grad).all()
-
-
-# ---------------------------------------------------------------------------
-# MedicalNetEncoder
-# ---------------------------------------------------------------------------
-
-class TestMedicalNetEncoder:
+class TestPerceptualNetEncoder:
     def test_forward_shape(self) -> None:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         x = _random_128_cubes(2)
         out = enc(x)
-        assert tuple(out.shape) == (2, 512, 16, 16, 16)
+        assert tuple(out.shape) == (2, 512, 4, 4, 4)
 
     def test_forward_ignores_timesteps(self) -> None:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         x = _random_128_cubes(2)
         t = torch.rand(2)
         out_no_t = enc(x)
@@ -82,7 +53,7 @@ class TestMedicalNetEncoder:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         x = _random_128_cubes(2)
         out1 = enc(x)
         out2 = enc(x, pos_idx=torch.rand(128 * 128 * 128, 3))
@@ -92,7 +63,7 @@ class TestMedicalNetEncoder:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         n = enc.get_num_params()
         assert n > 10_000_000  # ~14.3M
 
@@ -100,33 +71,33 @@ class TestMedicalNetEncoder:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
-        assert enc.out_channels == MEDICALNET_FEATURE_DIM
+        enc = PerceptualNetEncoder(Cfg())
+        assert enc.out_channels == PERCEPTUALNET_FEATURE_DIM
 
     def test_input_size(self) -> None:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         assert enc.input_size == (128, 128, 128)
 
     def test_load_ckpt_pretrained(self) -> None:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
-        enc.load_ckpt(MEDICALNET_CKPT_PATH)
+        enc = PerceptualNetEncoder(Cfg())
+        enc.load_ckpt(PERCEPTUALNET_CKPT_PATH)
         # Forward pass should still work
         x = _random_128_cubes(2)
         out = enc(x)
-        assert tuple(out.shape) == (2, 512, 16, 16, 16)
+        assert tuple(out.shape) == (2, 512, 4, 4, 4)
 
     def test_load_ckpt_custom_checkpoint(self) -> None:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
-        enc2 = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
+        enc2 = PerceptualNetEncoder(Cfg())
         with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
             torch.save({"state_dict": enc2.state_dict()}, f.name)
             tmp_path = f.name
@@ -134,7 +105,7 @@ class TestMedicalNetEncoder:
             enc.load_ckpt(tmp_path)
             x = _random_128_cubes(2)
             out = enc(x)
-            assert tuple(out.shape) == (2, 512, 16, 16, 16)
+            assert tuple(out.shape) == (2, 512, 4, 4, 4)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
@@ -143,7 +114,7 @@ class TestMedicalNetEncoder:
         class Cfg:
             in_channels = 1
             pretrained = False
-        enc = MedicalNetEncoder(Cfg())
+        enc = PerceptualNetEncoder(Cfg())
         raw_sd = enc.state_dict()
         lightning_sd = {"state_dict": {"model." + k: v for k, v in raw_sd.items()}}
         with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
@@ -202,13 +173,13 @@ class TestPatchMask3D:
 class TestMAEDecoder:
     def test_output_shape(self) -> None:
         dec = MAEDecoder()
-        f = torch.randn(2, 512, 16, 16, 16)
+        f = torch.randn(2, 512, 4, 4, 4)
         out = dec(f)
         assert tuple(out.shape) == (2, 1, 128, 128, 128)
 
     def test_gradients_flow(self) -> None:
         dec = MAEDecoder()
-        f = torch.randn(2, 512, 16, 16, 16, requires_grad=True)
+        f = torch.randn(2, 512, 4, 4, 4, requires_grad=True)
         out = dec(f)
         loss = out.sum()
         loss.backward()
@@ -228,10 +199,10 @@ class TestMAEFinetuneModule:
             MAEFinetuneModuleParams, MAEParams,
             OptimizationParams, CommonDiffusionParams,
         )
-        from utils.sanitize.model_config import MedicalNetEncoderParams
+        from utils.sanitize.model_config import PerceptualNetEncoderParams
 
-        model_params = MedicalNetEncoderParams(in_channels=1, pretrained=False)
-        model = MedicalNetEncoder(model_params)
+        model_params = PerceptualNetEncoderParams(in_channels=1, pretrained=False)
+        model = PerceptualNetEncoder(model_params)
 
         return MAEFinetuneModuleParams(
             model=model,
@@ -269,9 +240,9 @@ class TestMAEFinetuneModule:
             MAEFinetuneModuleParams, MAEParams,
             OptimizationParams, CommonDiffusionParams,
         )
-        from utils.sanitize.model_config import MedicalNetEncoderParams
+        from utils.sanitize.model_config import PerceptualNetEncoderParams
 
-        model = MedicalNetEncoder(MedicalNetEncoderParams(in_channels=1, pretrained=False))
+        model = PerceptualNetEncoder(PerceptualNetEncoderParams(in_channels=1, pretrained=False))
         cfg = MAEFinetuneModuleParams(
             model=model,
             optimization=OptimizationParams(

@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from modules.model.medical_net import MedicalNetEncoder
+from modules.model.perceptual_net import PerceptualNetEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -27,19 +27,19 @@ def _l2_normalize(x: Tensor, eps: float = 1.0e-7) -> Tensor:
     return x / (norm + eps)
 
 
-class MedicalNetPerceptualLoss(nn.Module):
-    """Feature-space perceptual loss backed by a frozen pretrained MedicalNet."""
+class MONAIPerceptualLoss(nn.Module):
+    """Feature-space perceptual loss backed by a MONAI ResNetFeatures encoder."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.backbone = MedicalNetEncoder(
-            SimpleNamespace(in_channels=1, pretrained=True)
+        self.backbone = PerceptualNetEncoder(
+            SimpleNamespace(backbone="resnet10", in_channels=1, pretrained=True)
         )
         self.backbone.eval()
         for param in self.backbone.parameters():
             param.requires_grad = False
 
-    def train(self, mode: bool = True) -> "MedicalNetPerceptualLoss":
+    def train(self, mode: bool = True) -> "MONAIPerceptualLoss":
         super().train(mode)
         self.backbone.eval()
         return self

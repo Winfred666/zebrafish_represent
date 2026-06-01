@@ -1,7 +1,7 @@
-"""Empirical domain-gap analysis: MedicalNet on 128³ zebrafish microscopy patches.
+"""Empirical domain-gap analysis with MONAI perceptual features on zebrafish patches.
 
 Downsamples volumes at 0.25× (broader anatomical view), extracts 128³ patches
-with 50 % overlap, and compares pretrained MedicalNet features against random
+with 50 % overlap, and compares pretrained perceptual features against random
 Kaiming-init features to quantify whether the domain gap persists with
 patch-based evaluation.
 """
@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from modules.model.medical_net import MedicalNetEncoder, ResNet10, MEDICALNET_FEATURE_DIM
+from modules.model.perceptual_net import PerceptualNetEncoder
 from utils.eval.sample_quality import _extract_128_patches, _FeatureExtractor
 
 PATCH_SIZE = 128
@@ -49,7 +49,7 @@ def _pool_features(feats: torch.Tensor) -> torch.Tensor:
 
 def analyse_domain_gap_025(data_dir: str, device: str = "cuda") -> dict:
     print("=" * 70)
-    print("MedicalNet → Zebrafish Microscopy Domain Gap (0.25× + 128³ patches)")
+    print("MONAI perceptual features -> Zebrafish Microscopy Domain Gap (0.25x + 128^3 patches)")
     print("=" * 70)
 
     # ------------------------------------------------------------------
@@ -89,14 +89,16 @@ def analyse_domain_gap_025(data_dir: str, device: str = "cuda") -> dict:
     # ------------------------------------------------------------------
     # 3. Feature extraction: pretrained vs random (batched to avoid OOM)
     # ------------------------------------------------------------------
-    print("\n[3/6] Extracting features (pretrained MedicalNet vs random init) ...")
+    print("\n[3/6] Extracting features (pretrained perceptual net vs random init) ...")
 
     def _make_extractor(pretrained: bool):
         class _Cfg:
             in_channels = 1
-        enc = MedicalNetEncoder(_Cfg())
-        if pretrained:
-            enc.load_ckpt(MEDICALNET_CKPT_PATH)
+            backbone = "resnet10"
+            spatial_dims = 3
+            checkpoint_path = None
+        _Cfg.pretrained = pretrained
+        enc = PerceptualNetEncoder(_Cfg())
         enc.eval()
         enc.to(device)
         for p in enc.parameters():
@@ -171,7 +173,7 @@ def analyse_domain_gap_025(data_dir: str, device: str = "cuda") -> dict:
     pt_patch_stats = _mean_cosine(feat_pt_patches, vol_labels)
     rn_patch_stats = _mean_cosine(feat_rn_patches, vol_labels)
 
-    print(f"  Pretrained MedicalNet:")
+    print(f"  Pretrained perceptual net:")
     print(f"    Intra-volume cosine:  {pt_patch_stats['intra_volume_cosine_mean']:.4f}")
     print(f"    Inter-volume cosine:  {pt_patch_stats['inter_volume_cosine_mean']:.4f}")
     print(f"    Separation (intra − inter): {pt_patch_stats['separation']:.4f}  (want > 0)")
@@ -201,7 +203,7 @@ def analyse_domain_gap_025(data_dir: str, device: str = "cuda") -> dict:
     pt_vol_stats = _volume_discriminability(feat_pt_vol)
     rn_vol_stats = _volume_discriminability(feat_rn_vol)
 
-    print(f"  Pretrained MedicalNet volume features:")
+    print(f"  Pretrained perceptual net volume features:")
     print(f"    Mean inter-volume cosine: {pt_vol_stats['inter_vol_cosine_mean']:.4f}")
     print(f"    Discriminability:         {pt_vol_stats['discriminability']:.4f}")
 
@@ -223,8 +225,8 @@ def analyse_domain_gap_025(data_dir: str, device: str = "cuda") -> dict:
     print(f"  Downsample: 0.25× (broader anatomical view than 0.125×)")
 
     if pt_separates_patches and not pt_collapse:
-        print(f"\n  ✓ MedicalNet features DISCRIMINATE between volumes at patch level")
-        print(f"  ✓ Patch-based evaluation is viable with pretrained MedicalNet")
+        print(f"\n  ✓ Perceptual features DISCRIMINATE between volumes at patch level")
+        print(f"  ✓ Patch-based evaluation is viable with pretrained perceptual net")
         print(f"  RECOMMENDATION: Use pretrained=True for FID/MMD.")
     elif pt_separates_patches and pt_collapse:
         print(f"\n  ⚠  Patches separate but volume-level features partially collapse")
