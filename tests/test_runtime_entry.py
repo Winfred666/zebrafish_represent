@@ -23,7 +23,7 @@ class RuntimeEntryTest(unittest.TestCase):
         """build_any_runtime_object resolves key classes via globals()."""
         _ensure_heavy_imports()
         expected_classes = {
-            "DiT3D", "MONAIVQGAN", "PRDiT", "VolDiT",
+            "DiT3D", "MONAIVQGAN", "PerceptualNetEncoder", "PRDiT", "VolDiT",
             "RectifiedFlowModule", "DDPMModule", "VolDiTDDPMModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",

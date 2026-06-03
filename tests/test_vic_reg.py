@@ -15,7 +15,7 @@ from modules.framework.vic_reg import (
     variance_loss,
     vicreg_loss,
 )
-from modules.model.medical_net import MEDICALNET_FEATURE_DIM, MedicalNetEncoder
+from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM, PerceptualNetEncoder
 from utils.dataset.augment import (
     gamma_perturbation,
     gaussian_blur,
@@ -31,11 +31,11 @@ from utils.dataset.augment import (
 # helpers
 # ---------------------------------------------------------------------------
 
-def _make_encoder() -> MedicalNetEncoder:
+def _make_encoder() -> PerceptualNetEncoder:
     class Cfg:
         in_channels = 1
         pretrained = False
-    return MedicalNetEncoder(Cfg())
+    return PerceptualNetEncoder(Cfg())
 
 
 def _random_batch(n: int = 4, d: int = 128) -> dict[str, torch.Tensor]:
@@ -214,7 +214,7 @@ class TestVICRegModule:
     def test_extract_features(self, module: VICRegModule) -> None:
         x = torch.randn(4, 1, 128, 128, 128)
         feats = module.extract_features(x)
-        assert tuple(feats.shape) == (4, MEDICALNET_FEATURE_DIM)
+        assert tuple(feats.shape) == (4, PERCEPTUALNET_FEATURE_DIM)
         assert feats.dtype == torch.float32
 
     def test_extract_features_deterministic(self, module: VICRegModule) -> None:

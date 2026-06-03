@@ -1,6 +1,6 @@
 """Self-contained post-fit sample quality metrics for 3D volumes.
 
-FID and MMD use a 3D MedicalNet ResNet-10 feature extractor (512-D) applied to
+FID and MMD use a MONAI 3D ResNet feature extractor applied to
 128³ patches extracted from each volume with 50% overlap.  This is the standard
 evaluation protocol for 3D generative models (matching PRDiT).
 
@@ -15,7 +15,7 @@ from typing import Sequence
 import torch
 import torch.nn.functional as F
 
-from modules.model.medical_net import MedicalNetEncoder, MEDICALNET_FEATURE_DIM
+from modules.model.perceptual_net import PerceptualNetEncoder
 
 # Lazy singleton — model is ~14M params, loads in ~1 s.
 _FEATURE_EXTRACTOR = None
@@ -25,19 +25,19 @@ PATCH_STRIDE = 64  # 50 % overlap
 
 
 class _FeatureExtractor:
-    """Thin wrapper: MedicalNetEncoder → z-norm → pool → 512-D vectors."""
+    """Thin wrapper: PerceptualNetEncoder → z-norm → pooled vectors."""
 
     def __init__(self, device: str = "cuda", checkpoint_path: str | None = None):
         class _Cfg:
             in_channels = 1
             pretrained = (checkpoint_path is None)
-        self.encoder = MedicalNetEncoder(_Cfg())
+        self.encoder = PerceptualNetEncoder(_Cfg())
         if checkpoint_path is not None:
             self.encoder.load_ckpt(checkpoint_path)
         self.encoder.eval()
         self.encoder.to(device)
         self._device = device
-        self.feature_dim = MEDICALNET_FEATURE_DIM
+        self.feature_dim = self.encoder.out_channels
         for p in self.encoder.parameters():
             p.requires_grad = False
 
@@ -48,7 +48,7 @@ class _FeatureExtractor:
             x = x.unsqueeze(1)
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
-        # Per-sample z-normalisation (MedicalNet convention)
+        # Match the normalization used by the perceptual feature encoder.
         mean = x.reshape(x.shape[0], -1).mean(dim=1).view(-1, 1, 1, 1, 1)
         std = x.reshape(x.shape[0], -1).std(dim=1).view(-1, 1, 1, 1, 1).clamp(min=1e-6)
         x = (x - mean) / std
@@ -61,9 +61,9 @@ def _get_feature_extractor(device: str = "cuda",
                            checkpoint_path: str | None = None) -> _FeatureExtractor:
     global _FEATURE_EXTRACTOR
     if _FEATURE_EXTRACTOR is None:
-        # pretrained=True when no checkpoint is supplied: MedicalNet CT/MRI/PET
+        # pretrained=True when no checkpoint is supplied: MONAI pretrained weights
         # weights can collapse on zebrafish microscopy, so prefer a fine-tuned
-        # checkpoint_path from medical_net_finetune.py when available.
+        # checkpoint_path from perceptual-net fine-tuning when available.
         _FEATURE_EXTRACTOR = _FeatureExtractor(device=device, checkpoint_path=checkpoint_path)
     return _FEATURE_EXTRACTOR
 
@@ -167,7 +167,7 @@ def _extract_128_patches(
 
 
 def _extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
-    """Extract MedicalNet features from 128³ patches covering each volume.
+    """Extract perceptual features from 128³ patches covering each volume.
 
     Parameters
     ----------
@@ -348,7 +348,7 @@ def compute_sample_quality_metrics(
     """Compute 3D quality metrics between generated and reference volumes.
 
     FID and MMD extract 128³ patches from each volume with 50 % overlap, run
-    each patch through a MedicalNet ResNet-10, and treat all patch features as
+    each patch through the perceptual encoder, and treat all patch features as
     samples from the distribution.  This is the standard evaluation protocol
     for 3D generative models (matching PRDiT).
 

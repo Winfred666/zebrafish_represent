@@ -15,7 +15,7 @@ import pytorch_lightning as L
 
 from modules.block.discriminator import NLayerDiscriminator3D
 from modules.framework.vq_vae_common import (
-    MedicalNetPerceptualLoss,
+    MONAIPerceptualLoss,
     feature_matching_loss,
     generator_gan_loss,
     hinge_d_loss,
@@ -63,7 +63,7 @@ class VQVAES1Module(L.LightningModule):
             input_nc=1, ndf=disc_channels, n_layers=disc_layers,
         )
 
-        self.perceptual_loss_fn = MedicalNetPerceptualLoss()
+        self.perceptual_loss_fn = MONAIPerceptualLoss()
 
         # select disc loss
         if disc_loss_type == "hinge":

@@ -1,5 +1,0 @@
-model:
-  class_name: MedicalNetEncoder
-  params:
-    in_channels: 1
-    pretrained: true

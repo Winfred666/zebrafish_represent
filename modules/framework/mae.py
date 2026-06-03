@@ -1,4 +1,4 @@
-"""MAE (Masked Autoencoder) fine-tuning framework for MedicalNet 3D ResNet-10.
+"""MAE (Masked Autoencoder) fine-tuning framework for 3D feature encoders.
 
 Extends ``BaseTrainingFramework``, replacing the diffusion timestep/noise/denoise
 loop with a one-step mask→encode→decode→reconstruct pattern:
@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from modules.framework.base import BaseTrainingFramework
-from modules.model.medical_net import MEDICALNET_FEATURE_DIM
+from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM
 from utils.sanitize.framework_config import MAEFinetuneModuleParams
 
 logger = logging.getLogger(__name__)
@@ -80,25 +80,33 @@ class PatchMask3D(nn.Module):
 # ---------------------------------------------------------------------------
 
 class MAEDecoder(nn.Module):
-    """Lightweight 3D decoder: (B,512,16,16,16) → (B,1,128,128,128)."""
+    """Lightweight 3D decoder: standard MONAI ResNet feature map to 128³."""
 
-    def __init__(self, encoder_dim: int = MEDICALNET_FEATURE_DIM,
+    def __init__(self, encoder_dim: int = PERCEPTUALNET_FEATURE_DIM,
                  output_channels: int = 1):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.ConvTranspose3d(encoder_dim, 256, kernel_size=3, stride=2,
-                               padding=1, output_padding=1),  # 16→32
+                               padding=1, output_padding=1),
             nn.BatchNorm3d(256),
             nn.ReLU(inplace=True),
             nn.ConvTranspose3d(256, 128, kernel_size=3, stride=2,
-                               padding=1, output_padding=1),  # 32→64
+                               padding=1, output_padding=1),
             nn.BatchNorm3d(128),
             nn.ReLU(inplace=True),
             nn.ConvTranspose3d(128, 64, kernel_size=3, stride=2,
-                               padding=1, output_padding=1),  # 64→128
+                               padding=1, output_padding=1),
             nn.BatchNorm3d(64),
             nn.ReLU(inplace=True),
-            nn.Conv3d(64, output_channels, kernel_size=1),
+            nn.ConvTranspose3d(64, 32, kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.BatchNorm3d(32),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose3d(32, 16, kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            nn.BatchNorm3d(16),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(16, output_channels, kernel_size=1),
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -126,7 +134,9 @@ class MAEFinetuneModule(BaseTrainingFramework):
 
         mae_cfg = config.mae
         self.mask_generator = PatchMask3D(mask_ratio=mae_cfg.mask_ratio)
-        self.decoder = MAEDecoder()
+        self.decoder = MAEDecoder(
+            encoder_dim=int(getattr(self.model, "out_channels", PERCEPTUALNET_FEATURE_DIM))
+        )
         self.fg_weight = float(mae_cfg.foreground_weight)
         self.fg_percentile = float(mae_cfg.foreground_percentile)
         self._last_mask: Tensor | None = None  # stored by _q_sample, read by get_data_loss
@@ -141,7 +151,7 @@ class MAEFinetuneModule(BaseTrainingFramework):
 
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         """Encode masked volume → decode → reconstruction.  One step only."""
-        features = self.model(noisy)           # (B, 512, 16, 16, 16)
+        features = self.model(noisy)
         return self.decoder(features)           # (B, 1, 128, 128, 128)
 
     def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:

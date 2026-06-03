@@ -1,7 +1,7 @@
-"""Tests for 3D MedicalNet feature extractor and 128³ patch-based quality metrics.
+"""Tests for 3D perceptual feature extractor and 128³ patch-based quality metrics.
 
 Verifies correctness, determinism, and consistency with the PRDiT evaluation
-protocol (3D MedicalNet ResNet-10 backbone, 128³ patch extraction).
+protocol (MONAI 3D ResNet backbone, 128³ patch extraction).
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from modules.model.medical_net import MedicalNetEncoder, ResNet10, MEDICALNET_CKPT_PATH, MEDICALNET_FEATURE_DIM
+from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM
 from utils.eval.sample_quality import (
     PATCH_SIZE,
     _FeatureExtractor,
@@ -51,7 +51,7 @@ def _random_volume(n: int = 1, c: int = 1, d: int = 200, h: int = 200, w: int = 
 # ---------------------------------------------------------------------------
 
 class TestFeatureExtractor:
-    """Tests for the _FeatureExtractor (MedicalNetEncoder + z-norm + pool)."""
+    """Tests for the _FeatureExtractor (PerceptualNetEncoder + z-norm + pool)."""
 
     @pytest.fixture(scope="class")
     def extractor(self) -> _FeatureExtractor:
@@ -93,7 +93,7 @@ class TestFeatureExtractor:
         assert torch.allclose(batched, individual, atol=1e-5)
 
     def test_feature_dim_constant(self, extractor: _FeatureExtractor) -> None:
-        assert extractor.feature_dim == MEDICALNET_FEATURE_DIM
+        assert extractor.feature_dim == PERCEPTUALNET_FEATURE_DIM
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +364,7 @@ class TestCovariance:
 class TestComputeSampleQualityMetrics:
     """Integration tests for the public API.
 
-    Uses a class-scoped fixture so the 450 MB MedicalNet checkpoint is
+    Uses a class-scoped fixture so the perceptual encoder checkpoint is
     loaded once and shared across all test methods.  Volumes are sized
     down to ~140³ to minimise ResNet-10 forward passes while still
     producing valid 128³ patches.

@@ -1,4 +1,4 @@
-"""Extract MedicalNet encoder weights from a Lightning checkpoint.
+"""Extract perceptual encoder weights from a Lightning checkpoint.
 
 Usage: python utils/script/extract_encoder_ckpt.py <lightning_ckpt> <output_path>
 """
