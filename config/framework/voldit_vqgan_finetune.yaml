@@ -1,0 +1,14 @@
+# Stage-1 MONAI VQ-GAN fine-tuning from the public VolDiT autoencoder.
+framework:
+  class_name: VQVAES1Module
+  params:
+    model: runtime.model
+    lr: 0.00005
+    l1_weight: 1.0
+    perceptual_weight: 0.005
+    volume_gan_weight: 0.005
+    gan_feat_weight: 1.0
+    discriminator_iter_start: 30000
+    disc_loss_type: "vanilla"
+    disc_channels: 64
+    disc_layers: 3

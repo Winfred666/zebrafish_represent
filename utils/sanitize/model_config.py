@@ -105,6 +105,70 @@ class VQVAEParams(IngestibleParams):
     patch_size: int = Field(default=64, ge=1)
 
 
+class MONAIVQGANParams(IngestibleParams):
+    """Params for the MONAI-backed VQ-GAN used by VolDiT."""
+
+    spatial_dims: int = Field(default=3, ge=1)
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=1, ge=1)
+    channels: tuple[int, ...] = (128, 256, 512)
+    num_res_channels: tuple[int, ...] | int = (128, 256, 512)
+    num_res_layers: int = Field(default=2, ge=1)
+    downsample_parameters: tuple[tuple[int, int, int, int], ...] = (
+        (2, 4, 1, 1),
+        (2, 4, 1, 1),
+        (2, 4, 1, 1),
+    )
+    upsample_parameters: tuple[tuple[int, int, int, int, int], ...] = (
+        (2, 4, 1, 1, 0),
+        (2, 4, 1, 1, 0),
+        (2, 4, 1, 1, 0),
+    )
+    num_embeddings: int = Field(default=4096, ge=1)
+    embedding_dim: int = Field(default=8, ge=1)
+    commitment_cost: float = Field(default=0.25, ge=0.0)
+    decay: float = Field(default=0.99, ge=0.0, lt=1.0)
+    epsilon: float = Field(default=1e-5, gt=0.0)
+    dropout: float = Field(default=0.0, ge=0.0)
+    act: Any = "RELU"
+    output_act: Any = None
+    ddp_sync: bool = True
+    use_checkpointing: bool = False
+    load_from_ckpt: str | None = None
+    strict_load: bool = True
+
+
+class VolDiTParams(IngestibleParams):
+    """Params for the VolDiT latent diffusion transformer."""
+
+    input_size: tuple[int, int, int]
+    patch_size: int = Field(ge=1)
+    in_channels: int = Field(ge=1)
+    hidden_size: int = Field(ge=1)
+    depth: int = Field(ge=1)
+    num_heads: int = Field(ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0)
+    class_dropout_prob: float = Field(default=0.0, ge=0.0)
+    num_classes: int = Field(default=0, ge=0)
+    learn_sigma: bool = False
+    flash_attention: bool = False
+    load_from_ckpt: str | None = None
+    strict_load: bool = False
+
+    @model_validator(mode="after")
+    def _validate_patch_grid(self) -> "VolDiTParams":
+        if any(size % self.patch_size != 0 for size in self.input_size):
+            raise ValueError(
+                f"input_size must be divisible by patch_size. "
+                f"Got input_size={self.input_size}, patch_size={self.patch_size}"
+            )
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_size={self.hidden_size} must be divisible by num_heads={self.num_heads}"
+            )
+        return self
+
+
 class BiFlowNetParams(IngestibleParams):
     """Params for the BiFlowNet dual-path diffusion model."""
 

@@ -1,0 +1,11 @@
+# 4-GPU DDP wrapper for VolDiT latent DDPM training.
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 20
+    devices: 4
+    accumulate_grad_batches: 1
+    precision: "bf16-mixed"
+    num_sanity_val_steps: 10
+    limit_val_batches: 0.75

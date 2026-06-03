@@ -14,7 +14,7 @@ class OptimizationParams(IngestibleParams):
 
     learning_rate: float = Field(ge=0.0)
     weight_decay: float = Field(ge=0.0)
-    loss_type: Literal["mse", "l1"] = "mse"
+    loss_type: Literal["mse", "l1", "smooth_l1"] = "mse"
     sample_steps: int = Field(ge=1)
 
 class CommonDiffusionParams(IngestibleParams):
@@ -46,7 +46,7 @@ class DDPMDiffusionParams(CommonDiffusionParams):
     beta_schedule: Literal["linear", "cosine"] = "linear"
     beta_start: float = Field(default=1e-4, gt=0.0)
     beta_end: float = Field(default=2e-2, gt=0.0)
-    prediction_type: Literal["epsilon", "x0", "v"] = "epsilon"
+    prediction_type: Literal["epsilon", "x0", "v", "v_prediction"] = "epsilon"
 
     @model_validator(mode="after")
     def _validate_betas(self) -> "DDPMDiffusionParams":
@@ -62,6 +62,17 @@ class RectifiedFlowModuleParams(BaseFrameworkParams):
 class DDPMModuleParams(BaseFrameworkParams):
     """Params for DDPMModule — model reference resolved at build time."""
     diffusion: DDPMDiffusionParams
+
+
+class VolDiTDDPMModuleParams(IngestibleParams):
+    """Params for latent VolDiT DDPM training with a frozen stage-1 encoder."""
+
+    model: object = None
+    stage1_model: object = None
+    optimization: OptimizationParams
+    diffusion: DDPMDiffusionParams
+    scale_factor: float = Field(default=1.0, gt=0.0)
+    lr_gamma: float = Field(default=0.999, gt=0.0, le=1.0)
 
 
 class IaNDiffusionParams(CommonDiffusionParams):

@@ -1,0 +1,9 @@
+# VolDiT-L/4 for later formal training on zebrafish ds8 latents.
+import_config: voldit_dit_ds8_xs4.yaml
+
+model:
+  params:
+    hidden_size: 1152
+    depth: 24
+    num_heads: 16
+    load_from_ckpt: null

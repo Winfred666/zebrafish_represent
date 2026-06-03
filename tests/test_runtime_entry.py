@@ -23,8 +23,8 @@ class RuntimeEntryTest(unittest.TestCase):
         """build_any_runtime_object resolves key classes via globals()."""
         _ensure_heavy_imports()
         expected_classes = {
-            "DiT3D", "PRDiT",
-            "RectifiedFlowModule", "DDPMModule",
+            "DiT3D", "MONAIVQGAN", "PRDiT", "VolDiT",
+            "RectifiedFlowModule", "DDPMModule", "VolDiTDDPMModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
@@ -115,7 +115,7 @@ class RuntimeEntryTest(unittest.TestCase):
             ModelCheckpointParams.model_validate({"monitor": "val/loss"})
 
     def test_model_param_validation(self) -> None:
-        from utils.sanitize.model_config import DiT3DParams
+        from utils.sanitize.model_config import DiT3DParams, MONAIVQGANParams, VolDiTParams
 
         params = DiT3DParams.model_validate({
             "in_channels": 1, "out_channels": 1,
@@ -133,6 +133,34 @@ class RuntimeEntryTest(unittest.TestCase):
                 "input_size": [4, 4, 4], "patch_size": [3, 3, 3],
                 "hidden_size": 64, "depth": 2, "num_heads": 4,
                 "mlp_ratio": 2.0,
+            })
+
+        monai_params = MONAIVQGANParams.model_validate({
+            "channels": [16, 32],
+            "num_res_channels": [16, 32],
+            "downsample_parameters": [[2, 4, 1, 1], [2, 4, 1, 1]],
+            "upsample_parameters": [[2, 4, 1, 1, 0], [2, 4, 1, 1, 0]],
+        })
+        self.assertEqual(monai_params.embedding_dim, 8)
+
+        voldit_params = VolDiTParams.model_validate({
+            "input_size": [8, 8, 8],
+            "patch_size": 4,
+            "in_channels": 8,
+            "hidden_size": 48,
+            "depth": 1,
+            "num_heads": 4,
+        })
+        self.assertEqual(voldit_params.patch_size, 4)
+
+        with self.assertRaises(ValueError):
+            VolDiTParams.model_validate({
+                "input_size": [10, 8, 8],
+                "patch_size": 4,
+                "in_channels": 8,
+                "hidden_size": 48,
+                "depth": 1,
+                "num_heads": 4,
             })
 
     # ── Sample quality metrics (no data loading) ──
@@ -160,6 +188,19 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/wrapper/prdit_s1.yaml")
         trainer_params = config["trainer"]["params"]
         self.assertIn("callbacks", trainer_params)
+
+    def test_voldit_configs_load(self) -> None:
+        model_config = load_yaml_config("config/model/voldit_dit_ds8_xs4.yaml")
+        self.assertEqual(model_config["stage1_model"]["class_name"], "MONAIVQGAN")
+        self.assertEqual(model_config["model"]["class_name"], "VolDiT")
+        self.assertEqual(model_config["model"]["params"]["input_size"], [16, 16, 16])
+
+        framework_config = load_yaml_config("config/framework/voldit_ddpm.yaml")
+        self.assertEqual(framework_config["framework"]["class_name"], "VolDiTDDPMModule")
+        self.assertEqual(
+            framework_config["framework"]["params"]["diffusion"]["prediction_type"],
+            "v_prediction",
+        )
 
 
 if __name__ == "__main__":

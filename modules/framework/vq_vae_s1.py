@@ -204,11 +204,7 @@ class VQVAES1Module(L.LightningModule):
 
     def configure_optimizers(self):
         opt_ae = torch.optim.Adam(
-            list(self.vqvae.encoder.parameters()) +
-            list(self.vqvae.decoder.parameters()) +
-            list(self.vqvae.pre_vq_conv.parameters()) +
-            list(self.vqvae.post_vq_conv.parameters()) +
-            list(self.vqvae.codebook.parameters()),
+            [p for p in self.vqvae.parameters() if p.requires_grad],
             lr=self.lr, betas=(0.5, 0.9),
         )
         opt_disc = torch.optim.Adam(
