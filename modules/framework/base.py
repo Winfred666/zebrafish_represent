@@ -29,6 +29,38 @@ def _build_pos_idx(D: int, H: int, W: int, device: torch.device) -> torch.Tensor
     )
     return coords.reshape(-1, 3)
 
+
+def _stack_fusion_slice_columns(fusion_slice_panels: list[list[np.ndarray]]) -> np.ndarray:
+    """Stack each fusion tightly, then bottom-pad columns before hstack."""
+    columns: list[np.ndarray] = []
+    for slice_panels in fusion_slice_panels:
+        if not slice_panels:
+            continue
+        for panel in slice_panels:
+            if panel.ndim != 3 or panel.shape[2] != 3:
+                raise ValueError(
+                    f"fusion slice panel must have shape (H,W,3), got {panel.shape}"
+                )
+        columns.append(np.vstack(slice_panels))
+
+    if not columns:
+        raise ValueError("fusion_slice_panels must contain at least one RGB panel")
+
+    max_height = max(column.shape[0] for column in columns)
+    padded_columns: list[np.ndarray] = []
+    for column in columns:
+        pad_height = max_height - column.shape[0]
+        if pad_height > 0:
+            padding = np.full(
+                (pad_height, column.shape[1], column.shape[2]),
+                255,
+                dtype=column.dtype,
+            )
+            column = np.vstack([column, padding])
+        padded_columns.append(column)
+
+    return np.hstack(padded_columns)
+
 # This is generative Training framework, not representative.
 class BaseTrainingFramework(L.LightningModule, ABC):
     """Shared training infrastructure.
@@ -408,14 +440,9 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 )
 
             if fusion_slice_panels and should_log:
-                # Build matrix: rows = w-slices, columns = fusions
-                n_slices = len(fusion_slice_panels[0])
-                matrix_rows = []
-                for si in range(n_slices):
-                    row_panels = [fusion_slice_panels[fi][si] for fi in range(len(fusion_slice_panels))]
-                    matrix_rows.append(np.hstack(row_panels))
+                image = _stack_fusion_slice_columns(fusion_slice_panels)
                 log_image_artifact(
-                    self.logger, np.vstack(matrix_rows),
+                    self.logger, image,
                     f"val_fusion_{t_key}",
                     self.global_step,
                 )
