@@ -10,6 +10,7 @@ train_dataset:
 train_dataloader:
   params:
     shuffle: false
+    persistent_workers: false
 
 val_dataset:
   params:
@@ -21,4 +22,4 @@ val_dataset:
 val_dataloader:
   params:
     batch_size: 4
-
+    persistent_workers: false

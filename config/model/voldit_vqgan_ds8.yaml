@@ -20,5 +20,5 @@ model:
     output_act: null
     ddp_sync: true
     use_checkpointing: false
-    load_from_ckpt: result/checkpoints/voldit_vqgan_luna_pretrained.pth
+    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_s1_20ep_best.pth
     strict_load: true

@@ -113,19 +113,38 @@ class VICRegModuleParams(IngestibleParams):
     weight_decay: float = 1e-6
 
 
-class VQVAES1ModuleParams(IngestibleParams):
+class VQVAES1ModuleParams(BaseFrameworkParams):
     """Params for VQVAES1Module (stage 1 full VQ-VAE training)."""
 
-    model: object = None
+    optimization: OptimizationParams = Field(
+        default_factory=lambda: OptimizationParams(
+            learning_rate=1e-4,
+            weight_decay=0.0,
+            loss_type="l1",
+            sample_steps=1,
+        )
+    )
+    diffusion: CommonDiffusionParams = Field(
+        default_factory=lambda: CommonDiffusionParams(gen_noise_weight=1.0)
+    )
+    testing: TestingParams = Field(
+        default_factory=lambda: TestingParams(run_sampling_after_fit=False)
+    )
     lr: float = Field(default=1e-4, gt=0.0)
     l1_weight: float = Field(default=1.0, ge=0.0)
     perceptual_weight: float = Field(default=1.0, ge=0.0)
     volume_gan_weight: float = Field(default=0.1, ge=0.0)
     gan_feat_weight: float = Field(default=1.0, ge=0.0)
-    discriminator_iter_start: int = Field(default=30000, ge=0)
-    disc_loss_type: str = "vanilla"
+    discriminator_iter_start: int = Field(default=0, ge=0)
+    disc_loss_type: str = "least_squares"
     disc_channels: int = Field(default=64, ge=1)
     disc_layers: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_single_step_reconstruction(self) -> "VQVAES1ModuleParams":
+        if self.optimization.sample_steps != 1:
+            raise ValueError("VQ-VAE stage 1 requires optimization.sample_steps=1")
+        return self
 
 
 class VQVAES2ModuleParams(IngestibleParams):

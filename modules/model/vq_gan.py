@@ -110,9 +110,14 @@ class MONAIVQGAN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         reconstruction, quantization_loss = self.network(x)
+        perplexity = getattr(self.network.quantizer, "perplexity", None)
+        if not isinstance(perplexity, torch.Tensor):
+            perplexity = torch.as_tensor(0.0, device=x.device, dtype=quantization_loss.dtype)
+        else:
+            perplexity = perplexity.to(device=x.device, dtype=quantization_loss.dtype)
         return reconstruction, {
             "commitment_loss": quantization_loss,
-            "perplexity": torch.zeros((), device=x.device, dtype=quantization_loss.dtype),
+            "perplexity": perplexity,
         }
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:

@@ -4,12 +4,21 @@ framework:
   class_name: VQVAES1Module
   params:
     model: runtime.model
-    lr: 0.0001
+    optimization:
+      learning_rate: 0.00002
+      weight_decay: 0.0
+      loss_type: "l1"
+      sample_steps: 1
+    diffusion:
+      gen_noise_weight: 1.0
+    testing:
+      run_sampling_after_fit: false
+    lr: 0.00002
     l1_weight: 1.0
-    perceptual_weight: 0.1
-    volume_gan_weight: 0.1
-    gan_feat_weight: 1.0
-    discriminator_iter_start: 30000
-    disc_loss_type: "vanilla"
+    perceptual_weight: 0.005
+    volume_gan_weight: 0.0015
+    gan_feat_weight: 0.0
+    discriminator_iter_start: 0
+    disc_loss_type: "least_squares"
     disc_channels: 64
     disc_layers: 3

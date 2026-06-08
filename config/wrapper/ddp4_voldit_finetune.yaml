@@ -1,0 +1,9 @@
+# 4-GPU DDP wrapper for VolDiT stage-2 fine-tuning.
+import_config: ddp4_voldit.yaml
+
+logging:
+  params:
+    experiment_name: voldit_finetune
+    tags:
+      job_type: train
+      stage: s2_voldit

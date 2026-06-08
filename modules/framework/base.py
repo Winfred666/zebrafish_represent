@@ -199,7 +199,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def on_train_epoch_end(self) -> None:
         optimizer = self.optimizers()
         if optimizer is not None:
-            self.log("lr", optimizer.param_groups[0]["lr"], on_epoch=True)
+            self.log("lr", optimizer.param_groups[0]["lr"], on_epoch=True, sync_dist=True)
 
     def _compute_reconstruction_loss_at_t(
         self, clean_volume: Tensor, t_val: float
@@ -525,10 +525,17 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         del batch_idx
         losses = self.get_data_loss(batch)
         for key, value in losses.items():
-            self.log(f"train_{key}", value, on_step=True, on_epoch=False, prog_bar=(key == "loss"))
+            self.log(
+                f"train_{key}",
+                value,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=(key == "loss"),
+                sync_dist=True,
+            )
         if self.global_step % 500 == 0:
             recon = self._compute_reconstruction_loss_at_t(batch["target"], 0.5)
-            self.log("train_reconstruction_loss", recon, on_step=False, on_epoch=True)
+            self.log("train_reconstruction_loss", recon, on_step=False, on_epoch=True, sync_dist=True)
         return losses["loss"]
 
     def validation_step(
@@ -536,14 +543,21 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     ) -> Tensor:
         losses = self.get_data_loss(batch)
         for key, value in losses.items():
-            self.log(f"val_{key}", value, on_step=False, on_epoch=True, prog_bar=(key == "loss"))
+            self.log(
+                f"val_{key}",
+                value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=(key == "loss"),
+                sync_dist=True,
+            )
 
         clean = batch["target"]
 
         # Framework-specific extra validation metrics
         extra = self._validation_extra(clean)
         for key, val in extra.items():
-            self.log(f"val_{key}", val, on_step=False, on_epoch=True)
+            self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
 
         # Hard-fixed vstack at last val batch (minimum artifact even without fusion).
         # Uses mid-W slice — the clearest dimension for zebrafish morphology.
