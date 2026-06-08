@@ -29,6 +29,19 @@ def _build_pos_idx(D: int, H: int, W: int, device: torch.device) -> torch.Tensor
     )
     return coords.reshape(-1, 3)
 
+
+def _stack_fusion_slice_matrix(fusion_slice_panels: list[list[np.ndarray]]) -> np.ndarray:
+    """Render a panel matrix with rows=slices and columns=fusions."""
+    if not fusion_slice_panels:
+        raise ValueError("fusion_slice_panels must contain at least one fusion")
+
+    n_slices = len(fusion_slice_panels[0])
+    matrix_rows = []
+    for slice_idx in range(n_slices):
+        row_panels = [fusion_slice_panels[fusion_idx][slice_idx] for fusion_idx in range(len(fusion_slice_panels))]
+        matrix_rows.append(np.hstack(row_panels))
+    return np.vstack(matrix_rows)
+
 # This is generative Training framework, not representative.
 class BaseTrainingFramework(L.LightningModule, ABC):
     """Shared training infrastructure.
@@ -66,7 +79,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.val_fusions_noised: list[dict[str, list]] = []
         self._fusion_collecting: bool = False
 
-    # ── abstract (framework-specific) ──────────────────────────
+    # ── atom hooks (framework-specific extension surface) ──────
 
     @abstractmethod
     def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -89,18 +102,19 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         *step_size* > 0: step size toward clean (supports timestep_respacing).
         """
 
-    # ── forward corruption (shared) ─────────────────────────────
+    # ── shared diffusion / sampling core ───────────────────────
 
     def _make_noisy(self, clean: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
         """Corrupt *clean* at level *t*: generate noise → mix via ``_q_sample``.
 
         Returns ``(noisy_volume, noise_target)``.
         """
+        # Keep the base hook surface small. If a subclass needs to transform
+        # the clean target before corruption, do it in its own loss code.
+        # Previous experiments kept a `_before_make_noisy` hook here.
         noise = torch.randn_like(clean) * self._noise_w
         noisy = self._q_sample(clean, t, noise)
         return noisy, noise
-
-    # ── sampling (shared) ──────────────────────────────────────
 
     def _make_initial_noise(self, batch_size: int) -> Tensor:
         """Random noise tensor scaled by gen_noise_weight."""
@@ -113,30 +127,32 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         )
         return torch.randn(shape, device=self.device) * self._noise_w
 
+    def _resolve_sample_steps(self, steps: int | None = None) -> int:
+        return int(self.optimization.sample_steps if steps is None else steps)
+
+    @torch.no_grad()
+    def _reverse_process(self, state: Tensor, *, t_start: float, steps: int | None = None) -> Tensor:
+        """Run the shared reverse trajectory from ``t_start`` down to clean."""
+        steps = self._resolve_sample_steps(steps)
+        if t_start <= 0.0:
+            return state
+        step_size = 1.0 / steps
+        n_remaining = int(t_start * steps)
+        current = state
+        for i in range(n_remaining):
+            t = t_start - i * step_size
+            current = self.one_step_sample(current, t, step_size)
+        return current
+
     @torch.no_grad()
     def sample(self, batch_size: int = 1, steps: int | None = None) -> Tensor:
         """Full reverse trajectory: noise (t=1) → clean (t=0)."""
         self.eval()
-        steps = int(steps or self.optimization.sample_steps)
-        step_size = 1.0 / steps
-        x = self._make_initial_noise(batch_size)
-        for i in range(steps):
-            t = 1.0 - i * step_size     # descending from 1 toward 0
-            x = self.one_step_sample(x, t, step_size)
-        return x
-
-    def predict_step(self, batch, batch_idx):
-        """Generate samples — one batch per predict dataloader item.
-
-        ``batch`` is a dict with keys ``batch_size`` (int) and
-        ``sample_steps`` (int), pre-split by the driver so each device
-        produces its share of the total ``num_samples``.
-        """
-        bs = batch["batch_size"]
-        batch_size = self._predict_scalar_int(bs)
-        ss = batch["sample_steps"]
-        steps = self._predict_scalar_int(ss)
-        return self.sample(batch_size=batch_size, steps=steps)
+        return self._reverse_process(
+            self._make_initial_noise(batch_size),
+            t_start=1.0,
+            steps=steps,
+        )
 
     @staticmethod
     def _predict_scalar_int(value) -> int:
@@ -148,23 +164,34 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             return BaseTrainingFramework._predict_scalar_int(value[0])
         return int(value)
 
+    def _parse_predict_request(self, batch: dict) -> tuple[int, int]:
+        return (
+            self._predict_scalar_int(batch["batch_size"]),
+            self._predict_scalar_int(batch["sample_steps"]),
+        )
+
+    # ── test / predict hooks ───────────────────────────────────
+
+    def predict_step(self, batch, batch_idx):
+        """Generate samples — one batch per predict dataloader item.
+
+        ``batch`` is a dict with keys ``batch_size`` (int) and
+        ``sample_steps`` (int), pre-split by the driver so each device
+        produces its share of the total ``num_samples``.
+        This is only called during testing, never during training or validation.
+        """
+        del batch_idx
+        batch_size, steps = self._parse_predict_request(batch)
+        return self.sample(batch_size=batch_size, steps=steps)
+
     @torch.no_grad()
     def _make_clean(self, noisy: Tensor, t_start: float) -> Tensor:
         """Reverse trajectory from noise level *t_start* down to clean (t=0).
-
         Paired inverse of ``_make_noisy``: denoises a volume at level
         *t_start* by running ``one_step_sample`` for the remaining steps.
+        This is only called during validation, never during training.
         """
-        steps = self.optimization.sample_steps
-        step_size = 1.0 / steps
-        n_remaining = int(t_start * steps)
-        if n_remaining <= 0:
-            return noisy
-        x = noisy
-        for i in range(n_remaining):
-            t = t_start - i * step_size     # descending from t_start toward 0
-            x = self.one_step_sample(x, t, step_size)
-        return x
+        return self._reverse_process(noisy, t_start=t_start)
 
     # ── shared infrastructure ──────────────────────────────────
 
@@ -217,7 +244,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         del clean
         return {}
 
-    # ── fusion validation (crop-based datasets) ──────────────────
+    # ── validation helpers ──────────────────────────────────────
 
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
         """On the first validation epoch, build the noisy-crop bank for all fusions.
@@ -408,19 +435,35 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 )
 
             if fusion_slice_panels and should_log:
-                # Build matrix: rows = w-slices, columns = fusions
-                n_slices = len(fusion_slice_panels[0])
-                matrix_rows = []
-                for si in range(n_slices):
-                    row_panels = [fusion_slice_panels[fi][si] for fi in range(len(fusion_slice_panels))]
-                    matrix_rows.append(np.hstack(row_panels))
                 log_image_artifact(
-                    self.logger, np.vstack(matrix_rows),
+                    self.logger, _stack_fusion_slice_matrix(fusion_slice_panels),
                     f"val_fusion_{t_key}",
                     self.global_step,
                 )
 
-    # ── sample visualization (shared, test & validation) ─────────
+    def _log_validation_preview(self, clean: Tensor) -> None:
+        """Log a small denoise preview from the validation batch."""
+        n_show = min(clean.shape[0], 5)
+        t_tensor = torch.full((n_show,), 1.0, device=clean.device)
+        noisy, _ = self._make_noisy(clean[:n_show], t_tensor)
+        denoised = self._make_clean(noisy, 1.0)
+
+        panels = []
+        for i in range(n_show):
+            clean_slice = clean[i, 0].detach().float().cpu().numpy()
+            denoised_slice = denoised[i, 0].detach().float().cpu().numpy()
+            mid_w = clean_slice.shape[2] // 2
+            panels.append(fix_2d_scalar(clean_slice[:, :, mid_w], denoised_slice[:, :, mid_w], show_residual=True))
+
+        if panels:
+            log_image_artifact(
+                self.logger,
+                np.vstack(panels),
+                "val_yz_midw_t100_batch_1",
+                self.global_step,
+            )
+
+    # ── test helpers ────────────────────────────────────────────
 
     @torch.no_grad()
     def log_sample_slices(self, samples: Tensor, tag: str) -> None:
@@ -447,11 +490,29 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 self.logger, np.vstack(panels), tag, self.global_step,
             )
 
-    # ── PL epoch-end hooks ───────────────────────────────────────
-
     def on_validation_epoch_end(self) -> None:
         if self.val_fusions_noised:
             self._log_fusion_validation()
+
+    def _testing_config(self):
+        testing = getattr(self.config, "testing", None)
+        if testing is None or not testing.run_sampling_after_fit:
+            return None
+        return testing
+
+    def _validation_dataset_for_testing(self):
+        val_dataset = getattr(self.trainer, "val_dataloaders", None)
+        if val_dataset is not None and hasattr(val_dataset, "dataset"):
+            return val_dataset.dataset
+        return None
+
+    def _find_artifact_manager(self):
+        from utils.display.log_artifact import ArtifactManager
+
+        for callback in getattr(self.trainer, "callbacks", []):
+            if isinstance(callback, ArtifactManager):
+                return callback
+        return None
 
     def on_train_end(self) -> None:
         """Post-fit testing: upload checkpoints, generate samples, compute FID."""
@@ -467,23 +528,12 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             upload_checkpoints(trainer, logger)
 
         # Post-fit sampling + FID/MMD/MS-SSIM (if testing enabled)
-        testing = getattr(self.config, "testing", None)
-        if testing is None or not testing.run_sampling_after_fit:
+        testing = self._testing_config()
+        if testing is None:
             return
 
-        val_dataset = getattr(trainer, "val_dataloaders", None)
-        if val_dataset is not None and hasattr(val_dataset, "dataset"):
-            val_dataset = val_dataset.dataset
-        else:
-            val_dataset = None
-
-        artifact_manager = None
-        for callback in getattr(trainer, "callbacks", []):
-            from utils.display.log_artifact import ArtifactManager
-            if isinstance(callback, ArtifactManager):
-                artifact_manager = callback
-                break
-
+        val_dataset = self._validation_dataset_for_testing()
+        artifact_manager = self._find_artifact_manager()
         if artifact_manager is None:
             print("WARNING: ArtifactManager callback not found, skipping post-fit testing")
             return
@@ -498,26 +548,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             sample_steps=testing.sample_steps,
         )
 
-    def _run_fixed_seed_generation(
-        self, batch_size: int, sample_steps: int
-    ) -> dict[str, float]:
-        """Generate samples with a fixed seed and return summary statistics."""
-        gen = torch.Generator(device=self.device)
-        gen.manual_seed(42)
-        orig_state = torch.get_rng_state()
-        torch.manual_seed(42)
-        try:
-            samples = self.sample(batch_size=batch_size, steps=sample_steps)
-        finally:
-            torch.set_rng_state(orig_state)
-        return {
-            "gen_sample_min": float(samples.min()),
-            "gen_sample_max": float(samples.max()),
-            "gen_sample_mean": float(samples.mean()),
-            "gen_sample_std": float(samples.std()),
-        }
-
-    # ── PL hooks ───────────────────────────────────────────────
+    # ── training / validation hooks ────────────────────────────
 
     def training_step(
         self, batch: dict[str, Tensor], batch_idx: int
@@ -564,24 +595,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         # batch_idx==1 is the last batch with current val config (32 crops,
         if batch_idx == 1 and self.logger is not None:
             try:
-                n_show = min(clean.shape[0], 5)
-                t_tensor = torch.full((n_show,), 1.0, device=clean.device)
-                noisy, _ = self._make_noisy(clean[:n_show], t_tensor)
-                denoised = self._make_clean(noisy, 1.0)
-
-                panels = []
-                for i in range(n_show):
-                    c0 = clean[i, 0].detach().float().cpu().numpy()
-                    d0 = denoised[i, 0].detach().float().cpu().numpy()
-                    mid_w = c0.shape[2] // 2
-                    panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], show_residual=True))
-
-                if panels:
-                    log_image_artifact(
-                        self.logger, np.vstack(panels),
-                        "val_yz_midw_t100_batch_1",
-                        self.global_step,
-                    )
+                self._log_validation_preview(clean)
             except Exception:
                 import traceback
                 print("WARNING: failed to log batch-1 vstack panel:", flush=True)
