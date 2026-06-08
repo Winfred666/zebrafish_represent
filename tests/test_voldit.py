@@ -7,11 +7,13 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
+from modules.framework.base import BaseTrainingFramework
 from modules.framework.vq_vae_s1 import VQVAES1Module
 from modules.framework.voldit_ddpm import VolDiTDDPMModule
 from modules.model.voldit import VolDiT
 from modules.model.vq_gan import MONAIVQGAN
 from utils.sanitize.framework_config import (
+    BaseFrameworkParams,
     CommonDiffusionParams,
     DDPMDiffusionParams,
     OptimizationParams,
@@ -24,6 +26,28 @@ from utils.sanitize.framework_config import (
 class TinyStage1(nn.Module):
     def encode_stage_2_inputs(self, x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.avg_pool3d(x, kernel_size=2).repeat(1, 8, 1, 1, 1)
+
+
+class TinySampleModel(nn.Module):
+    in_channels = 1
+    input_size = (2, 2, 2)
+
+    def forward(self, x: torch.Tensor, timesteps: torch.Tensor, pos_idx: torch.Tensor | None = None) -> torch.Tensor:
+        del timesteps, pos_idx
+        return x
+
+
+class TinySampleFramework(BaseTrainingFramework):
+    def get_data_loss(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {"loss": batch["target"].sum() * 0.0}
+
+    def _q_sample(self, clean: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+        del t, noise
+        return clean
+
+    def one_step_sample(self, noisy: torch.Tensor, t: float, step_size: float) -> torch.Tensor:
+        del t, step_size
+        return noisy + 1.0
 
 
 class VolDiTIntegrationTest(unittest.TestCase):
@@ -181,6 +205,30 @@ class VolDiTIntegrationTest(unittest.TestCase):
         module = VolDiTDDPMModule(params)
         loss = module.training_step({"target": torch.randn(2, 1, 8, 8, 8)}, 0)
         self.assertEqual(loss.ndim, 0)
+
+    def test_predict_step_uses_same_reverse_sampling_core(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=4,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinySampleFramework(params)
+
+        with patch.object(module, "_make_initial_noise", return_value=torch.zeros(2, 1, 2, 2, 2)):
+            sampled = module.sample(batch_size=2, steps=3)
+            predicted = module.predict_step(
+                {"batch_size": torch.tensor([2]), "sample_steps": torch.tensor([3])},
+                batch_idx=0,
+            )
+
+        self.assertTrue(torch.equal(sampled, predicted))
+        self.assertTrue(torch.equal(predicted, torch.full((2, 1, 2, 2, 2), 3.0)))
 
 
 if __name__ == "__main__":
