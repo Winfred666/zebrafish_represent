@@ -317,7 +317,8 @@ def _materialize_one_volume(
         crop_np = _extract_crop(volume, start_d, start_h, start_w, ds.crop_size, ds.normalize)
         if ds.normalize:
             signal_threshold = -1.0 + 0.001 * 2  # 0.001 in [0,1] → -0.998 in [-1,1]
-            signal_fraction = np.mean(crop_np > signal_threshold)
+            signal_fraction = np.mean(crop_np > signal_threshold) # WARNING: change to max to make it easier to pass as long as one pixel is above the threshold,
+            # can be changed back to mean if we want to be more strict about empty crops
             if signal_fraction < 0.001:  # exclude crops that are ≥99.9% background
                 empty_count += 1
                 continue

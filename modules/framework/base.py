@@ -303,9 +303,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
         """Build the noisy-crop bank for all fusions during validation."""
-        trainer = getattr(self, "trainer", None)
-        if bool(getattr(trainer, "sanity_checking", False)):
-            return
         if "fusion_id" not in batch or "pos_idx" not in batch:
             return
         if not self._fusion_collecting and self.val_fusions_noised:
@@ -319,8 +316,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             self._fusion_collecting = True
 
         for fusion_idx in range(self.FUSION_NUMBER):
-            if self.val_fusions_clean[fusion_idx]:
-                continue
             fusion_mask = batch["fusion_id"] == fusion_idx
             if not fusion_mask.any():
                 continue
@@ -360,7 +355,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             return False
         if len(self.val_fusions_noised) != self.FUSION_NUMBER:
             return False
-
         for fusion_idx in range(self.FUSION_NUMBER):
             if not self.val_fusions_clean[fusion_idx]:
                 return False
@@ -486,6 +480,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 if should_log:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
+                    clean_unit = np.clip((c0 + 1.0) * 0.5, 0.0, None)
+                    p99 = float(np.quantile(clean_unit, 0.99))
+                    scaling_rate = 1.0 / max(p99, 1.0e-6)
+                    c0_vis = np.clip((c0 + 1.0) * scaling_rate - 1.0, -1.0, 1.0)
+                    d0_vis = np.clip((d0 + 1.0) * scaling_rate - 1.0, -1.0, 1.0)
                     w_size = c0.shape[2]
                     if w_size > self.FUSION_SLICE_NUMBER + 1:
                         w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
@@ -494,7 +493,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     slice_panels = []
                     for wi in w_indices:
                         slice_panels.append(fix_2d_scalar(
-                            c0[:, :, wi], d0[:, :, wi], colorbar_limits=(-1.0, 1.0)
+                            c0_vis[:, :, wi], d0_vis[:, :, wi], colorbar_limits=(-1.0, 1.0)
                         ))
                     fusion_slice_panels.append(slice_panels)
 

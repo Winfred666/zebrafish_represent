@@ -13,7 +13,8 @@ from modules.block.common import to_3tuple
 
 
 class ConvPatchTokenizer3D(nn.Module):
-    """Tokenize a volume into one token per output patch via `Conv3d`."""
+    """Tokenize a volume into one token per output patch via `Conv3d`.
+    This is the same as flattened + linear layer of a ViT-style"""
 
     def __init__(
         self,

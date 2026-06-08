@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 
@@ -17,6 +18,24 @@ from modules.model.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _allow_nondeterministic_quantizer_ops():
+    """MONAI quantizer uses torch.histc on CUDA, which is not deterministic."""
+    deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = (
+        torch.is_deterministic_algorithms_warn_only_enabled()
+        if hasattr(torch, "is_deterministic_algorithms_warn_only_enabled")
+        else False
+    )
+    if deterministic_enabled:
+        torch.use_deterministic_algorithms(False)
+    try:
+        yield
+    finally:
+        if deterministic_enabled:
+            torch.use_deterministic_algorithms(True, warn_only=warn_only_enabled)
 
 
 class MONAIVQGAN(nn.Module):
@@ -103,7 +122,8 @@ class MONAIVQGAN(nn.Module):
         return self.network.quantizer
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        reconstruction, quantization_loss = self.network(x)
+        with _allow_nondeterministic_quantizer_ops():
+            reconstruction, quantization_loss = self.network(x)
         perplexity = getattr(self.network.quantizer, "perplexity", None)
         if not isinstance(perplexity, torch.Tensor):
             perplexity = torch.as_tensor(0.0, device=x.device, dtype=quantization_loss.dtype)
@@ -115,16 +135,19 @@ class MONAIVQGAN(nn.Module):
         }
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network.encode(x)
+        with _allow_nondeterministic_quantizer_ops():
+            return self.network.encode(x)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         return self.network.decode(z)
 
     def encode_stage_2_inputs(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network.encode_stage_2_inputs(x)
+        with _allow_nondeterministic_quantizer_ops():
+            return self.network.encode_stage_2_inputs(x)
 
     def decode_stage_2_outputs(self, z: torch.Tensor) -> torch.Tensor:
-        return self.network.decode_stage_2_outputs(z)
+        with _allow_nondeterministic_quantizer_ops():
+            return self.network.decode_stage_2_outputs(z)
 
     @torch.no_grad()
     def one_step_reconstruct(self, x: torch.Tensor) -> torch.Tensor:

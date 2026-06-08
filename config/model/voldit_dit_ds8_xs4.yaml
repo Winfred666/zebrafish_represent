@@ -8,7 +8,7 @@ stage1_model:
     channels: [128, 256, 512]
     num_res_channels: [128, 256, 512]
     num_res_layers: 2
-    downsample_parameters: [[2, 4, 1, 1], [2, 4, 1, 1], [2, 4, 1, 1]]
+    downsample_parameters: [[2, 4, 1, 1], [2, 4, 1, 1], [2, 4, 1, 1]] # downsample 8
     upsample_parameters: [[2, 4, 1, 1, 0], [2, 4, 1, 1, 0], [2, 4, 1, 1, 0]]
     num_embeddings: 4096
     embedding_dim: 8
@@ -20,7 +20,7 @@ stage1_model:
     output_act: null
     ddp_sync: true
     use_checkpointing: false
-    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_s1_20ep_best.pth
+    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_ddp4_resume_best.pth
     strict_load: true
 
 model:

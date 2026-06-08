@@ -1,0 +1,6 @@
+# 3-GPU DDP wrapper for VolDiT stage-2 fine-tuning.
+import_config: ddp4_voldit_finetune.yaml
+
+trainer:
+  params:
+    devices: 3

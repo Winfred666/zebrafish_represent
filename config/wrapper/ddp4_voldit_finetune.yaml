@@ -1,5 +1,15 @@
 # 4-GPU DDP wrapper for VolDiT stage-2 fine-tuning.
-import_config: ddp4_voldit.yaml
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 20
+    devices: 4
+    strategy: ddp_find_unused_parameters_true
+    accumulate_grad_batches: 1
+    precision: "bf16-mixed"
+    num_sanity_val_steps: 10
+    limit_val_batches: 0.75
 
 logging:
   params:
