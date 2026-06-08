@@ -4,25 +4,19 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn as nn
 from monai.networks.nets import VQVAE as MONAIVQVAE
 
+from modules.model.base import (
+    extract_checkpoint_state_dict,
+    filter_matching_state_dict,
+    load_raw_checkpoint,
+    strip_state_dict_prefixes,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _strip_known_prefixes(key: str) -> str:
-    prefixes = ("module.", "model.", "vqvae.", "network.")
-    changed = True
-    while changed:
-        changed = False
-        for prefix in prefixes:
-            if key.startswith(prefix):
-                key = key[len(prefix):]
-                changed = True
-    return key
 
 
 class MONAIVQGAN(nn.Module):
@@ -137,23 +131,14 @@ class MONAIVQGAN(nn.Module):
         return self.decode_stage_2_outputs(self.encode_stage_2_inputs(x))
 
     def load_ckpt(self, ckpt_path: str | Path, *, strict: bool = True) -> None:
-        raw = torch.load(Path(ckpt_path), map_location="cpu")
-        if isinstance(raw, dict):
-            state_dict: dict[str, Any] = raw.get("model", raw.get("state_dict", raw))
-        else:
-            state_dict = raw
-
-        normalized = {_strip_known_prefixes(k): v for k, v in state_dict.items()}
+        raw = load_raw_checkpoint(ckpt_path)
+        state_dict = extract_checkpoint_state_dict(raw)
+        normalized = strip_state_dict_prefixes(
+            state_dict,
+            prefixes=("module.", "model.", "vqvae.", "network."),
+        )
         if not strict:
-            target = self.network.state_dict()
-            skipped = [
-                key for key, value in normalized.items()
-                if key not in target or target[key].shape != value.shape
-            ]
-            normalized = {
-                key: value for key, value in normalized.items()
-                if key in target and target[key].shape == value.shape
-            }
+            normalized, skipped = filter_matching_state_dict(normalized, self.network.state_dict())
             if skipped:
                 logger.warning("Skipped %d MONAIVQGAN checkpoint keys", len(skipped))
 

@@ -3,11 +3,68 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Iterable
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+
+def load_raw_checkpoint(ckpt_path: str | Path) -> Any:
+    return torch.load(Path(ckpt_path), map_location="cpu")
+
+
+def extract_checkpoint_state_dict(raw_checkpoint: Any) -> dict[str, Any]:
+    if isinstance(raw_checkpoint, dict):
+        state_dict = raw_checkpoint.get("model", raw_checkpoint.get("state_dict", raw_checkpoint))
+    else:
+        state_dict = raw_checkpoint
+    return dict(state_dict)
+
+
+def merge_ema_shadow_weights(
+    state_dict: dict[str, Any],
+    raw_checkpoint: Any,
+) -> dict[str, Any]:
+    if isinstance(raw_checkpoint, dict) and raw_checkpoint.get("ema") is not None:
+        merged = dict(state_dict)
+        merged.update(raw_checkpoint["ema"].get("shadow", {}))
+        return merged
+    return state_dict
+
+
+def strip_state_dict_prefixes(
+    state_dict: dict[str, Any],
+    prefixes: Iterable[str] = ("module.", "model."),
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    key = key[len(prefix):]
+                    changed = True
+        normalized[key] = value
+    return normalized
+
+
+def filter_matching_state_dict(
+    state_dict: dict[str, Any],
+    target_state_dict: dict[str, Tensor],
+) -> tuple[dict[str, Any], list[str]]:
+    skipped = [
+        key for key, value in state_dict.items()
+        if key not in target_state_dict or target_state_dict[key].shape != value.shape
+    ]
+    filtered = {
+        key: value for key, value in state_dict.items()
+        if key in target_state_dict and target_state_dict[key].shape == value.shape
+    }
+    return filtered, skipped
 
 
 class BaseVolumeModel(nn.Module, ABC):

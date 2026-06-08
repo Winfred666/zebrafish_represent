@@ -9,6 +9,7 @@ vectors for each stage.
 from __future__ import annotations
 
 import math
+import logging
 from typing import Tuple
 
 import torch
@@ -22,7 +23,15 @@ from modules.block.pos_enc import SinusoidalPosEmbedder
 from modules.block.time_enc import DualHeadTimestepEmbedder
 from modules.model.dit3d import PatchEmbed3D
 
-from modules.model.base import BaseVolumeModel
+from modules.model.base import (
+    BaseVolumeModel,
+    extract_checkpoint_state_dict,
+    filter_matching_state_dict,
+    load_raw_checkpoint,
+    strip_state_dict_prefixes,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PRDiT(BaseVolumeModel):
@@ -138,15 +147,14 @@ class PRDiT(BaseVolumeModel):
 
     def _load_stage1_ckpt(self, ckpt_path: str) -> None:
         """Load stage-1 weights. Only freezes coarse path at stage 2 (depth > 0)."""
-        import logging
-        logger = logging.getLogger(__name__)
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        state_dict = ckpt.get("state_dict", ckpt)
-        # Strip Lightning "model." prefix if present
-        if any(k.startswith("model.") for k in state_dict):
-            state_dict = {k[len("model."):]: v for k, v in state_dict.items()}
+        ckpt = load_raw_checkpoint(ckpt_path)
+        state_dict = extract_checkpoint_state_dict(ckpt)
+        state_dict = strip_state_dict_prefixes(state_dict, prefixes=("model.", "module."))
+        state_dict, skipped = filter_matching_state_dict(state_dict, self.state_dict())
         missing, unexpected = self.load_state_dict(state_dict, strict=False)
         logger.info("Loaded stage-1 checkpoint from %s", ckpt_path)
+        if skipped:
+            logger.info("  Skipped keys: %s", skipped)
         logger.info("  Missing keys: %s", missing if missing else "(none)")
         logger.info("  Unexpected keys: %s", unexpected if unexpected else "(none)")
         if self.depth > 0:

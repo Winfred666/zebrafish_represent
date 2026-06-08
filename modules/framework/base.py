@@ -90,7 +90,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.diffusion = config.diffusion
         self.model = config.model
         self._noise_w = float(config.diffusion.gen_noise_weight)
-        self.save_hyperparameters(config.model_dump(mode="python"), ignore=["model"])
+        ignore = ["model"]
+        if hasattr(config, "stage1_model"):
+            ignore.append("stage1_model")
+        self.save_hyperparameters(config.model_dump(mode="python"), ignore=ignore)
 
         self.val_fusions_clean: list[list] = []
         self.val_fusions_noised: list[dict[str, list]] = []
@@ -115,11 +118,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
     # ── shared diffusion / sampling core ───────────────────────
 
+    def _before_make_noisy(self, clean: Tensor) -> Tensor:
+        return clean
+
+    def _after_make_clean(self, clean: Tensor) -> Tensor:
+        return clean
+
     def _make_noisy(self, clean: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
         """Corrupt *clean* at level *t*: generate noise → mix via ``_q_sample``."""
-        # Keep the base hook surface small. If a subclass needs to transform
-        # the clean target before corruption, do it in its own loss code.
-        # Previous experiments kept a `_before_make_noisy` hook here.
+        clean = self._before_make_noisy(clean)
         noise = torch.randn_like(clean) * self._noise_w
         noisy = self._q_sample(clean, t, noise)
         return noisy, noise
@@ -201,11 +208,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     ) -> Tensor:
         """Full reverse trajectory: noise (t=1) → clean (t=0)."""
         self.eval()
-        return self._reverse_process(
-            self._make_initial_noise(batch_size, seed=seed),
-            t_start=1.0,
-            steps=steps,
-        )
+        initial_noise = self._make_initial_noise(batch_size, seed=seed)
+        if steps is None:
+            return self._make_clean(initial_noise, t_start=1.0)
+        clean = self._reverse_process(initial_noise, t_start=1.0, steps=steps)
+        return self._after_make_clean(clean)
 
     @staticmethod
     def _predict_scalar_int(value) -> int:
@@ -234,7 +241,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     @torch.no_grad()
     def _make_clean(self, noisy: Tensor, t_start: float) -> Tensor:
         """Reverse trajectory from noise level *t_start* down to clean (t=0)."""
-        return self._reverse_process(noisy, t_start=t_start)
+        clean = self._reverse_process(noisy, t_start=t_start)
+        return self._after_make_clean(clean)
 
     # ── shared infrastructure ──────────────────────────────────
 

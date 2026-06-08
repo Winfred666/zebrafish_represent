@@ -59,20 +59,12 @@ class RectifiedFlowModuleParams(BaseFrameworkParams):
     """Params for RectifiedFlowModule — model reference resolved at build time."""
 
 
-class DDPMModuleParams(BaseFrameworkParams):
-    """Params for DDPMModule — model reference resolved at build time."""
-    diffusion: DDPMDiffusionParams
+class LatentDDPMModuleParams(BaseFrameworkParams):
+    """Params for latent DDPM training with a frozen stage-1 encoder."""
 
-
-class VolDiTDDPMModuleParams(IngestibleParams):
-    """Params for latent VolDiT DDPM training with a frozen stage-1 encoder."""
-
-    model: object = None
     stage1_model: object = None
-    optimization: OptimizationParams
     diffusion: DDPMDiffusionParams
     scale_factor: float = Field(default=1.0, gt=0.0)
-    lr_gamma: float = Field(default=0.999, gt=0.0, le=1.0)
 
 
 class IaNDiffusionParams(CommonDiffusionParams):
@@ -151,6 +143,7 @@ class VQVAES2ModuleParams(IngestibleParams):
     """Params for VQVAES2Module (stage 2 decoder fine-tuning)."""
 
     model: object = None
+    patch_size: tuple[int, int, int] = (64, 64, 64)
     lr: float = Field(default=1e-4, gt=0.0)
     l1_weight: float = Field(default=1.0, ge=0.0)
     perceptual_weight: float = Field(default=1.0, ge=0.0)
@@ -160,3 +153,9 @@ class VQVAES2ModuleParams(IngestibleParams):
     disc_loss_type: str = "vanilla"
     disc_channels: int = Field(default=64, ge=1)
     disc_layers: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_patch_size(self) -> "VQVAES2ModuleParams":
+        if any(size < 1 for size in self.patch_size):
+            raise ValueError(f"patch_size must contain positive integers, got {self.patch_size}")
+        return self

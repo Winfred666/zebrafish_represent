@@ -24,7 +24,7 @@ class RuntimeEntryTest(unittest.TestCase):
         _ensure_heavy_imports()
         expected_classes = {
             "DiT3D", "MONAIVQGAN", "PerceptualNetEncoder", "PRDiT", "VolDiT",
-            "RectifiedFlowModule", "DDPMModule", "VolDiTDDPMModule",
+            "RectifiedFlowModule", "LatentDDPMModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
@@ -196,7 +196,7 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(model_config["model"]["params"]["input_size"], [16, 16, 16])
 
         framework_config = load_yaml_config("config/framework/voldit_ddpm.yaml")
-        self.assertEqual(framework_config["framework"]["class_name"], "VolDiTDDPMModule")
+        self.assertEqual(framework_config["framework"]["class_name"], "LatentDDPMModule")
         self.assertEqual(
             framework_config["framework"]["params"]["diffusion"]["prediction_type"],
             "v_prediction",

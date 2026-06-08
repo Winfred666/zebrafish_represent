@@ -1,8 +1,8 @@
 """VQ-VAE Stage 2: decoder fine-tuning with frozen encoder/codebook.
 
-Extends ``pl.LightningModule`` directly.  Encoder, pre_vq_conv, and codebook
-are frozen; only the decoder and post_vq_conv are trained with patch-based
-encoding and GAN losses.
+Extends ``pl.LightningModule`` directly. Encoder and quantizer are frozen;
+only the MONAI decoder is trained with patch-based latent reconstruction and
+GAN losses.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from modules.framework.vq_vae_common import (
     hinge_d_loss,
     vanilla_d_loss,
 )
-from modules.model.vqvae import VQVAE
+from modules.model.vq_gan import MONAIVQGAN
+from utils.sanitize.framework_config import VQVAES2ModuleParams
 
 
 class VQVAES2Module(L.LightningModule):
@@ -36,43 +37,40 @@ class VQVAES2Module(L.LightningModule):
     Alternating generator/discriminator updates with manual optimization.
     """
 
-    def __init__(
-        self,
-        model: VQVAE,
-        lr: float = 1e-4,
-        l1_weight: float = 1.0,
-        perceptual_weight: float = 1.0,
-        volume_gan_weight: float = 0.1,
-        gan_feat_weight: float = 1.0,
-        discriminator_iter_start: int = 30000,
-        disc_loss_type: str = "vanilla",
-        disc_channels: int = 64,
-        disc_layers: int = 3,
-    ):
+    config: VQVAES2ModuleParams
+
+    def __init__(self, config: VQVAES2ModuleParams):
         super().__init__()
-        self.vqvae = model
-        self.lr = lr
-        self.l1_weight = l1_weight
-        self.perceptual_weight = perceptual_weight
-        self.volume_gan_weight = volume_gan_weight
-        self.gan_feat_weight = gan_feat_weight
-        self.discriminator_iter_start = discriminator_iter_start
+        self.config = config
+        self.vqvae = config.model
+        self.patch_size = tuple(int(size) for size in config.patch_size)
+        self.lr = float(config.lr)
+        self.l1_weight = float(config.l1_weight)
+        self.perceptual_weight = float(config.perceptual_weight)
+        self.volume_gan_weight = float(config.volume_gan_weight)
+        self.gan_feat_weight = float(config.gan_feat_weight)
+        self.discriminator_iter_start = int(config.discriminator_iter_start)
         self.automatic_optimization = False
 
-        # freeze encoder + codebook
+        if not isinstance(self.vqvae, MONAIVQGAN):
+            raise TypeError("VQVAES2Module expects model to be a MONAIVQGAN instance.")
+
         for p in self.vqvae.encoder.parameters():
             p.requires_grad = False
-        for p in self.vqvae.pre_vq_conv.parameters():
+        for p in self.vqvae.quantizer.parameters():
             p.requires_grad = False
-        self.vqvae.codebook.embeddings.requires_grad = False
+        for p in self.vqvae.decoder.parameters():
+            p.requires_grad = True
 
         self.volume_discriminator = NLayerDiscriminator3D(
-            input_nc=1, ndf=disc_channels, n_layers=disc_layers,
+            input_nc=int(getattr(self.vqvae, "in_channels", 1)),
+            ndf=int(config.disc_channels),
+            n_layers=int(config.disc_layers),
         )
 
         self.perceptual_loss_fn = MONAIPerceptualLoss()
 
-        if disc_loss_type == "hinge":
+        if config.disc_loss_type == "hinge":
             self.disc_loss_fn = hinge_d_loss
         else:
             self.disc_loss_fn = vanilla_d_loss
@@ -85,26 +83,44 @@ class VQVAES2Module(L.LightningModule):
     # ------------------------------------------------------------------
 
     def _forward_patched(self, x: Tensor) -> tuple[Tensor, dict]:
-        """Unfold -> patch-encode -> reassemble -> decode."""
+        """Unfold -> encode stage-2 latents per patch -> reassemble -> decode."""
         b = x.shape[0]
-        ps = self.vqvae.patch_size
-        D, H, W = x.shape[2], x.shape[3], x.shape[4]
+        patch_size = self.patch_size
+        depth, height, width = x.shape[2], x.shape[3], x.shape[4]
+        for axis, (full_size, patch) in enumerate(zip((depth, height, width), patch_size), start=1):
+            if full_size % patch != 0:
+                raise ValueError(
+                    f"Input size must be divisible by patch_size for VQ stage-2 patching. "
+                    f"Axis={axis}, input={full_size}, patch_size={patch}."
+                )
 
-        x_patches = x.unfold(2, ps, ps).unfold(3, ps, ps).unfold(4, ps, ps)
-        x_patches = rearrange(x_patches, "b c p1 p2 p3 d h w -> (b p1 p2 p3) c d h w")
+        x_patches = (
+            x.unfold(2, patch_size[0], patch_size[0])
+            .unfold(3, patch_size[1], patch_size[1])
+            .unfold(4, patch_size[2], patch_size[2])
+        )
+        x_patches = rearrange(
+            x_patches,
+            "b c p1 p2 p3 d h w -> (b p1 p2 p3) c d h w",
+        )
 
-        z = self.vqvae.pre_vq_conv(self.vqvae.encoder(x_patches))
-        vq_output = self.vqvae.codebook(z)
-        embeddings = vq_output["embeddings"]
+        embeddings = self.vqvae.encode_stage_2_inputs(x_patches)
 
         embeddings = rearrange(embeddings, "(b p) c d h w -> b p c d h w", b=b)
-        p1, p2, p3 = D // ps, H // ps, W // ps
+        p1 = depth // patch_size[0]
+        p2 = height // patch_size[1]
+        p3 = width // patch_size[2]
         embeddings = rearrange(
             embeddings, "b (p1 p2 p3) c d h w -> b c (p1 d) (p2 h) (p3 w)",
             p1=p1, p2=p2, p3=p3,
         )
-        x_recon = self.vqvae.decoder(self.vqvae.post_vq_conv(embeddings))
-        return x_recon, vq_output
+        x_recon = self.vqvae.decode_stage_2_outputs(embeddings)
+        perplexity = getattr(self.vqvae.quantizer, "perplexity", None)
+        if not isinstance(perplexity, Tensor):
+            perplexity = torch.as_tensor(0.0, device=x.device, dtype=x.dtype)
+        else:
+            perplexity = perplexity.to(device=x.device, dtype=x.dtype)
+        return x_recon, {"perplexity": perplexity}
 
     # ------------------------------------------------------------------
     # generator / discriminator forward
@@ -213,8 +229,7 @@ class VQVAES2Module(L.LightningModule):
 
     def configure_optimizers(self):
         opt_ae = torch.optim.Adam(
-            list(self.vqvae.decoder.parameters()) +
-            list(self.vqvae.post_vq_conv.parameters()),
+            list(self.vqvae.decoder.parameters()),
             lr=self.lr, betas=(0.5, 0.9),
         )
         opt_disc = torch.optim.Adam(

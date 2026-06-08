@@ -8,7 +8,6 @@ from modules.model.perceptual_net import PerceptualNetEncoder
 from modules.model.prdit import PRDiT
 from modules.model.voldit import VolDiT
 from modules.model.vq_gan import MONAIVQGAN
-from modules.model.vqvae import VQVAE
 
 __all__ = [
     "BaseVolumeModel",
@@ -19,6 +18,5 @@ __all__ = [
     "PRDiT",
     "PatchEmbed3D",
     "VolDiT",
-    "VQVAE",
     "get_normalized_3d_pos_enc",
 ]

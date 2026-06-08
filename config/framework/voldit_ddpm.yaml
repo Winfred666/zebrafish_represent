@@ -1,11 +1,10 @@
 # Stage-2 VolDiT latent DDPM training over frozen VQ-GAN latents.
 framework:
-  class_name: VolDiTDDPMModule
+  class_name: LatentDDPMModule
   params:
     model: runtime.model
     stage1_model: runtime.stage1_model
     scale_factor: 1.0
-    lr_gamma: 0.999
     optimization:
       learning_rate: 0.0001
       weight_decay: 0.0001

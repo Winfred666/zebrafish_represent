@@ -6,15 +6,14 @@ from utils.sanitize.data_config import (
 )
 from utils.sanitize.framework_config import (
     DDPMDiffusionParams,
-    DDPMModuleParams,
     IaNFlowModuleParams,
     IaNDiffusionParams,
+    LatentDDPMModuleParams,
     MAEFinetuneModuleParams,
     MAEParams,
     OptimizationParams,
     RectifiedFlowModuleParams,
     TestingParams,
-    VolDiTDDPMModuleParams,
     VICRegModuleParams,
     VQVAES1ModuleParams,
     VQVAES2ModuleParams,
@@ -26,7 +25,6 @@ from utils.sanitize.model_config import (
     PerceptualNetEncoderParams,
     PRDiTParams,
     VolDiTParams,
-    VQVAEParams,
 )
 from utils.sanitize.param_class import IngestibleParams
 from utils.sanitize.wrapper_config import (
@@ -56,15 +54,13 @@ __all__ = [
     "DDPMDiffusionParams",
     "IaNFlowModuleParams",
     "IaNDiffusionParams",
+    "LatentDDPMModuleParams",
     "MAEFinetuneModuleParams",
     "MAEParams",
     "RectifiedFlowModuleParams",
-    "VolDiTDDPMModuleParams",
     "VICRegModuleParams",
-    "VQVAEParams",
     "VQVAES1ModuleParams",
     "VQVAES2ModuleParams",
-    "DDPMModuleParams",
     "MLFlowLoggerParams",
     "ModelCheckpointParams",
     "EarlyStoppingParams",
