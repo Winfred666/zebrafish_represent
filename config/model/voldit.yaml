@@ -1,0 +1,2 @@
+# Default VolDiT-XS/4 stage-2 model config for ds8 VQ-GAN latents.
+import_config: voldit_dit_ds8_xs4.yaml

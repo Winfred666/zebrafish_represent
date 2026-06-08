@@ -1,5 +1,4 @@
-# VQ-VAE Stage 1 framework config.
-# Usage: --framework-config config/framework/vq_vae_s1.yaml
+# Stage-1 MONAI VQ-GAN fine-tuning from the public VolDiT autoencoder.
 framework:
   class_name: VQVAES1Module
   params:

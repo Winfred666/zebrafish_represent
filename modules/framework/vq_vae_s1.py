@@ -1,87 +1,80 @@
 """VQ-VAE Stage 1: full model training with reconstruction + GAN losses.
 
-Extends ``pl.LightningModule`` directly (not ``BaseTrainingFramework``) because
-VQ-VAE uses dual optimizers and manual backward - fundamentally different from
-the diffusion-based training loop.
+The module inherits :class:`BaseTrainingFramework` for validation-time
+reconstruction/fusion logging, while keeping VQ-GAN's manual dual-optimizer
+training loop.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-import pytorch_lightning as L
+from monai.losses import PatchAdversarialLoss
+from monai.networks.nets import PatchDiscriminator
 
-from modules.block.discriminator import NLayerDiscriminator3D
+from modules.framework.base import BaseTrainingFramework
 from modules.framework.vq_vae_common import (
     MONAIPerceptualLoss,
     feature_matching_loss,
-    generator_gan_loss,
-    hinge_d_loss,
-    vanilla_d_loss,
 )
-from modules.model.vqvae import VQVAE
+from utils.sanitize.framework_config import VQVAES1ModuleParams
 
 
-class VQVAES1Module(L.LightningModule):
+class VQVAES1Module(BaseTrainingFramework):
     """Stage 1 VQ-VAE: train encoder + decoder + codebook end-to-end.
 
     Two optimizers: ``opt_ae`` (generator) and ``opt_disc`` (discriminator).
     Alternating updates: even batches train the generator, odd batches train
     the discriminator (after ``discriminator_iter_start`` global steps).
 
-    Reconstruction validation logs a vstacked mid-W panel comparing
-    original vs. reconstructed volumes.
+    Reconstruction validation uses the shared BaseTrainingFramework matrix
+    slice logger: ``_q_sample`` is identity and ``one_step_sample`` performs
+    encode -> quantize -> decode.
     """
 
-    def __init__(
-        self,
-        model: VQVAE,
-        lr: float = 1e-4,
-        l1_weight: float = 1.0,
-        perceptual_weight: float = 1.0,
-        volume_gan_weight: float = 0.1,
-        gan_feat_weight: float = 1.0,
-        discriminator_iter_start: int = 30000,
-        disc_loss_type: str = "vanilla",
-        disc_channels: int = 64,
-        disc_layers: int = 3,
-    ):
-        super().__init__()
-        self.vqvae = model
-        self.lr = lr
-        self.l1_weight = l1_weight
-        self.perceptual_weight = perceptual_weight
-        self.volume_gan_weight = volume_gan_weight
-        self.gan_feat_weight = gan_feat_weight
-        self.discriminator_iter_start = discriminator_iter_start
+    config: VQVAES1ModuleParams
+
+    def __init__(self, config: VQVAES1ModuleParams):
+        super().__init__(config)
+        self.lr = float(config.lr)
+        self.l1_weight = float(config.l1_weight)
+        self.perceptual_weight = float(config.perceptual_weight)
+        self.volume_gan_weight = float(config.volume_gan_weight)
+        self.gan_feat_weight = float(config.gan_feat_weight)
+        self.discriminator_iter_start = int(config.discriminator_iter_start)
         self.automatic_optimization = False
 
-        # discriminator
-        self.volume_discriminator = NLayerDiscriminator3D(
-            input_nc=1, ndf=disc_channels, n_layers=disc_layers,
+        self.volume_discriminator = PatchDiscriminator(
+            spatial_dims=3,
+            channels=int(config.disc_channels),
+            in_channels=int(getattr(self.model, "in_channels", 1)),
+            out_channels=1,
+            num_layers_d=int(config.disc_layers),
         )
-
         self.perceptual_loss_fn = MONAIPerceptualLoss()
-
-        # select disc loss
-        if disc_loss_type == "hinge":
-            self.disc_loss_fn = hinge_d_loss
-        else:
-            self.disc_loss_fn = vanilla_d_loss
-
-        self._last_val_recon: Tensor | None = None
-        self._last_val_input: Tensor | None = None
+        self.adversarial_loss = PatchAdversarialLoss(criterion=config.disc_loss_type)
 
     # ------------------------------------------------------------------
-    # encode -> decode (one-step, for validation reconstruction)
+    # BaseTrainingFramework reconstruction hooks
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
-    def one_step_reconstruct(self, x: Tensor) -> Tensor:
-        """Encode -> quantize -> decode in one step (no noise/timestep)."""
-        return self.vqvae.one_step_reconstruct(x)
+    @property
+    def vqvae(self) -> nn.Module:
+        return self.model
+
+    def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
+        del t, noise
+        return clean
+
+    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
+        del t, step_size
+        return self.vqvae.one_step_reconstruct(noisy)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, dict]:
+        return self.vqvae(x)
 
     # ------------------------------------------------------------------
     # forward + loss computation
@@ -97,24 +90,59 @@ class VQVAES1Module(L.LightningModule):
         recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
         perceptual_loss_val = self.perceptual_weight * self.perceptual_loss_fn(x, x_recon)
 
-        if self.global_step > self.discriminator_iter_start and self.volume_gan_weight > 0:
-            logits_fake, pred_fake = self.volume_discriminator(x_recon)
-            g_loss = self.volume_gan_weight * generator_gan_loss(logits_fake)
-            aeloss = g_loss
-
-            logits_real, pred_real = self.volume_discriminator(x)
-            gan_feat = self.gan_feat_weight * feature_matching_loss(pred_fake, pred_real)
+        if self.global_step >= self.discriminator_iter_start and self.volume_gan_weight > 0:
+            pred_fake = self.volume_discriminator(x_recon.contiguous())
+            logits_fake = pred_fake[-1]
+            aeloss = self.volume_gan_weight * self.adversarial_loss(
+                logits_fake,
+                target_is_real=True,
+                for_discriminator=False,
+            )
+            if self.gan_feat_weight > 0:
+                with torch.no_grad():
+                    pred_real = self.volume_discriminator(x.contiguous())
+                gan_feat = (
+                    self.volume_gan_weight
+                    * self.gan_feat_weight
+                    * feature_matching_loss(pred_fake[:-1], pred_real[:-1])
+                )
+            else:
+                gan_feat = torch.zeros_like(recon_loss)
         else:
-            aeloss = torch.tensor(0.0, device=x.device, requires_grad=True)
-            gan_feat = torch.tensor(0.0, device=x.device, requires_grad=True)
+            aeloss = torch.zeros_like(recon_loss)
+            gan_feat = torch.zeros_like(recon_loss)
 
         return recon_loss, vq_output, aeloss, perceptual_loss_val, gan_feat
 
     def _forward_disc(self, x: Tensor, x_recon: Tensor) -> Tensor:
         """Discriminator forward."""
-        logits_real, _ = self.volume_discriminator(x.detach())
-        logits_fake, _ = self.volume_discriminator(x_recon.detach())
-        return self.volume_gan_weight * self.disc_loss_fn(logits_real, logits_fake)
+        logits_fake = self.volume_discriminator(x_recon.detach().contiguous())[-1]
+        logits_real = self.volume_discriminator(x.detach().contiguous())[-1]
+        loss_fake = self.adversarial_loss(
+            logits_fake,
+            target_is_real=False,
+            for_discriminator=True,
+        )
+        loss_real = self.adversarial_loss(
+            logits_real,
+            target_is_real=True,
+            for_discriminator=True,
+        )
+        return self.volume_gan_weight * 0.5 * (loss_fake + loss_real)
+
+    def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        x = batch["target"]
+        recon_loss, vq_output, aeloss, perceptual_loss_val, gan_feat = self._forward_gen(x)
+        loss = recon_loss + vq_output["commitment_loss"] + aeloss + perceptual_loss_val + gan_feat
+        return {
+            "loss": loss,
+            "recon_loss": recon_loss,
+            "commitment_loss": vq_output["commitment_loss"],
+            "perceptual_loss": perceptual_loss_val,
+            "aeloss": aeloss,
+            "gan_feat_loss": gan_feat,
+            "perplexity": vq_output["perplexity"],
+        }
 
     # ------------------------------------------------------------------
     # training step (manual optimization, alternating gen/disc)
@@ -130,17 +158,17 @@ class VQVAES1Module(L.LightningModule):
         opt.zero_grad()
 
         if optimizer_idx == 0:
-            recon_loss, vq_output, aeloss, perceptual_loss_val, gan_feat = self._forward_gen(x)
-            loss = recon_loss + vq_output["commitment_loss"] + aeloss + perceptual_loss_val + gan_feat
+            losses = self.get_data_loss(batch)
+            loss = losses["loss"]
             self.manual_backward(loss)
             opt.step()
 
-            self.log("train_recon_loss", recon_loss, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_commitment_loss", vq_output["commitment_loss"], prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_perceptual_loss", perceptual_loss_val, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_aeloss", aeloss, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_gan_feat_loss", gan_feat, on_step=True, on_epoch=True)
-            self.log("train_perplexity", vq_output["perplexity"], prog_bar=True, on_step=True, on_epoch=True)
+            self.log("train_recon_loss", losses["recon_loss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("train_commitment_loss", losses["commitment_loss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("train_perceptual_loss", losses["perceptual_loss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("train_aeloss", losses["aeloss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("train_gan_feat_loss", losses["gan_feat_loss"], on_step=True, on_epoch=True, sync_dist=True)
+            self.log("train_perplexity", losses["perplexity"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             return loss
         else:
             with torch.no_grad():
@@ -148,55 +176,8 @@ class VQVAES1Module(L.LightningModule):
             discloss = self._forward_disc(x, x_recon)
             self.manual_backward(discloss)
             opt.step()
-            self.log("train_disc_loss", discloss, prog_bar=True, on_step=True, on_epoch=True)
+            self.log("train_disc_loss", discloss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             return discloss
-
-    # ------------------------------------------------------------------
-    # validation step - reconstruction quality
-    # ------------------------------------------------------------------
-
-    def validation_step(self, batch: dict, batch_idx: int) -> Tensor:
-        x = batch["target"]
-        x_recon, vq_output = self.vqvae(x)
-        recon_loss = F.l1_loss(x_recon, x)
-        perceptual_loss_val = self.perceptual_loss_fn(x, x_recon)
-
-        self.log("val_recon_loss", recon_loss, prog_bar=True, sync_dist=True, on_epoch=True)
-        self.log("val_perceptual_loss", perceptual_loss_val, sync_dist=True, on_epoch=True)
-        self.log("val_perplexity", vq_output["perplexity"], sync_dist=True, on_epoch=True)
-        self.log("val_commitment_loss", vq_output["commitment_loss"], sync_dist=True, on_epoch=True)
-
-        # store last batch for reconstruction logging
-        self._last_val_input = x.detach().cpu()
-        self._last_val_recon = x_recon.detach().cpu()
-
-        return recon_loss
-
-    # ------------------------------------------------------------------
-    # reconstruction visualization (epoch end)
-    # ------------------------------------------------------------------
-
-    def on_validation_epoch_end(self) -> None:
-        if self._last_val_input is None or self._last_val_recon is None:
-            return
-
-        import numpy as np
-        from utils.display import fix_2d_scalar, log_image_artifact
-
-        n_show = min(self._last_val_input.shape[0], 4)
-        panels = []
-        for i in range(n_show):
-            orig = self._last_val_input[i, 0].float().numpy()
-            recon = self._last_val_recon[i, 0].float().numpy()
-            mid_w = orig.shape[2] // 2
-            panels.append(fix_2d_scalar(orig[:, :, mid_w], recon[:, :, mid_w]))
-
-        if panels and self.logger is not None:
-            log_image_artifact(
-                self.logger, np.vstack(panels),
-                "val_reconstruction_s1",
-                self.global_step,
-            )
 
     # ------------------------------------------------------------------
     # optimizer configuration
@@ -204,11 +185,7 @@ class VQVAES1Module(L.LightningModule):
 
     def configure_optimizers(self):
         opt_ae = torch.optim.Adam(
-            list(self.vqvae.encoder.parameters()) +
-            list(self.vqvae.decoder.parameters()) +
-            list(self.vqvae.pre_vq_conv.parameters()) +
-            list(self.vqvae.post_vq_conv.parameters()) +
-            list(self.vqvae.codebook.parameters()),
+            [p for p in self.vqvae.parameters() if p.requires_grad],
             lr=self.lr, betas=(0.5, 0.9),
         )
         opt_disc = torch.optim.Adam(
@@ -216,3 +193,9 @@ class VQVAES1Module(L.LightningModule):
             lr=self.lr, betas=(0.5, 0.9),
         )
         return [opt_ae, opt_disc]
+
+    def on_train_epoch_end(self) -> None:
+        opts = self.optimizers()
+        opt = opts[0] if isinstance(opts, (list, tuple)) else opts
+        if opt is not None:
+            self.log("lr", opt.param_groups[0]["lr"], on_epoch=True, sync_dist=True)

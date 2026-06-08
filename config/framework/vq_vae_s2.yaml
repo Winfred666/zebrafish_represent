@@ -1,4 +1,4 @@
-# VQ-VAE Stage 2 framework config (decoder fine-tuning).
+# VQ-VAE Stage 2 framework config (decoder fine-tuning, freeze early layers).
 # Usage: --framework-config config/framework/vq_vae_s2.yaml
 framework:
   class_name: VQVAES2Module
