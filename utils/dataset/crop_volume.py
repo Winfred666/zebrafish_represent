@@ -61,7 +61,7 @@ class CropTifVolumeHotDataset(Dataset):
             )
 
         if self.file_count > 0:
-            self._attach_cache(enable_warmup=True)
+            self._attach_cache(enable_warmup=self.cache_root is not None)
 
         print(
             f"[TIF-LOG] Hot dataset indexed {self.file_count} file(s), "

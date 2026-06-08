@@ -1,7 +1,7 @@
 import_config: lg_025.yaml
 
 train_dataset:
-  params:
+  params: # leverage files on NFS (no storage to /tmp)
     cache_root: null
 
 val_dataset:

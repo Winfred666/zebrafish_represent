@@ -301,21 +301,24 @@ def _materialize_one_volume(
             f"expected in_channels={ds.in_channels}"
         )
     volume = volume[: ds.in_channels]
+    full_size_array = np.asarray(volume.shape, dtype=np.int64)
 
     volume = _pad_full_volume_if_needed(
         volume, ds.crop_size, ds.overlap, ds.pad_to_multiple, ds.normalize,
     )
 
     # ── extract & filter crops ──
+    # WARNING: filter rule here: lower than 0.1% of pixels above -0.998 (if normalized) or 0.001 (if not) are considered empty and dropped from the cache. 
+    # This is a heuristic, may need adjustment for other datasets.
     kept_crops: list[np.ndarray] = []
     kept_starts: list[tuple[int, int, int]] = []
     empty_count = 0
     for start_d, start_h, start_w in all_starts:
         crop_np = _extract_crop(volume, start_d, start_h, start_w, ds.crop_size, ds.normalize)
         if ds.normalize:
-            signal_threshold = -1.0 + 0.01 * 2  # 0.01 in [0,1] → -0.98 in [-1,1]
+            signal_threshold = -1.0 + 0.001 * 2  # 0.001 in [0,1] → -0.998 in [-1,1]
             signal_fraction = np.mean(crop_np > signal_threshold)
-            if signal_fraction < 0.01:  # exclude crops that are ≥99% background
+            if signal_fraction < 0.001:  # exclude crops that are ≥99.9% background
                 empty_count += 1
                 continue
         kept_crops.append(crop_np.copy())
@@ -331,7 +334,6 @@ def _materialize_one_volume(
 
     crop_array = np.stack(kept_crops, axis=0).astype(np.float32, copy=False)
     starts_array = np.asarray(kept_starts, dtype=np.int64)
-    full_size_array = np.asarray(volume.shape, dtype=np.int64)
     print(
         f"    materialized {crop_array.shape[0]} crops "
         f"({crop_array.nbytes / 1024**2:.1f} MB)"
@@ -535,6 +537,7 @@ def build_cache_for_config(data_config_path: str) -> None:
             ds.crop_size, ds.overlap, ds.pad_to_multiple,
         )
         ds.file_count = len(ds._file_paths)
+        ds._selected_file_keys_value = ds._build_selected_file_keys()
 
         starts_list, _grid = _build_all_crop_grid(
             vol_shapes, ds.crop_size, ds.overlap, ds.patch_grid_multiple,

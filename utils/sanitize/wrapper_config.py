@@ -17,7 +17,8 @@ def _cuda_runtime_available() -> bool:
     try:
         if not torch.cuda.is_available():
             return False
-        torch.empty(1, device="cuda")
+        if torch.cuda.device_count() <= 0:
+            return False
     except Exception:
         return False
     return True
@@ -120,6 +121,7 @@ class TrainerParams(IngestibleParams):
     devices: int | str = 1
     strategy: str = "auto"
     precision: str | int = "32"
+    deterministic: bool = False
     log_every_n_steps: int = Field(default=10, ge=1)
     check_val_every_n_epoch: int = Field(default=1, ge=1)
     enable_checkpointing: bool = True

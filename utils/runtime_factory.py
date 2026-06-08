@@ -392,7 +392,7 @@ def _blind_iterate_build(items: list[_BuildItem]) -> dict[str, Any]:
 def set_global_seed(seed: int) -> None:
     import pytorch_lightning as L
 
-    L.seed_everything(seed)
+    L.seed_everything(seed, workers=True)
 
 
 def build_training_runtime(
@@ -430,6 +430,9 @@ def build_training_runtime(
     # Seed
     seed = merged_config.get("seed", 42)
     set_global_seed(seed)
+    framework = objects.get("framework")
+    if framework is not None:
+        setattr(framework, "_runtime_seed", int(seed))
 
     # Align CUDA
     align_torch_cuda_runtime(accelerator)

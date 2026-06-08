@@ -1,0 +1,13 @@
+import_config: ddp7_prdit_s2.yaml
+
+resume_ckpt_path: /tmp/mlflow_checkpoints/last.ckpt
+
+logging:
+  params:
+    run_name: prdit_s2_ddp7_gpu05_network_file_resume
+    tags:
+      stage: "2"
+      node: gpu05
+      data_config: lg_025_network_file
+      devices: "7"
+      resume: last_ckpt

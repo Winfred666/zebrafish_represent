@@ -18,6 +18,7 @@ trainer:
     accelerator: auto
     devices: 1
     precision: "bf16"
+    deterministic: true
     check_val_every_n_epoch: 1
     enable_checkpointing: true
     gradient_clip_val: 1.0
@@ -40,12 +41,12 @@ trainer:
         params:
           log_frequency_mins: 1
       
-      # enabled = false just means comment out the callback, uncomment if want enable in the future
+      # To disable a callback, comment it out here and uncomment it when needed again.
       - class_name: EarlyStopping
         params:
           monitor: val_loss
           mode: min
-          patience: 4
+          patience: 8
           min_delta: 1.0e-5
           strict: false
           check_finite: true

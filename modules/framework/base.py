@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -97,6 +98,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.val_fusions_clean: list[list] = []
         self.val_fusions_noised: list[dict[str, list]] = []
         self._fusion_collecting: bool = False
+        self._fusion_object_pg = None
 
     # ── abstract (framework-specific) ──────────────────────────
 
@@ -132,9 +134,47 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         noisy = self._q_sample(clean, t, noise)
         return noisy, noise
 
+    def _runtime_seed_value(self) -> int:
+        return int(getattr(self, "_runtime_seed", 42))
+
+    def _seed_from_parts(self, *parts: object) -> int:
+        seed = self._runtime_seed_value() % 2147483647
+        for part in parts:
+            if isinstance(part, str):
+                values = part.encode("utf-8")
+            elif isinstance(part, torch.Tensor):
+                values = [int(v) for v in part.detach().cpu().reshape(-1).tolist()]
+            elif isinstance(part, (list, tuple)):
+                values = [int(v) for v in part]
+            else:
+                values = [int(part)]
+            for value in values:
+                seed = (seed * 1315423911 + int(value) + 0x9E3779B9) % 2147483647
+        return seed or 42
+
+    @contextmanager
+    def _fixed_seed_context(self, seed: int | None):
+        if seed is None:
+            yield
+            return
+        device_ids: list[int] = []
+        if self.device.type == "cuda" and self.device.index is not None:
+            device_ids = [self.device.index]
+        with torch.random.fork_rng(devices=device_ids):
+            torch.manual_seed(int(seed))
+            if self.device.type == "cuda":
+                torch.cuda.manual_seed_all(int(seed))
+            yield
+
+    def _make_noisy_with_seed(
+        self, clean: Tensor, t: Tensor, *, seed: int | None = None
+    ) -> tuple[Tensor, Tensor]:
+        with self._fixed_seed_context(seed):
+            return self._make_noisy(clean, t)
+
     # ── sampling (shared) ──────────────────────────────────────
 
-    def _make_initial_noise(self, batch_size: int) -> Tensor:
+    def _make_initial_noise(self, batch_size: int, *, seed: int | None = None) -> Tensor:
         """Random noise tensor scaled by gen_noise_weight."""
         shape = (
             batch_size,
@@ -143,15 +183,22 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             self.model.input_size[1],
             self.model.input_size[2],
         )
-        return torch.randn(shape, device=self.device) * self._noise_w
+        with self._fixed_seed_context(seed):
+            return torch.randn(shape, device=self.device) * self._noise_w
 
     @torch.no_grad()
-    def sample(self, batch_size: int = 1, steps: int | None = None) -> Tensor:
+    def sample(
+        self,
+        batch_size: int = 1,
+        steps: int | None = None,
+        *,
+        seed: int | None = None,
+    ) -> Tensor:
         """Full reverse trajectory: noise (t=1) → clean (t=0)."""
         self.eval()
         steps = int(steps or self.optimization.sample_steps)
         step_size = 1.0 / steps
-        x = self._make_initial_noise(batch_size)
+        x = self._make_initial_noise(batch_size, seed=seed)
         for i in range(steps):
             t = 1.0 - i * step_size     # descending from 1 toward 0
             x = self.one_step_sample(x, t, step_size)
@@ -168,7 +215,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         batch_size = self._predict_scalar_int(bs)
         ss = batch["sample_steps"]
         steps = self._predict_scalar_int(ss)
-        return self.sample(batch_size=batch_size, steps=steps)
+        seed = self._seed_from_parts("predict", int(batch_idx), int(getattr(self, "global_rank", 0)))
+        return self.sample(batch_size=batch_size, steps=steps, seed=seed)
 
     @staticmethod
     def _predict_scalar_int(value) -> int:
@@ -240,7 +288,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         batch_size = clean_volume.shape[0]
         device = clean_volume.device
         t_tensor = torch.full((batch_size,), t_val, device=device)
-        noisy, _ = self._make_noisy(clean_volume, t_tensor)
+        noisy, _ = self._make_noisy_with_seed(
+            clean_volume,
+            t_tensor,
+            seed=self._seed_from_parts("reconstruction", round(float(t_val) * 1000)),
+        )
         denoised = self._make_clean(noisy, t_val)
         return F.mse_loss(denoised, clean_volume)
 
@@ -257,6 +309,9 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         Only triggers when the batch carries ``fusion_id`` and ``pos_idx``
         (i.e. from :class:`CropTifVolumeHotDataset`).
         """
+        trainer = getattr(self, "trainer", None)
+        if bool(getattr(trainer, "sanity_checking", False)):
+            return
         if "fusion_id" not in batch or "pos_idx" not in batch:
             return
         if not self._fusion_collecting and self.val_fusions_noised:
@@ -270,6 +325,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             self._fusion_collecting = True
 
         for fusion_idx in range(self.FUSION_NUMBER):
+            if self.val_fusions_clean[fusion_idx]:
+                continue
             fusion_mask = batch["fusion_id"] == fusion_idx
             if not fusion_mask.any():
                 continue
@@ -285,7 +342,17 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
                 for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
                     t_tensor = torch.full((1,), t_val, device=clean_4d.device)
-                    noisy, _ = self._make_noisy(clean_4d.unsqueeze(0), t_tensor)
+                    crop_seed = self._seed_from_parts(
+                        "fusion",
+                        fusion_idx,
+                        batch["pos_idx"][idx],
+                        t_key,
+                    )
+                    noisy, _ = self._make_noisy_with_seed(
+                        clean_4d.unsqueeze(0),
+                        t_tensor,
+                        seed=crop_seed,
+                    )
                     self.val_fusions_noised[fusion_idx][t_key].append({
                         "target": noisy.squeeze(0).detach().cpu(),
                         "fusion_id": batch["fusion_id"][idx].detach().cpu(),
@@ -293,35 +360,48 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                         "full_size": batch["full_size"][idx].detach().cpu(),
                     })
 
-    def _gather_fusion_crops(
-        self, clean_list: list, noised_dicts: list[dict[str, list]]
-    ) -> tuple[list, list[dict[str, list]]]:
-        """All-gather fusion crops across DDP ranks."""
+    def _fusion_bank_complete(self) -> bool:
+        """Whether every target fusion already has clean + noisy crops cached."""
+        if len(self.val_fusions_clean) != self.FUSION_NUMBER:
+            return False
+        if len(self.val_fusions_noised) != self.FUSION_NUMBER:
+            return False
+
+        for fusion_idx in range(self.FUSION_NUMBER):
+            if not self.val_fusions_clean[fusion_idx]:
+                return False
+            fusion_noised = self.val_fusions_noised[fusion_idx]
+            for t_key in self.FUSION_T_KEYS:
+                if not fusion_noised.get(t_key):
+                    return False
+        return True
+
+    def _fusion_object_group(self):
+        """CPU object-collective group for large validation payloads."""
         import torch.distributed as dist
         if not dist.is_initialized():
-            return clean_list, noised_dicts
+            return None
+        if self._fusion_object_pg is None:
+            self._fusion_object_pg = dist.new_group(backend="gloo")
+        return self._fusion_object_pg
 
+    def _gather_object_to_rank0(self, obj):
+        """Gather an object to rank 0 without mirroring the payload to every rank."""
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            return [obj]
+
+        rank = dist.get_rank()
         world_size = dist.get_world_size()
-        gathered_clean = [None] * world_size
-        dist.all_gather_object(gathered_clean, clean_list)
-        gathered_noised: list[list[dict[str, list]]] = []
-        for _ in range(world_size):
-            gathered_noised.append([{k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))])
-        dist.all_gather_object(gathered_noised, noised_dicts)
-
-        merged_clean: list[list] = [[] for _ in range(len(noised_dicts))]
-        for rank_list in gathered_clean:
-            for fi, crops in enumerate(rank_list):
-                merged_clean[fi].extend(crops)
-        merged_noised: list[dict[str, list]] = [
-            {k: [] for k in self.FUSION_T_KEYS} for _ in range(len(noised_dicts))
-        ]
-        for rank_noised in gathered_noised:
-            for fi, fusion_dict in enumerate(rank_noised):
-                for t_key in self.FUSION_T_KEYS:
-                    merged_noised[fi][t_key].extend(fusion_dict.get(t_key, []))
-
-        return merged_clean, merged_noised
+        gathered = [None] * world_size if rank == 0 else None
+        dist.gather_object(
+            obj,
+            object_gather_list=gathered,
+            dst=0,
+            group=self._fusion_object_group(),
+        )
+        return gathered
 
     def _validation_batch_size(self) -> int:
         """Best-effort validation DataLoader batch size for fusion denoising."""
@@ -342,67 +422,63 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if not self.val_fusions_clean or not self.val_fusions_noised:
             return
 
-        all_clean, all_noised = self._gather_fusion_crops(
-            self.val_fusions_clean, self.val_fusions_noised
-        )
         rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
         is_rank0 = rank == 0
 
-        n_fusions = len(all_noised)
+        n_fusions = len(self.val_fusions_noised)
         if n_fusions == 0:
             return
         denoise_batch_size = self._validation_batch_size()
         should_log = is_rank0 and self.logger is not None
+
+        merged_clean_by_fusion: list[list] = [[] for _ in range(n_fusions)]
+        for fi in range(n_fusions):
+            gathered_clean = self._gather_object_to_rank0(self.val_fusions_clean[fi])
+            if is_rank0:
+                merged_clean_by_fusion[fi] = [
+                    item
+                    for rank_items in (gathered_clean or [])
+                    for item in (rank_items or [])
+                ]
 
         for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
             mse_sum = 0.0
             fusion_slice_panels: list[list[np.ndarray]] = []
 
             for fi in range(n_fusions):
-                clean_crops = all_clean[fi]
-                crop_dicts = all_noised[fi].get(t_key, [])
-                if not crop_dicts or not clean_crops:
-                    continue
-
-                # Split expensive denoising across DDP ranks. Every rank
-                # participates, then rank 0 fuses/logs the gathered result.
-                indexed_crops = list(enumerate(crop_dicts))
-                local_crops = indexed_crops[rank::world_size]
+                crop_dicts = self.val_fusions_noised[fi].get(t_key, [])
+                clean_crops = merged_clean_by_fusion[fi] if is_rank0 else []
                 local_denoised = []
-                for b_start in range(0, len(local_crops), denoise_batch_size):
-                    b_end = min(b_start + denoise_batch_size, len(local_crops))
-                    sub = local_crops[b_start:b_end]
-                    sub_batch = torch.stack(
-                        [c["target"] for _, c in sub], dim=0
-                    ).to(self.device)
-                    sub_denoised = self._make_clean(sub_batch, t_val)
-                    for (order, crop_dict), denoised in zip(sub, sub_denoised):
-                        local_denoised.append({
-                            "order": int(order),
-                            "target": denoised.detach().cpu(),
-                            "fusion_id": crop_dict["fusion_id"],
-                            "pos_idx": crop_dict["pos_idx"],
-                            "full_size": crop_dict["full_size"],
-                        })
+                if crop_dicts:
+                    for b_start in range(0, len(crop_dicts), denoise_batch_size):
+                        b_end = min(b_start + denoise_batch_size, len(crop_dicts))
+                        sub = crop_dicts[b_start:b_end]
+                        sub_batch = torch.stack(
+                            [c["target"] for c in sub], dim=0
+                        ).to(self.device)
+                        sub_denoised = self._make_clean(sub_batch, t_val)
+                        for crop_dict, denoised in zip(sub, sub_denoised):
+                            local_denoised.append({
+                                "target": denoised.detach().cpu(),
+                                "fusion_id": crop_dict["fusion_id"],
+                                "pos_idx": crop_dict["pos_idx"],
+                                "full_size": crop_dict["full_size"],
+                            })
 
-                if dist.is_initialized():
-                    gathered_denoised = [None] * world_size
-                    dist.all_gather_object(gathered_denoised, local_denoised)
-                    denoised_with_order = [
-                        item
-                        for rank_items in gathered_denoised
-                        for item in (rank_items or [])
-                    ]
-                else:
-                    denoised_with_order = local_denoised
-
+                gathered_denoised = self._gather_object_to_rank0(local_denoised)
                 if not is_rank0:
                     continue
 
-                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
+                denoised_with_order = [
+                    item
+                    for rank_items in (gathered_denoised or [])
+                    for item in (rank_items or [])
+                ]
+                if not clean_crops or not denoised_with_order:
+                    continue
+
                 denoised_crops = []
-                for item in sorted(denoised_with_order, key=lambda entry: entry["order"]):
+                for item in denoised_with_order:
                     denoised_crops.append({
                         "target": item["target"],
                         "fusion_id": item["fusion_id"],
@@ -410,6 +486,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                         "full_size": item["full_size"],
                     })
 
+                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
@@ -479,6 +556,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def on_validation_epoch_end(self) -> None:
         if self.val_fusions_noised:
             self._log_fusion_validation()
+            self._fusion_collecting = not self._fusion_bank_complete()
 
     def on_train_end(self) -> None:
         """Post-fit testing: upload checkpoints, generate samples, compute FID."""
@@ -529,14 +607,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self, batch_size: int, sample_steps: int
     ) -> dict[str, float]:
         """Generate samples with a fixed seed and return summary statistics."""
-        gen = torch.Generator(device=self.device)
-        gen.manual_seed(42)
-        orig_state = torch.get_rng_state()
-        torch.manual_seed(42)
-        try:
-            samples = self.sample(batch_size=batch_size, steps=sample_steps)
-        finally:
-            torch.set_rng_state(orig_state)
+        samples = self.sample(
+            batch_size=batch_size,
+            steps=sample_steps,
+            seed=self._seed_from_parts("fixed_generation"),
+        )
         return {
             "gen_sample_min": float(samples.min()),
             "gen_sample_max": float(samples.max()),
@@ -592,14 +667,23 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if batch_idx == 1 and self.logger is not None:
             try:
                 n_show = min(clean.shape[0], 5)
-                t_tensor = torch.full((n_show,), 1.0, device=clean.device)
-                noisy, _ = self._make_noisy(clean[:n_show], t_tensor)
-                denoised = self._make_clean(noisy, 1.0)
-
                 panels = []
                 for i in range(n_show):
+                    t_tensor = torch.full((1,), 1.0, device=clean.device)
+                    sample_seed = self._seed_from_parts(
+                        "val_panel",
+                        int(batch_idx),
+                        batch["fusion_id"][i] if "fusion_id" in batch else i,
+                        batch["pos_idx"][i] if "pos_idx" in batch else i,
+                    )
+                    noisy, _ = self._make_noisy_with_seed(
+                        clean[i:i + 1],
+                        t_tensor,
+                        seed=sample_seed,
+                    )
+                    denoised = self._make_clean(noisy, 1.0)
                     c0 = clean[i, 0].detach().float().cpu().numpy()
-                    d0 = denoised[i, 0].detach().float().cpu().numpy()
+                    d0 = denoised[0, 0].detach().float().cpu().numpy()
                     mid_w = c0.shape[2] // 2
                     panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], show_residual=True))
 

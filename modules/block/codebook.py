@@ -42,6 +42,8 @@ class Codebook(nn.Module):
             x = x + torch.randn_like(x) * std
         return x
 
+    # performs data-dependent initialization of the codebook
+    # Instead of starting with completely random values, this initializes the codebook vectors by randomly sampling directly from the continuous encoded inputs (z) of the very first training batch.
     def _init_embeddings(self, z: torch.Tensor) -> None:
         self._need_init = False
         flat_inputs = rearrange(z, "b c d h w -> (b d h w) c")
@@ -60,6 +62,7 @@ class Codebook(nn.Module):
 
         flat_inputs = rearrange(z, "b c d h w -> (b d h w) c")
 
+        # compute all distance to codes, use nearest neighbor lookup
         distances = (
             (flat_inputs ** 2).sum(dim=1, keepdim=True)
             - 2 * flat_inputs @ self.embeddings.t()
@@ -76,12 +79,15 @@ class Codebook(nn.Module):
         commitment_loss = 0.25 * F.mse_loss(z, embeddings.detach())
 
         if self.training:
+            # counts how many times each codebook vector was used in the current batch
             n_total = encode_onehot.sum(dim=0)
             encode_sum = flat_inputs.t() @ encode_onehot
             if dist.is_initialized():
                 dist.all_reduce(n_total)
                 dist.all_reduce(encode_sum)
 
+            # Exponential Moving Average (EMA) update of the codebook vectors
+            
             self.N.data.mul_(0.99).add_(n_total, alpha=0.01)
             self.z_avg.data.mul_(0.99).add_(encode_sum.t(), alpha=0.01)
 
@@ -99,6 +105,7 @@ class Codebook(nn.Module):
                 usage = (self.N.view(self.n_codes, 1) >= self.restart_thres).float()
                 self.embeddings.data.mul_(usage).add_(_k_rand * (1 - usage))
 
+        # WARNING: straight-through estimator + stop-gradient for the discrete encoding operation
         embeddings_st = (embeddings - z).detach() + z
 
         avg_probs = torch.mean(encode_onehot, dim=0)

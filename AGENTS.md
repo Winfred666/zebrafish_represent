@@ -158,14 +158,3 @@ python -m torch.distributed.run --nproc_per_node=1 driver.py \
 After changes, at minimum:
 - `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python -m compileall driver.py modules utils`
 - `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python -m unittest tests.test_runtime_entry`
-
-## Skills (Claude Code)
-
-Located in `~/.claude/skills/`:
-
-| Skill | Purpose |
-|-------|---------|
-| `use-gpu` | GPU node scheduling, SSH commands, idle checks |
-| `mlflow-tracking-admin` | MLflow run/artifact inspection and cleanup |
-| `mlflow-backup-restore` | Backup/restore PostgreSQL + MinIO volumes |
-| `create-feature-branch` | Git worktree-based parallel feature branches |

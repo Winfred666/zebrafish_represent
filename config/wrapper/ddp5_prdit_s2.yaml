@@ -1,0 +1,14 @@
+import_config: ddp4_prdit_s2.yaml
+
+trainer:
+  params:
+    devices: 5
+
+logging:
+  params:
+    run_name: prdit_s2_ddp5_gpu05_smbatch
+    tags:
+      stage: "2"
+      node: gpu05
+      data_config: lg_025_smbatch
+      devices: "5"

@@ -68,6 +68,8 @@ class MONAIPerceptualLoss(nn.Module):
 # discriminator losses
 # ---------------------------------------------------------------------------
 
+# Real volumes: The discriminator is penalized if its prediction is less than 1.0 (F.relu(1.0 - logits_real)).
+# Fake volumes: The discriminator is penalized if its prediction is greater than -1.0 (F.relu(1.0 + logits_fake)).
 def hinge_d_loss(logits_real: Tensor, logits_fake: Tensor) -> Tensor:
     loss_real = torch.mean(F.relu(1.0 - logits_real))
     loss_fake = torch.mean(F.relu(1.0 + logits_fake))
