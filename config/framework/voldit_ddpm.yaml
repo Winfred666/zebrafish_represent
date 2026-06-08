@@ -8,7 +8,7 @@ framework:
     optimization:
       learning_rate: 0.0001
       weight_decay: 0.0001
-      loss_type: smooth_l1
+      loss_type: l1
       sample_steps: 300
     diffusion:
       beta_schedule: cosine

@@ -6,7 +6,7 @@ framework:
     optimization:
       learning_rate: 0.00002
       weight_decay: 0.000001
-      loss_type: mse
+      loss_type: l1
       sample_steps: 1000
     diffusion:
       timestep_respacing: null
