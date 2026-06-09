@@ -443,6 +443,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
             fusion_slice_panels: list[list[np.ndarray]] = []
+            fused_pairs_for_logging: list[tuple[Tensor, Tensor]] = []
 
             for fi in range(n_fusions):
                 crop_dicts = self.val_fusions_noised[fi].get(sig_key, [])
@@ -488,13 +489,32 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
                 if should_log:
+                    fused_pairs_for_logging.append((clean_fused, denoised_fused))
+
+            if is_rank0:
+                self.log(
+                    f"val_fusion_mse_{sig_key}",
+                    mse_sum / max(1, n_fusions),
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=False,
+                    rank_zero_only=True,
+                )
+
+            if fused_pairs_for_logging and should_log:
+                scaling_rates: list[float] = []
+                for clean_fused, _ in fused_pairs_for_logging:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
-                    d0 = denoised_fused[0].detach().float().cpu().numpy()
                     clean_unit = np.clip((c0 + 1.0) * 0.5, 0.0, None)
                     p99 = float(np.quantile(clean_unit, 0.99))
-                    scaling_rate = 1.0 / max(p99, 1.0e-6)
-                    c0_vis = np.clip((c0 + 1.0) * scaling_rate - 1.0, -1.0, 1.0)
-                    d0_vis = np.clip((d0 + 1.0) * scaling_rate - 1.0, -1.0, 1.0)
+                    scaling_rates.append(1.0 / max(p99, 1.0e-6))
+
+                mean_scaling_rate = float(np.mean(scaling_rates))
+                for clean_fused, denoised_fused in fused_pairs_for_logging:
+                    c0 = clean_fused[0].detach().float().cpu().numpy()
+                    d0 = denoised_fused[0].detach().float().cpu().numpy()
+                    c0_vis = np.clip((c0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
+                    d0_vis = np.clip((d0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
                     w_size = c0.shape[2]
                     if w_size > self.FUSION_SLICE_NUMBER + 1:
                         w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
@@ -506,16 +526,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                             c0_vis[:, :, wi], d0_vis[:, :, wi], colorbar_limits=(-1.0, 1.0)
                         ))
                     fusion_slice_panels.append(slice_panels)
-
-            if is_rank0:
-                self.log(
-                    f"val_fusion_mse_{sig_key}",
-                    mse_sum / max(1, n_fusions),
-                    on_step=False,
-                    on_epoch=True,
-                    sync_dist=False,
-                    rank_zero_only=True,
-                )
 
             if fusion_slice_panels and should_log:
                 image = _stack_fusion_slice_columns(fusion_slice_panels)
