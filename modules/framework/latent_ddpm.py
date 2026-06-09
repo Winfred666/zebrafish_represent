@@ -56,6 +56,9 @@ class LatentDDPMModule(BaseTrainingFramework):
             beta_end=config.diffusion.beta_end,
         )
         alphas = 1.0 - betas
+        # alpha_t = 1 - beta_t, and alpha_cumprod[t] = \prod_{i=0}^t alpha_i.
+        # These are the standard DDPM schedule terms used to mix clean latents
+        # with noise and to compute the reverse-process coefficients.
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_prev = torch.cat([torch.ones(1, dtype=torch.float32), alphas_cumprod[:-1]], dim=0)
         posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
@@ -71,6 +74,7 @@ class LatentDDPMModule(BaseTrainingFramework):
 
     @staticmethod
     def _extract(coefficients: Tensor, timesteps: Tensor, target_ndim: int) -> Tensor:
+        """Select one schedule value per batch item and expand it for broadcasting."""
         gathered = coefficients.index_select(0, timesteps)
         while gathered.ndim < target_ndim:
             gathered = gathered.unsqueeze(-1)
@@ -79,6 +83,26 @@ class LatentDDPMModule(BaseTrainingFramework):
     def _normalized_t(self, timesteps: Tensor) -> Tensor:
         denominator = float(max(1, self.optimization.sample_steps - 1))
         return timesteps.to(dtype=torch.float32) / denominator
+
+    def get_t_from_sigma(self, sigma: float) -> float:
+        sigma_value = float(min(max(sigma, 0.0), 1.0))
+        sigma_table = self.sqrt_one_minus_alphas_cumprod.to(dtype=torch.float32)
+        sigma_tensor = torch.tensor(sigma_value, device=sigma_table.device, dtype=sigma_table.dtype)
+        upper_idx = int(torch.searchsorted(sigma_table, sigma_tensor).item())
+        last_idx = int(sigma_table.shape[0] - 1)
+        if upper_idx <= 0:
+            timestep = 0
+        elif upper_idx > last_idx:
+            timestep = last_idx
+        else:
+            lower_idx = upper_idx - 1
+            lower_sigma = float(sigma_table[lower_idx].item())
+            upper_sigma = float(sigma_table[upper_idx].item())
+            if abs(sigma_value - lower_sigma) <= abs(upper_sigma - sigma_value):
+                timestep = lower_idx
+            else:
+                timestep = upper_idx
+        return float(timestep) / float(max(1, self.optimization.sample_steps - 1))
 
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
         self.stage1_model.eval()

@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.framework.base import BaseTrainingFramework
+from modules.framework.IaN_flow import IaNFlowModule
 from modules.framework.latent_ddpm import LatentDDPMModule
 from modules.framework.vq_vae_s1 import VQVAES1Module
 from modules.framework.vq_vae_s2 import VQVAES2Module
@@ -18,6 +19,8 @@ from utils.sanitize.framework_config import (
     BaseFrameworkParams,
     CommonDiffusionParams,
     DDPMDiffusionParams,
+    IaNDiffusionParams,
+    IaNFlowModuleParams,
     LatentDDPMModuleParams,
     OptimizationParams,
     TestingParams as FrameworkTestingParams,
@@ -63,6 +66,9 @@ class TinySampleFramework(BaseTrainingFramework):
     def one_step_sample(self, noisy: torch.Tensor, t: float, step_size: float) -> torch.Tensor:
         del t, step_size
         return noisy + 1.0
+
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(sigma)
 
 
 class VolDiTIntegrationTest(unittest.TestCase):
@@ -296,6 +302,40 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(sampled, predicted))
         self.assertEqual(tuple(predicted.shape), (2, 1, 8, 8, 8))
+
+    def test_latent_ddpm_get_t_from_sigma_uses_schedule_lookup(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=5,
+            ),
+            diffusion=DDPMDiffusionParams(
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        sigma = float(module.sqrt_one_minus_alphas_cumprod[2].item())
+        self.assertAlmostEqual(module.get_t_from_sigma(sigma), 0.5, places=6)
+
+    def test_ian_get_t_from_sigma_inverts_cosine_sigma(self) -> None:
+        params = IaNFlowModuleParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=4,
+            ),
+            diffusion=IaNDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = IaNFlowModule(params)
+        self.assertAlmostEqual(module.get_t_from_sigma(0.5), 1.0 / 3.0, places=6)
 
     def test_predict_step_uses_same_reverse_sampling_core(self) -> None:
         params = BaseFrameworkParams(

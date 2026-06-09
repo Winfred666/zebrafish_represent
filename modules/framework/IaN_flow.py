@@ -53,6 +53,10 @@ class IaNFlowModule(BaseTrainingFramework):
         sin_c = torch.sin(t_r * self._half_pi)
         return cos_c * clean + sin_c * noise
 
+    def get_t_from_sigma(self, sigma: float) -> float:
+        sigma = min(max(sigma, 0.0), 1.0)
+        return math.asin(sigma) / self._half_pi
+
     def _ian_loss(self, clean_volume: Tensor) -> Dict[str, Tensor]:
         batch_size = clean_volume.shape[0]
         device = clean_volume.device

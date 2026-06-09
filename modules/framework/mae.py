@@ -149,6 +149,9 @@ class MAEFinetuneModule(BaseTrainingFramework):
         self._last_mask = mask  # stored for foreground-weighted loss
         return x_masked
 
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(min(max(sigma, 0.0), 1.0))
+
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         """Encode masked volume → decode → reconstruction.  One step only."""
         features = self.model(noisy)

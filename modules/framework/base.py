@@ -78,8 +78,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     _noise_w: float
 
     # ── fusion validation protocol ───────────────────────────────
-    FUSION_T_KEYS = ("t100",)
-    FUSION_T_VALS = (1.0,)
+    FUSION_SIG_KEYS = ("sig050",)
+    FUSION_SIG_VALS = (0.5,)
     FUSION_NUMBER = 8
     FUSION_SLICE_NUMBER = 8
 
@@ -115,6 +115,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     @abstractmethod
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         """Single reverse step from noise level *t* toward clean (t=0)."""
+
+    @abstractmethod
+    def get_t_from_sigma(self, sigma: float) -> float:
+        """Map a target noise coefficient sigma to the framework's normalized timestep."""
 
     # ── shared diffusion / sampling core ───────────────────────
 
@@ -310,7 +314,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
         if not self.val_fusions_noised:
             self.val_fusions_noised = [
-                {k: [] for k in self.FUSION_T_KEYS} for _ in range(self.FUSION_NUMBER)
+                {k: [] for k in self.FUSION_SIG_KEYS} for _ in range(self.FUSION_NUMBER)
             ]
             self.val_fusions_clean = [[] for _ in range(self.FUSION_NUMBER)]
             self._fusion_collecting = True
@@ -329,20 +333,21 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     "full_size": batch["full_size"][idx].detach().cpu(),
                 })
 
-                for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
+                for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
+                    t_val = self.get_t_from_sigma(float(sig_val))
                     t_tensor = torch.full((1,), t_val, device=clean_4d.device)
                     crop_seed = self._seed_from_parts(
                         "fusion",
                         fusion_idx,
                         batch["pos_idx"][idx],
-                        t_key,
+                        sig_key,
                     )
                     noisy, _ = self._make_noisy_with_seed(
                         clean_4d.unsqueeze(0),
                         t_tensor,
                         seed=crop_seed,
                     )
-                    self.val_fusions_noised[fusion_idx][t_key].append({
+                    self.val_fusions_noised[fusion_idx][sig_key].append({
                         "target": noisy.squeeze(0).detach().cpu(),
                         "fusion_id": batch["fusion_id"][idx].detach().cpu(),
                         "pos_idx": batch["pos_idx"][idx].detach().cpu(),
@@ -359,7 +364,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             if not self.val_fusions_clean[fusion_idx]:
                 return False
             fusion_noised = self.val_fusions_noised[fusion_idx]
-            for t_key in self.FUSION_T_KEYS:
+            for t_key in self.FUSION_SIG_KEYS:
                 if not fusion_noised.get(t_key):
                     return False
         return True
@@ -430,12 +435,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     for item in (rank_items or [])
                 ]
 
-        for t_val, t_key in zip(self.FUSION_T_VALS, self.FUSION_T_KEYS):
+        for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
+            t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
             fusion_slice_panels: list[list[np.ndarray]] = []
 
             for fi in range(n_fusions):
-                crop_dicts = self.val_fusions_noised[fi].get(t_key, [])
+                crop_dicts = self.val_fusions_noised[fi].get(sig_key, [])
                 clean_crops = merged_clean_by_fusion[fi] if is_rank0 else []
                 local_denoised = []
                 if crop_dicts:
@@ -499,7 +505,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
 
             if is_rank0:
                 self.log(
-                    f"val_fusion_mse_{t_key}",
+                    f"val_fusion_mse_{sig_key}",
                     mse_sum / max(1, n_fusions),
                     on_step=False,
                     on_epoch=True,
@@ -511,7 +517,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 image = _stack_fusion_slice_columns(fusion_slice_panels)
                 log_image_artifact(
                     self.logger, image,
-                    f"val_fusion_{t_key}",
+                    f"val_fusion_{sig_key}",
                     self.global_step,
                 )
 

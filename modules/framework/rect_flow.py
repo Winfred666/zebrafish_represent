@@ -47,6 +47,9 @@ class RectifiedFlowModule(BaseTrainingFramework):
             t_view = t_view.unsqueeze(-1)
         return (1.0 - t_view) * clean + t_view * noise
 
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(min(max(sigma, 0.0), 1.0))
+
     # ── rectified-flow specific ─────────────────────────────────
 
     def _rectified_flow_loss(self, target_volume: Tensor) -> Dict[str, Tensor]:
