@@ -38,6 +38,7 @@ class BaseFrameworkParams(IngestibleParams):
     optimization: OptimizationParams
     diffusion: CommonDiffusionParams
     testing: TestingParams = TestingParams()
+    stat_metrics_every_n_epochs: int = Field(default=0, ge=0)
 
 
 class DDPMDiffusionParams(CommonDiffusionParams):

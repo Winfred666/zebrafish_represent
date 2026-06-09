@@ -99,6 +99,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.val_fusions_noised: list[dict[str, list]] = []
         self._fusion_collecting: bool = False
         self._fusion_object_pg = None
+        self._val_stat_generated_features: torch.Tensor | None = None
+        self._val_stat_real_cache: dict[str, object] | None = None
 
     # ── atom hooks (framework-specific extension surface) ──────
 
@@ -397,14 +399,16 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         )
         return gathered
 
-    def _validation_batch_size(self) -> int:
-        """Best-effort validation DataLoader batch size for fusion denoising."""
+    def _validation_loader(self):
         trainer = getattr(self, "trainer", None)
         val_loaders = getattr(trainer, "val_dataloaders", None)
         if isinstance(val_loaders, (list, tuple)):
-            val_loader = val_loaders[0] if val_loaders else None
-        else:
-            val_loader = val_loaders
+            return val_loaders[0] if val_loaders else None
+        return val_loaders
+
+    def _validation_batch_size(self) -> int:
+        """Best-effort validation DataLoader batch size for validation helpers."""
+        val_loader = self._validation_loader()
         batch_size = getattr(val_loader, "batch_size", None)
         return max(1, int(batch_size or 1))
 
@@ -525,8 +529,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         """Log a small denoise preview from the validation batch."""
         n_show = min(clean.shape[0], 5)
         panels = []
+        sigma_val = 0.4
+        t_val = self.get_t_from_sigma(sigma_val)
         for i in range(n_show):
-            t_tensor = torch.full((1,), 1.0, device=clean.device)
+            t_tensor = torch.full((1,), t_val, device=clean.device)
             sample_seed = self._seed_from_parts(
                 "val_panel",
                 int(batch_idx),
@@ -538,7 +544,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 t_tensor,
                 seed=sample_seed,
             )
-            denoised = self._make_clean(noisy, 1.0)
+            denoised = self._make_clean(noisy, t_val)
             c0 = clean[i, 0].detach().float().cpu().numpy()
             d0 = denoised[0, 0].detach().float().cpu().numpy()
             mid_w = c0.shape[2] // 2
@@ -547,7 +553,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if panels:
             log_image_artifact(
                 self.logger, np.vstack(panels),
-                "val_yz_midw_t100_batch_1",
+                "val_yz_midw_sig40_batch_2",
                 self.global_step,
             )
 
@@ -574,10 +580,155 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if panels:
             log_image_artifact(self.logger, np.vstack(panels), tag, self.global_step)
 
+    def _validation_stat_interval(self) -> int:
+        return int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)
+
+    def _should_run_validation_stat_metrics(self) -> bool:
+        trainer = getattr(self, "trainer", None)
+        if trainer is None or getattr(trainer, "sanity_checking", False):
+            return False
+        every_n_epochs = self._validation_stat_interval()
+        if every_n_epochs <= 0:
+            return False
+        return ((int(self.current_epoch) + 1) % every_n_epochs) == 0
+
+    def _validation_stat_rank_world(self) -> tuple[int, int]:
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return 0, 1
+        return dist.get_rank(), dist.get_world_size()
+
+    @torch.no_grad()
+    def _ensure_real_feature_cache(self, val_dataset) -> None:
+        import torch.distributed as dist
+
+        from utils.eval.sample_quality import (
+            build_feature_cache_key,
+            extract_dataset_patch_features,
+            feature_cache_path,
+            gather_tensor_rows_to_rank0,
+            load_feature_cache,
+            save_feature_cache,
+        )
+
+        cache_key = build_feature_cache_key(val_dataset)
+        cache_file = feature_cache_path(cache_key)
+        rank, world_size = self._validation_stat_rank_world()
+
+        cache_hit = False
+        if rank == 0:
+            if (
+                self._val_stat_real_cache is not None
+                and self._val_stat_real_cache["cache_key"] == cache_key
+            ):
+                cache_hit = True
+            elif cache_file.exists():
+                try:
+                    self._val_stat_real_cache = load_feature_cache(
+                        cache_file,
+                        expected_cache_key=cache_key,
+                    )
+                    cache_hit = True
+                except (OSError, RuntimeError, ValueError):
+                    self._val_stat_real_cache = None
+
+        cache_hit_tensor = torch.tensor([1 if cache_hit else 0], dtype=torch.int32, device=self.device)
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast(cache_hit_tensor, src=0)
+        if bool(cache_hit_tensor.item()):
+            return
+
+        local_indices = range(rank, len(val_dataset), world_size)
+        local_features = extract_dataset_patch_features(
+            val_dataset,
+            local_indices,
+            batch_size=self._validation_batch_size(),
+            device=self.device,
+        )
+        gathered = gather_tensor_rows_to_rank0(local_features.to(device=self.device))
+        if rank != 0 or gathered is None:
+            return
+
+        self._val_stat_real_cache = save_feature_cache(cache_file, cache_key, gathered)
+
+    @torch.no_grad()
+    def _build_generated_feature_bank(self, total_samples: int) -> torch.Tensor:
+        from utils.eval.sample_quality import empty_feature_bank, extract_patch_features
+
+        if total_samples <= 0:
+            return empty_feature_bank()
+
+        rank, world_size = self._validation_stat_rank_world()
+        local_indices = list(range(rank, total_samples, world_size))
+        if not local_indices:
+            return empty_feature_bank()
+
+        feature_batches: list[torch.Tensor] = []
+        batch_size = self._validation_batch_size()
+        for start in range(0, len(local_indices), batch_size):
+            sample_indices = local_indices[start:start + batch_size]
+            initial_noise = torch.cat(
+                [
+                    self._make_initial_noise(
+                        1,
+                        seed=self._seed_from_parts("val_stat_sample", int(sample_idx)),
+                    )
+                    for sample_idx in sample_indices
+                ],
+                dim=0,
+            )
+            samples = self._make_clean(initial_noise, t_start=1.0)
+            feature_batches.append(extract_patch_features(samples).cpu())
+
+        if not feature_batches:
+            return empty_feature_bank()
+        return torch.cat(feature_batches, dim=0)
+
+    @torch.no_grad()
+    def _log_validation_stat_metrics(self) -> None:
+        from utils.eval.sample_quality import (
+            compute_fid_from_feature_stats,
+            compute_mmd_from_features,
+            gather_tensor_rows_to_rank0,
+            summarize_feature_bank,
+        )
+
+        if self._val_stat_generated_features is None:
+            return
+
+        local_features = self._val_stat_generated_features.to(device=self.device)
+        generated_features = gather_tensor_rows_to_rank0(local_features)
+        self._val_stat_generated_features = None
+
+        rank, _ = self._validation_stat_rank_world()
+        if rank != 0 or generated_features is None or self._val_stat_real_cache is None:
+            return
+
+        generated_stats = summarize_feature_bank(generated_features)
+        val_fid = compute_fid_from_feature_stats(self._val_stat_real_cache["stats"], generated_stats)
+        val_mmd = compute_mmd_from_features(self._val_stat_real_cache["features"], generated_features)
+        self.log("val_fid", val_fid, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
+        self.log("val_mmd", val_mmd, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
+
+    def on_validation_epoch_start(self) -> None:
+        self._val_stat_generated_features = None
+
+        if not self._should_run_validation_stat_metrics():
+            return
+
+        val_dataset = self._validation_dataset()
+        if val_dataset is None or len(val_dataset) == 0:
+            return
+
+        self._ensure_real_feature_cache(val_dataset)
+        self._val_stat_generated_features = self._build_generated_feature_bank(len(val_dataset))
+
     def on_validation_epoch_end(self) -> None:
         if self.val_fusions_noised:
             self._log_fusion_validation()
             self._fusion_collecting = not self._fusion_bank_complete()
+        self._log_validation_stat_metrics()
 
     def _testing_config(self):
         testing = getattr(self.config, "testing", None)
@@ -585,10 +736,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             return None
         return testing
 
-    def _validation_dataset_for_testing(self):
-        val_dataset = getattr(self.trainer, "val_dataloaders", None)
-        if val_dataset is not None and hasattr(val_dataset, "dataset"):
-            return val_dataset.dataset
+    def _validation_dataset(self):
+        val_loader = self._validation_loader()
+        if val_loader is not None and hasattr(val_loader, "dataset"):
+            return val_loader.dataset
         return None
 
     def _find_artifact_manager(self):
@@ -615,7 +766,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if testing is None:
             return
 
-        val_dataset = self._validation_dataset_for_testing()
+        val_dataset = self._validation_dataset()
         artifact_manager = self._find_artifact_manager()
         if artifact_manager is None:
             print("WARNING: ArtifactManager callback not found, skipping post-fit testing")
@@ -672,13 +823,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         for key, val in extra.items():
             self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
 
-        if batch_idx == 1 and self.logger is not None:
+        if batch_idx == 2 and self.logger is not None:
             try:
                 self._log_validation_preview(clean, batch, batch_idx)
             except Exception:
                 import traceback
 
-                print("WARNING: failed to log batch-1 vstack panel:", flush=True)
+                print("WARNING: failed to log batch-2 vstack panel:", flush=True)
                 traceback.print_exc()
 
         self._maybe_collect_fusion_crops(batch)

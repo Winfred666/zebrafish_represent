@@ -6,6 +6,7 @@ protocol (MONAI 3D ResNet backbone, 128³ patch extraction).
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,13 +18,23 @@ from utils.eval.sample_quality import (
     _FeatureExtractor,
     _as_volume_batch,
     _covariance,
+    build_feature_cache_key,
+    compute_fid_from_feature_stats,
+    compute_mmd_from_features,
+    empty_feature_bank,
     _extract_128_patches,
     _extract_patch_features,
+    extract_dataset_patch_features,
     _frechet_distance,
+    feature_cache_path,
+    gather_tensor_rows_to_rank0,
+    load_feature_cache,
     _mmd,
     _ms_ssim,
     _normalize_pair,
+    save_feature_cache,
     _ssim3d,
+    summarize_feature_bank,
     _wasserstein_distance_1d,
     compute_sample_quality_metrics,
 )
@@ -355,6 +366,104 @@ class TestCovariance:
         feats = torch.randn(50, 128, dtype=torch.float64)
         cov = _covariance(feats)
         assert torch.allclose(cov, cov.T, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Validation feature-cache helpers
+# ---------------------------------------------------------------------------
+
+class TestValidationFeatureCacheHelpers:
+    def test_empty_feature_bank(self) -> None:
+        bank = empty_feature_bank(feature_dim=7)
+        assert bank.shape == (0, 7)
+        assert bank.dtype == torch.float64
+
+    def test_summarize_feature_bank(self) -> None:
+        feats = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
+        stats = summarize_feature_bank(feats)
+        assert stats["count"] == 2
+        assert stats["feature_dim"] == 2
+        assert torch.equal(stats["sum"], torch.tensor([4.0, 6.0], dtype=torch.float64))
+        assert torch.equal(
+            stats["sum_outer"],
+            torch.tensor([[10.0, 14.0], [14.0, 20.0]], dtype=torch.float64),
+        )
+
+    def test_fid_from_feature_stats_matches_feature_path(self) -> None:
+        torch.manual_seed(7)
+        ref = torch.randn(128, 32, dtype=torch.float64)
+        gen = torch.randn(128, 32, dtype=torch.float64) + 0.25
+        fid_from_features = _frechet_distance(ref, gen)
+        fid_from_stats = compute_fid_from_feature_stats(
+            summarize_feature_bank(ref),
+            summarize_feature_bank(gen),
+        )
+        assert fid_from_stats == pytest.approx(fid_from_features, rel=1e-8)
+
+    def test_mmd_helper_matches_private_impl(self) -> None:
+        torch.manual_seed(11)
+        ref = torch.randn(64, 24, dtype=torch.float64)
+        gen = torch.randn(64, 24, dtype=torch.float64) + 0.5
+        assert compute_mmd_from_features(ref, gen) == pytest.approx(_mmd(ref, gen), rel=1e-8)
+
+    def test_feature_cache_roundtrip(self, tmp_path: Path) -> None:
+        feats = torch.randn(5, 9, dtype=torch.float64)
+        cache_file = tmp_path / "real_feature_cache.pt"
+        saved = save_feature_cache(cache_file, "cache-key", feats)
+        loaded = load_feature_cache(cache_file, expected_cache_key="cache-key")
+        assert saved["cache_key"] == loaded["cache_key"]
+        assert torch.allclose(saved["features"], loaded["features"])
+        assert loaded["stats"]["count"] == 5
+        assert loaded["stats"]["feature_dim"] == 9
+
+    def test_feature_cache_key_changes_with_dataset_signature(self) -> None:
+        class DummyDataset:
+            def __init__(self, cache_key: str):
+                self.crop_size = (32, 32, 32)
+                self.overlap = (0.5, 0.5, 0.5)
+                self._cache_key_value = cache_key
+
+            def __len__(self) -> int:
+                return 4
+
+            def _cache_key(self) -> str:
+                return self._cache_key_value
+
+            def _selected_file_keys(self) -> list[str]:
+                return ["a.tif", "b.tif"]
+
+        key_a = build_feature_cache_key(DummyDataset("abc"))
+        key_b = build_feature_cache_key(DummyDataset("xyz"))
+        assert key_a != key_b
+
+    def test_feature_cache_path_suffix(self, tmp_path: Path) -> None:
+        cache_file = feature_cache_path("abc123", cache_root=tmp_path)
+        assert cache_file.name == "real_feature_cache_abc123.pt"
+        assert cache_file.parent == tmp_path / "sample_quality"
+
+    def test_gather_tensor_rows_without_dist_returns_cpu_bank(self) -> None:
+        feats = torch.randn(3, 4, dtype=torch.float64)
+        gathered = gather_tensor_rows_to_rank0(feats)
+        assert gathered is not None
+        assert gathered.device.type == "cpu"
+        assert torch.allclose(gathered, feats)
+
+    def test_extract_dataset_patch_features_batches_targets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class DummyDataset:
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+                value = float(index + 1)
+                return {"target": torch.full((1, 4, 4, 4), value, dtype=torch.float32)}
+
+        def _fake_extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+            flat = volumes.reshape(volumes.shape[0], -1).mean(dim=1, keepdim=True)
+            return flat.to(dtype=torch.float64)
+
+        monkeypatch.setattr("utils.eval.sample_quality.extract_patch_features", _fake_extract_patch_features)
+        feats = extract_dataset_patch_features(DummyDataset(), range(3), batch_size=2, device="cpu")
+        assert torch.equal(feats, torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64))
 
 
 # ---------------------------------------------------------------------------

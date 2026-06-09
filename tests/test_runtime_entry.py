@@ -182,6 +182,24 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/framework/base.yaml")
         self.assertEqual(config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
+        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 3)
+
+    def test_base_framework_params_default_stat_metric_interval(self) -> None:
+        from utils.sanitize.framework_config import BaseFrameworkParams
+
+        params = BaseFrameworkParams.model_validate(
+            {
+                "model": None,
+                "optimization": {
+                    "learning_rate": 1e-4,
+                    "weight_decay": 0.0,
+                    "loss_type": "mse",
+                    "sample_steps": 4,
+                },
+                "diffusion": {"gen_noise_weight": 0.5},
+            }
+        )
+        self.assertEqual(params.stat_metrics_every_n_epochs, 0)
 
     def test_wrapper_override_inherits_base_callbacks(self) -> None:
         """Child wrapper config inherits callbacks from base, unless overridden."""
@@ -190,7 +208,7 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertIn("callbacks", trainer_params)
 
     def test_voldit_configs_load(self) -> None:
-        model_config = load_yaml_config("config/model/voldit_dit_ds8_xs4.yaml")
+        model_config = load_yaml_config("config/model/voldit_dit_ds8_xs2.yaml")
         self.assertEqual(model_config["stage1_model"]["class_name"], "MONAIVQGAN")
         self.assertEqual(model_config["model"]["class_name"], "VolDiT")
         self.assertEqual(model_config["model"]["params"]["input_size"], [16, 16, 16])

@@ -10,15 +10,24 @@ pairs.
 
 from __future__ import annotations
 
-from typing import Sequence
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+from typing import Iterable, Sequence
 
 import torch
 import torch.nn.functional as F
 
-from modules.model.perceptual_net import PerceptualNetEncoder
+from modules.model.perceptual_net import (
+    PERCEPTUALNET_CKPT_PATH,
+    PERCEPTUALNET_FEATURE_DIM,
+    PerceptualNetEncoder,
+)
 
 # Lazy singleton — model is ~14M params, loads in ~1 s.
 _FEATURE_EXTRACTOR = None
+_FEATURE_CODE_SHA1 = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
 
 PATCH_SIZE = 128
 PATCH_STRIDE = 64  # 50 % overlap
@@ -198,26 +207,78 @@ def _extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
     return torch.cat(all_features, dim=0)
 
 
-# ---------------------------------------------------------------------------
-# FID
-# ---------------------------------------------------------------------------
-
-def _covariance(features: torch.Tensor) -> torch.Tensor:
-    centered = features - features.mean(dim=0, keepdim=True)
-    denominator = max(1, features.shape[0] - 1)
-    return centered.T @ centered / denominator
+def empty_feature_bank(feature_dim: int = PERCEPTUALNET_FEATURE_DIM) -> torch.Tensor:
+    return torch.empty((0, int(feature_dim)), dtype=torch.float64)
 
 
-def _frechet_distance(reference_features: torch.Tensor, generated_features: torch.Tensor) -> float:
-    mu_ref = reference_features.mean(dim=0)
-    mu_gen = generated_features.mean(dim=0)
-    sigma_ref = _covariance(reference_features)
-    sigma_gen = _covariance(generated_features)
+def extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+    return _extract_patch_features(volumes)
 
+
+def summarize_feature_bank(features: torch.Tensor) -> dict[str, int | torch.Tensor]:
+    if features.ndim != 2:
+        raise ValueError(f"Expected feature bank shaped (N, D), got {tuple(features.shape)}")
+
+    feature_bank = features.detach().to(dtype=torch.float64, device="cpu")
+    feature_dim = int(feature_bank.shape[1])
+    if feature_bank.shape[0] == 0:
+        return {
+            "count": 0,
+            "feature_dim": feature_dim,
+            "sum": torch.zeros(feature_dim, dtype=torch.float64),
+            "sum_outer": torch.zeros((feature_dim, feature_dim), dtype=torch.float64),
+        }
+
+    return {
+        "count": int(feature_bank.shape[0]),
+        "feature_dim": feature_dim,
+        "sum": feature_bank.sum(dim=0),
+        "sum_outer": feature_bank.T @ feature_bank,
+    }
+
+
+def _feature_stats_parts(stats: dict[str, int | torch.Tensor]) -> tuple[int, int, torch.Tensor, torch.Tensor]:
+    count = int(stats["count"])
+    feature_dim = int(stats["feature_dim"])
+    sum_vec = torch.as_tensor(stats["sum"], dtype=torch.float64, device="cpu")
+    sum_outer = torch.as_tensor(stats["sum_outer"], dtype=torch.float64, device="cpu")
+    if sum_vec.shape != (feature_dim,):
+        raise ValueError(f"Invalid feature sum shape {tuple(sum_vec.shape)} for feature_dim={feature_dim}")
+    if sum_outer.shape != (feature_dim, feature_dim):
+        raise ValueError(
+            f"Invalid feature sum_outer shape {tuple(sum_outer.shape)} for feature_dim={feature_dim}"
+        )
+    return count, feature_dim, sum_vec, sum_outer
+
+
+def _covariance_from_stats(stats: dict[str, int | torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    count, _, sum_vec, sum_outer = _feature_stats_parts(stats)
+    if count <= 0:
+        raise ValueError("Feature stats must contain at least one feature vector")
+
+    mean = sum_vec / count
+    centered_second_moment = sum_outer - torch.outer(sum_vec, sum_vec) / count
+    covariance = centered_second_moment / max(1, count - 1)
+    return mean, covariance
+
+
+def compute_fid_from_feature_stats(
+    reference_stats: dict[str, int | torch.Tensor],
+    generated_stats: dict[str, int | torch.Tensor],
+) -> float:
+    ref_count, ref_dim, _, _ = _feature_stats_parts(reference_stats)
+    gen_count, gen_dim, _, _ = _feature_stats_parts(generated_stats)
+    if ref_count <= 0 or gen_count <= 0:
+        raise ValueError("FID requires at least one real and one generated feature vector")
+    if ref_dim != gen_dim:
+        raise ValueError(f"Feature dim mismatch: reference={ref_dim}, generated={gen_dim}")
+
+    mu_ref, sigma_ref = _covariance_from_stats(reference_stats)
+    mu_gen, sigma_gen = _covariance_from_stats(generated_stats)
     diff = mu_ref - mu_gen
 
     eps = 1.0e-6
-    eye = torch.eye(sigma_ref.shape[0], dtype=torch.float64, device=sigma_ref.device)
+    eye = torch.eye(ref_dim, dtype=torch.float64, device=sigma_ref.device)
     sigma_ref = sigma_ref + (eps * eye)
     sigma_gen = sigma_gen + (eps * eye)
 
@@ -232,6 +293,251 @@ def _frechet_distance(reference_features: torch.Tensor, generated_features: torc
 
     fid = diff.dot(diff) + torch.trace(sigma_ref) + torch.trace(sigma_gen) - (2.0 * trace_sqrt)
     return float(torch.clamp(fid, min=0.0).item())
+
+
+def compute_mmd_from_features(
+    reference_features: torch.Tensor,
+    generated_features: torch.Tensor,
+) -> float:
+    ref_bank = torch.as_tensor(reference_features, dtype=torch.float64, device="cpu")
+    gen_bank = torch.as_tensor(generated_features, dtype=torch.float64, device="cpu")
+    if ref_bank.ndim != 2 or gen_bank.ndim != 2:
+        raise ValueError("MMD expects feature banks shaped (N, D)")
+    if ref_bank.shape[0] == 0 or gen_bank.shape[0] == 0:
+        raise ValueError("MMD requires at least one real and one generated feature vector")
+    return _mmd(ref_bank, gen_bank)
+
+
+def _resolved_checkpoint_path(checkpoint_path: str | None = None) -> Path | None:
+    if checkpoint_path is not None:
+        return Path(checkpoint_path).expanduser().resolve()
+    default_path = Path(PERCEPTUALNET_CKPT_PATH)
+    if default_path.exists():
+        return default_path.resolve()
+    return None
+
+
+def _dataset_signature(reference_dataset: object) -> dict[str, object]:
+    signature: dict[str, object] = {
+        "dataset_type": f"{type(reference_dataset).__module__}.{type(reference_dataset).__qualname__}",
+    }
+    try:
+        signature["length"] = int(len(reference_dataset))
+    except Exception:
+        signature["length"] = None
+
+    for method_name in ("_cache_key", "_selected_file_keys"):
+        method = getattr(reference_dataset, method_name, None)
+        if callable(method):
+            try:
+                signature[method_name] = method()
+            except Exception:
+                continue
+
+    for attr_name in (
+        "crop_size",
+        "overlap",
+        "scale_factor",
+        "patch_grid_multiple",
+        "pad_to_multiple",
+        "normalize",
+        "clip_percentile",
+        "file_count",
+    ):
+        if hasattr(reference_dataset, attr_name):
+            signature[attr_name] = getattr(reference_dataset, attr_name)
+
+    config = getattr(reference_dataset, "config", None)
+    model_dump = getattr(config, "model_dump", None)
+    if callable(model_dump):
+        signature["config"] = model_dump(mode="python")
+    else:
+        signature["repr"] = repr(reference_dataset)
+
+    return signature
+
+
+def build_feature_cache_key(
+    reference_dataset: object,
+    *,
+    checkpoint_path: str | None = None,
+) -> str:
+    resolved_checkpoint = _resolved_checkpoint_path(checkpoint_path)
+    checkpoint_signature: dict[str, object]
+    if resolved_checkpoint is None:
+        checkpoint_signature = {"path": None}
+    else:
+        stat = resolved_checkpoint.stat()
+        checkpoint_signature = {
+            "path": str(resolved_checkpoint),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+
+    payload = {
+        "dataset": _dataset_signature(reference_dataset),
+        "checkpoint": checkpoint_signature,
+        "feature_code_sha1": _FEATURE_CODE_SHA1,
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def feature_cache_path(
+    cache_key: str,
+    *,
+    cache_root: str | Path | None = None,
+) -> Path:
+    root = Path(cache_root) if cache_root is not None else Path(tempfile.gettempdir()) / "zebrafish_represent"
+    root = root / "sample_quality"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"real_feature_cache_{cache_key}.pt"
+
+
+def save_feature_cache(
+    cache_path: str | Path,
+    cache_key: str,
+    features: torch.Tensor,
+) -> dict[str, object]:
+    feature_bank = torch.as_tensor(features, dtype=torch.float64, device="cpu")
+    stats = summarize_feature_bank(feature_bank)
+    payload = {
+        "cache_key": cache_key,
+        "features": feature_bank,
+        "stats": stats,
+    }
+    cache_file = Path(cache_path)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, cache_file)
+    return payload
+
+
+def load_feature_cache(
+    cache_path: str | Path,
+    *,
+    expected_cache_key: str | None = None,
+) -> dict[str, object]:
+    payload = torch.load(Path(cache_path), map_location="cpu", weights_only=True)
+    cache_key = payload.get("cache_key")
+    if expected_cache_key is not None and cache_key != expected_cache_key:
+        raise ValueError(
+            f"Feature cache key mismatch: expected {expected_cache_key}, found {cache_key}"
+        )
+
+    feature_bank = torch.as_tensor(payload["features"], dtype=torch.float64, device="cpu")
+    stats = payload.get("stats")
+    if not isinstance(stats, dict):
+        raise ValueError("Feature cache payload is missing stats")
+    count, feature_dim, sum_vec, sum_outer = _feature_stats_parts(stats)
+    if count != int(feature_bank.shape[0]) or feature_dim != int(feature_bank.shape[1]):
+        raise ValueError("Feature cache stats do not match cached feature bank shape")
+
+    return {
+        "cache_key": cache_key,
+        "features": feature_bank,
+        "stats": {
+            "count": count,
+            "feature_dim": feature_dim,
+            "sum": sum_vec,
+            "sum_outer": sum_outer,
+        },
+    }
+
+
+def extract_dataset_patch_features(
+    dataset: object,
+    indices: Iterable[int],
+    *,
+    batch_size: int,
+    device: str | torch.device,
+) -> torch.Tensor:
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    feature_batches: list[torch.Tensor] = []
+    target_batch: list[torch.Tensor] = []
+    for index in indices:
+        sample = dataset[int(index)]
+        if not isinstance(sample, dict) or "target" not in sample:
+            raise ValueError("Dataset samples must be dicts containing a 'target' volume")
+        target = torch.as_tensor(sample["target"], dtype=torch.float32)
+        if target.ndim == 3:
+            target = target.unsqueeze(0)
+        if target.ndim != 4:
+            raise ValueError(f"Expected target shaped (C, D, H, W), got {tuple(target.shape)}")
+        target_batch.append(target)
+        if len(target_batch) == batch_size:
+            volumes = torch.stack(target_batch, dim=0).to(device=device)
+            feature_batches.append(extract_patch_features(volumes).cpu())
+            target_batch.clear()
+
+    if target_batch:
+        volumes = torch.stack(target_batch, dim=0).to(device=device)
+        feature_batches.append(extract_patch_features(volumes).cpu())
+
+    if not feature_batches:
+        return empty_feature_bank()
+    return torch.cat(feature_batches, dim=0)
+
+
+def gather_tensor_rows_to_rank0(
+    local_rows: torch.Tensor,
+    *,
+    group=None,
+) -> torch.Tensor | None:
+    row_tensor = torch.as_tensor(local_rows, dtype=torch.float64)
+    if row_tensor.ndim != 2:
+        raise ValueError(f"Expected row tensor shaped (N, D), got {tuple(row_tensor.shape)}")
+
+    import torch.distributed as dist
+
+    if not dist.is_available() or not dist.is_initialized():
+        return row_tensor.detach().cpu()
+
+    rank = dist.get_rank(group=group)
+    world_size = dist.get_world_size(group=group)
+    row_count = torch.tensor([row_tensor.shape[0]], dtype=torch.long, device=row_tensor.device)
+    gathered_counts = [torch.zeros_like(row_count) for _ in range(world_size)]
+    dist.all_gather(gathered_counts, row_count, group=group)
+    counts = [int(item.item()) for item in gathered_counts]
+    max_rows = max(counts, default=0)
+    feature_dim = int(row_tensor.shape[1])
+
+    padded = torch.zeros((max_rows, feature_dim), dtype=row_tensor.dtype, device=row_tensor.device)
+    if row_tensor.shape[0] > 0:
+        padded[: row_tensor.shape[0]] = row_tensor
+
+    gather_list = [torch.empty_like(padded) for _ in range(world_size)] if rank == 0 else None
+    dist.gather(padded, gather_list=gather_list, dst=0, group=group)
+
+    if rank != 0:
+        return None
+
+    pieces = [
+        gathered[:count].cpu()
+        for gathered, count in zip(gather_list or [], counts)
+        if count > 0
+    ]
+    if not pieces:
+        return empty_feature_bank(feature_dim=feature_dim)
+    return torch.cat(pieces, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# FID
+# ---------------------------------------------------------------------------
+
+def _covariance(features: torch.Tensor) -> torch.Tensor:
+    centered = features - features.mean(dim=0, keepdim=True)
+    denominator = max(1, features.shape[0] - 1)
+    return centered.T @ centered / denominator
+
+
+def _frechet_distance(reference_features: torch.Tensor, generated_features: torch.Tensor) -> float:
+    return compute_fid_from_feature_stats(
+        summarize_feature_bank(reference_features),
+        summarize_feature_bank(generated_features),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +664,8 @@ def compute_sample_quality_metrics(
     reference_batch = _as_volume_batch(reference)
 
     # ---- feature-space metrics (FID, MMD) via 128³ patches ----
-    generated_features = _extract_patch_features(generated_batch)
-    reference_features = _extract_patch_features(reference_batch)
+    generated_features = extract_patch_features(generated_batch)
+    reference_features = extract_patch_features(reference_batch)
     feature_dim = int(generated_features.shape[1])
     gen_patch_count = int(generated_features.shape[0])
     ref_patch_count = int(reference_features.shape[0])
@@ -378,8 +684,11 @@ def compute_sample_quality_metrics(
         "generated_patches": gen_patch_count,
         "reference_patches": ref_patch_count,
         "feature_dim": feature_dim,
-        "fid": _frechet_distance(reference_features, generated_features),
-        "mmd": _mmd(reference_features, generated_features),
+        "fid": compute_fid_from_feature_stats(
+            summarize_feature_bank(reference_features),
+            summarize_feature_bank(generated_features),
+        ),
+        "mmd": compute_mmd_from_features(reference_features, generated_features),
         "ms_ssim": _ms_ssim(reference_norm[:pair_count], generated_norm[:pair_count]),
         # wasserstein_distance: sorts all voxel values across every reference
         # volume (3.9B float32 → 31 GB float64 for 1854 crops), OOMs on 24 GB

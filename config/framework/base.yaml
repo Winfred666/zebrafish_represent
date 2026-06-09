@@ -10,6 +10,7 @@ framework:
     diffusion:
       timestep_respacing: null
       gen_noise_weight: 0.5
+    stat_metrics_every_n_epochs: 3
     testing:
       run_sampling_after_fit: true
       num_samples: 100
