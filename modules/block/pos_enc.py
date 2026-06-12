@@ -13,6 +13,20 @@ import torch
 import torch.nn as nn
 
 
+def build_pos_idx(D: int, H: int, W: int, device: torch.device) -> torch.Tensor:
+    """Build normalized 3D position indices of shape ``(D*H*W, 3)``."""
+    coords = torch.stack(
+        torch.meshgrid(
+            (torch.arange(D, device=device, dtype=torch.float32) + 0.5) / D,
+            (torch.arange(H, device=device, dtype=torch.float32) + 0.5) / H,
+            (torch.arange(W, device=device, dtype=torch.float32) + 0.5) / W,
+            indexing="ij",
+        ),
+        dim=-1,
+    )
+    return coords.reshape(-1, 3)
+
+
 def get_normalized_3d_pos_enc(
     grid_size: int | tuple[int, int, int],
     embed_dim: int,

@@ -8,59 +8,24 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import Tensor
 
 import pytorch_lightning as L
 
-from utils.dataset.fusion import volume_fuse
+from modules.block.pos_enc import build_pos_idx
+from utils.dataset.fusion import center_crop_fusion_volume, center_pad_fusion_volume, volume_fuse
 from utils.display import fix_2d_scalar, log_image_artifact
 from utils.sanitize.framework_config import BaseFrameworkParams, CommonDiffusionParams, OptimizationParams
 
 
-def _build_pos_idx(D: int, H: int, W: int, device: torch.device) -> torch.Tensor:
-    """Build normalized 3D position indices of shape ``(D*H*W, 3)``."""
-    coords = torch.stack(
-        torch.meshgrid(
-            (torch.arange(D, device=device, dtype=torch.float32) + 0.5) / D,
-            (torch.arange(H, device=device, dtype=torch.float32) + 0.5) / H,
-            (torch.arange(W, device=device, dtype=torch.float32) + 0.5) / W,
-            indexing="ij",
-        ),
-        dim=-1,
+def _fusion_crop_key(crop_dict: dict[str, Tensor]) -> tuple[int, tuple[int, int, int], tuple[int, int, int, int]]:
+    """Stable key for matching clean/noisy/denoised fusion crops."""
+    return (
+        int(crop_dict["fusion_id"]),
+        tuple(int(x) for x in crop_dict["pos_idx"]),
+        tuple(int(x) for x in crop_dict["full_size"]),
     )
-    return coords.reshape(-1, 3)
-
-
-def _stack_fusion_slice_columns(fusion_slice_panels: list[list[np.ndarray]]) -> np.ndarray:
-    """Stack each fusion tightly, then bottom-pad columns before hstack."""
-    columns: list[np.ndarray] = []
-    for slice_panels in fusion_slice_panels:
-        if not slice_panels:
-            continue
-        for panel in slice_panels:
-            if panel.ndim != 3 or panel.shape[2] != 3:
-                raise ValueError(
-                    f"fusion slice panel must have shape (H,W,3), got {panel.shape}"
-                )
-        columns.append(np.vstack(slice_panels))
-
-    if not columns:
-        raise ValueError("fusion_slice_panels must contain at least one RGB panel")
-
-    max_height = max(column.shape[0] for column in columns)
-    padded_columns: list[np.ndarray] = []
-    for column in columns:
-        pad_height = max_height - column.shape[0]
-        if pad_height > 0:
-            padding = np.full(
-                (pad_height, column.shape[1], column.shape[2]),
-                255,
-                dtype=column.dtype,
-            )
-            column = np.vstack([column, padding])
-        padded_columns.append(column)
-
-    return np.hstack(padded_columns)
 
 
 # This is generative Training framework, not representative.
@@ -80,7 +45,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── fusion validation protocol ───────────────────────────────
     FUSION_SIG_KEYS = ("sig050",)
     FUSION_SIG_VALS = (0.5,)
-    FUSION_NUMBER = 8
+    FUSION_NUMBER = 4
     FUSION_SLICE_NUMBER = 8
 
     def __init__(self, config: BaseFrameworkParams):
@@ -255,7 +220,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def forward(self, x: Tensor, timesteps: Tensor) -> Tensor:
         "expect x of shape (B, C, D, H, W) and timesteps of shape (B,)"
         D, H, W = x.shape[2], x.shape[3], x.shape[4]
-        pos_idx = _build_pos_idx(D, H, W, device=x.device)
+        pos_idx = build_pos_idx(D, H, W, device=x.device)
         return self.model(x, timesteps, pos_idx=pos_idx)
 
     def configure_optimizers(self):
@@ -442,13 +407,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
             t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
-            fusion_slice_panels: list[list[np.ndarray]] = []
             fused_pairs_for_logging: list[tuple[Tensor, Tensor]] = []
+            fusion_grid_rows: list[list[np.ndarray]] = []
+            detail_panels: list[np.ndarray] = []
+            detail_sig_key = sig_key.replace("sig0", "sig", 1)
 
             for fi in range(n_fusions):
                 crop_dicts = self.val_fusions_noised[fi].get(sig_key, [])
                 clean_crops = merged_clean_by_fusion[fi] if is_rank0 else []
-                local_denoised = []
+                local_denoised: list[tuple[tuple[int, tuple[int, int, int], tuple[int, int, int, int]], Tensor]] = []
                 if crop_dicts:
                     for b_start in range(0, len(crop_dicts), denoise_batch_size):
                         b_end = min(b_start + denoise_batch_size, len(crop_dicts))
@@ -456,36 +423,70 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                         sub_batch = torch.stack([c["target"] for c in sub], dim=0).to(self.device)
                         sub_denoised = self._make_clean(sub_batch, t_val)
                         for crop_dict, denoised in zip(sub, sub_denoised):
-                            local_denoised.append({
-                                "target": denoised.detach().cpu(),
-                                "fusion_id": crop_dict["fusion_id"],
-                                "pos_idx": crop_dict["pos_idx"],
-                                "full_size": crop_dict["full_size"],
-                            })
+                            local_denoised.append(
+                                (_fusion_crop_key(crop_dict), denoised.detach().cpu())
+                            )
 
                 gathered_denoised = self._gather_object_to_rank0(local_denoised)
                 if not is_rank0:
                     continue
 
-                denoised_with_order = [
+                denoised_items = [
                     item
                     for rank_items in (gathered_denoised or [])
                     for item in (rank_items or [])
                 ]
-                if not clean_crops or not denoised_with_order:
+                if not clean_crops or not denoised_items:
                     continue
 
-                denoised_crops = []
-                for item in denoised_with_order:
-                    denoised_crops.append({
-                        "target": item["target"],
-                        "fusion_id": item["fusion_id"],
-                        "pos_idx": item["pos_idx"],
-                        "full_size": item["full_size"],
-                    })
+                denoised_by_key = {crop_key: denoised_target for crop_key, denoised_target in denoised_items}
+                clean_subset = [
+                    clean_crop
+                    for clean_crop in clean_crops
+                    if _fusion_crop_key(clean_crop) in denoised_by_key
+                ]
+                denoised_crops: list[dict[str, Tensor]] = []
+                for clean_crop in clean_subset:
+                    crop_key = _fusion_crop_key(clean_crop)
+                    denoised_crop = {
+                        "target": denoised_by_key[crop_key],
+                        "fusion_id": clean_crop["fusion_id"],
+                        "pos_idx": clean_crop["pos_idx"],
+                        "full_size": clean_crop["full_size"],
+                    }
+                    denoised_crops.append(denoised_crop)
 
-                clean_fused = volume_fuse(clean_crops, fusion_id=fi)
+                if not clean_subset:
+                    continue
+
+                clean_fused = volume_fuse(clean_subset, fusion_id=fi)
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
+
+                if should_log:
+                    clean_center = center_crop_fusion_volume(
+                        clean_fused[0].detach().float().cpu().numpy(),
+                        (64, 64, 64),
+                    )
+                    denoised_center = center_crop_fusion_volume(
+                        denoised_fused[0].detach().float().cpu().numpy(),
+                        (64, 64, 64),
+                    )
+                    mid_w = clean_center.shape[2] // 2
+                    detail_panels.append(
+                        np.asarray(
+                            Image.fromarray(
+                                fix_2d_scalar(
+                                    clean_center[:, :, mid_w],
+                                    denoised_center[:, :, mid_w],
+                                    colorbar_limits=(-1.0, 1.0),
+                                    show_residual=False,
+                                    show_colorbar=False,
+                                )
+                            ).resize((128, 128), resample=Image.BILINEAR),
+                            dtype=np.uint8,
+                        )
+                    )
+
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
                 if should_log:
@@ -506,66 +507,58 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 for clean_fused, _ in fused_pairs_for_logging:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     clean_unit = np.clip((c0 + 1.0) * 0.5, 0.0, None)
-                    p99 = float(np.quantile(clean_unit, 0.99))
-                    scaling_rates.append(1.0 / max(p99, 1.0e-6))
+                    p995 = float(np.quantile(clean_unit, 0.995))
+                    scaling_rates.append(1.0 / max(p995, 1.0e-8))
 
                 mean_scaling_rate = float(np.mean(scaling_rates))
+                max_shape = tuple(
+                    max(
+                        int(clean_fused[0].shape[axis])
+                        for clean_fused, _ in fused_pairs_for_logging
+                    )
+                    for axis in range(3)
+                )
+                max_w = max_shape[2]
+                if max_w > self.FUSION_SLICE_NUMBER + 1:
+                    w_indices = np.linspace(0, max_w - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
+                else:
+                    w_indices = np.linspace(0, max_w - 1, self.FUSION_SLICE_NUMBER, dtype=int)
+                fusion_grid_rows = [[] for _ in range(len(w_indices))]
+
                 for clean_fused, denoised_fused in fused_pairs_for_logging:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
                     c0_vis = np.clip((c0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
                     d0_vis = np.clip((d0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
-                    w_size = c0.shape[2]
-                    if w_size > self.FUSION_SLICE_NUMBER + 1:
-                        w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
-                    else:
-                        w_indices = np.linspace(0, w_size - 1, self.FUSION_SLICE_NUMBER, dtype=int)
-                    slice_panels = []
-                    for wi in w_indices:
-                        slice_panels.append(fix_2d_scalar(
-                            c0_vis[:, :, wi], d0_vis[:, :, wi], colorbar_limits=(-1.0, 1.0)
-                        ))
-                    fusion_slice_panels.append(slice_panels)
+                    c0_padded = center_pad_fusion_volume(c0_vis, max_shape, fill_value=-1.0)
+                    d0_padded = center_pad_fusion_volume(d0_vis, max_shape, fill_value=-1.0)
+                    for row_idx, wi in enumerate(w_indices):
+                        fusion_grid_rows[row_idx].append(
+                            fix_2d_scalar(
+                                c0_padded[:, :, wi],
+                                d0_padded[:, :, wi],
+                                colorbar_limits=(-1.0, 1.0),
+                            )
+                        )
 
-            if fusion_slice_panels and should_log:
-                image = _stack_fusion_slice_columns(fusion_slice_panels)
-                log_image_artifact(
-                    self.logger, image,
-                    f"val_fusion_{sig_key}",
-                    self.global_step,
-                )
+            if should_log:
+                fusion_rows = [np.hstack(row) for row in fusion_grid_rows if row]
+                if fusion_rows:
+                    image = np.vstack(fusion_rows)
+                    log_image_artifact(
+                        self.logger, image,
+                        f"val_fusion_{sig_key}",
+                        self.global_step,
+                    )
 
-    def _log_validation_preview(self, clean: Tensor, batch: dict[str, Tensor], batch_idx: int) -> None:
-        """Log a small denoise preview from the validation batch."""
-        n_show = min(clean.shape[0], 5)
-        panels = []
-        sigma_val = 0.4
-        t_val = self.get_t_from_sigma(sigma_val)
-        for i in range(n_show):
-            t_tensor = torch.full((1,), t_val, device=clean.device)
-            sample_seed = self._seed_from_parts(
-                "val_panel",
-                int(batch_idx),
-                batch["fusion_id"][i] if "fusion_id" in batch else i,
-                batch["pos_idx"][i] if "pos_idx" in batch else i,
-            )
-            noisy, _ = self._make_noisy_with_seed(
-                clean[i:i + 1],
-                t_tensor,
-                seed=sample_seed,
-            )
-            denoised = self._make_clean(noisy, t_val)
-            c0 = clean[i, 0].detach().float().cpu().numpy()
-            d0 = denoised[0, 0].detach().float().cpu().numpy()
-            mid_w = c0.shape[2] // 2
-            panels.append(fix_2d_scalar(c0[:, :, mid_w], d0[:, :, mid_w], show_residual=True))
-
-        if panels:
-            log_image_artifact(
-                self.logger, np.vstack(panels),
-                "val_yz_midw_sig40_batch_2",
-                self.global_step,
-            )
+                if detail_panels:
+                    detail_image = np.hstack(detail_panels)
+                    log_image_artifact(
+                        self.logger,
+                        detail_image,
+                        f"val_yz_midw_{detail_sig_key}",
+                        self.global_step,
+                    )
 
     # ── test helpers ────────────────────────────────────────────
 
@@ -832,15 +825,6 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         extra = self._validation_extra(clean)
         for key, val in extra.items():
             self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
-
-        if batch_idx == 2 and self.logger is not None:
-            try:
-                self._log_validation_preview(clean, batch, batch_idx)
-            except Exception:
-                import traceback
-
-                print("WARNING: failed to log batch-2 vstack panel:", flush=True)
-                traceback.print_exc()
 
         self._maybe_collect_fusion_crops(batch)
         return losses["loss"]

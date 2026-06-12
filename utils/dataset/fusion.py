@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -11,6 +12,52 @@ from torch import Tensor
 # Normalized data lives in [-1, 1] with -1.0 signalling empty background
 # (matching the pad value in _pad_full_volume_if_needed / _extract_crop).
 _BACKGROUND = -1.0
+
+
+def center_pad_fusion_volume(
+    volume: np.ndarray,
+    target_shape: tuple[int, int, int],
+    *,
+    fill_value: float = _BACKGROUND,
+) -> np.ndarray:
+    """Center-pad a fused ``(D,H,W)`` volume to ``target_shape``."""
+    volume_np = np.asarray(volume, dtype=np.float32)
+    if volume_np.ndim != 3:
+        raise ValueError(f"fusion volume must have shape (D,H,W), got {volume_np.shape}")
+    if any(int(src) > int(dst) for src, dst in zip(volume_np.shape, target_shape)):
+        raise ValueError(
+            f"target_shape {target_shape} must be at least volume shape {volume_np.shape}"
+        )
+    if tuple(int(dim) for dim in volume_np.shape) == tuple(int(dim) for dim in target_shape):
+        return volume_np
+
+    padded = np.full(tuple(int(dim) for dim in target_shape), fill_value, dtype=volume_np.dtype)
+    starts = [(int(dst) - int(src)) // 2 for src, dst in zip(volume_np.shape, target_shape)]
+    slices = tuple(slice(start, start + int(size)) for start, size in zip(starts, volume_np.shape))
+    padded[slices] = volume_np
+    return padded
+
+
+def center_crop_fusion_volume(
+    volume: np.ndarray,
+    target_shape: tuple[int, int, int],
+) -> np.ndarray:
+    """Extract a centered crop from a fused ``(D,H,W)`` volume."""
+    volume_np = np.asarray(volume, dtype=np.float32)
+    if volume_np.ndim != 3:
+        raise ValueError(f"fusion volume must have shape (D,H,W), got {volume_np.shape}")
+    starts: list[int] = []
+    ends: list[int] = []
+    for src, dst in zip(volume_np.shape, target_shape):
+        size = min(int(src), int(dst))
+        start = max((int(src) - size) // 2, 0)
+        starts.append(start)
+        ends.append(start + size)
+    return volume_np[
+        starts[0]:ends[0],
+        starts[1]:ends[1],
+        starts[2]:ends[2],
+    ]
 
 
 def volume_fuse(
