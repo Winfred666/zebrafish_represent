@@ -1,0 +1,15 @@
+import_config: ddp7_prdit_s1_gpu05_network_file.yaml
+
+logging:
+  params:
+    run_name: prdit_s1_ddp7_gpu05_network_file_warmstart
+    tags:
+      stage: "1"
+      node: gpu05
+      data_config: lg_025_network_file
+      devices: "7"
+      init: load_from_ckpt_260608_064826
+
+trainer:
+  params:
+    max_epochs: 40

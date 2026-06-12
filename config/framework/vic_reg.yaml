@@ -5,7 +5,7 @@ framework:
     sim_weight: 25.0
     var_weight: 25.0
     cov_weight: 5.0
-    lr: 0.0001
+    lr: 0.00001 # Finetune on medical net, use very small learning rate
     weight_decay: 0.000001
 
 logging:

@@ -1,2 +1,0 @@
-# Alias entrypoint for formal VolDiT-L/4 training on zebrafish ds8 latents.
-import_config: voldit_dit_ds8_l4.yaml

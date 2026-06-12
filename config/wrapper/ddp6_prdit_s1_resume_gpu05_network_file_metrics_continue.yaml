@@ -1,0 +1,15 @@
+import_config: ddp7_prdit_s1_resume_gpu05_network_file_metrics_continue.yaml
+
+trainer:
+  params:
+    devices: 6
+
+logging:
+  params:
+    run_name: prdit_s1_ddp6_gpu05_network_file_resume_metrics_continue
+    tags:
+      stage: "1"
+      node: gpu05
+      data_config: lg_025_network_file
+      devices: "6"
+      resume: last_v6_metrics_continue_ddp6

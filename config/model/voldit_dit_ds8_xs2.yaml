@@ -1,4 +1,4 @@
-# VolDiT-XS/4 for zebrafish 128^3 crops encoded by ds8 VQ-GAN -> 16^3 latents.
+# VolDiT-XS/2 for zebrafish 128^3 crops encoded by ds8 VQ-GAN -> 16^3 latents.
 stage1_model:
   class_name: MONAIVQGAN
   params:
@@ -20,14 +20,14 @@ stage1_model:
     output_act: null
     ddp_sync: true
     use_checkpointing: false
-    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_ddp4_resume_best.pth
+    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_ddp3_resume2_best.pth
     strict_load: true
 
 model:
   class_name: VolDiT
   params:
     input_size: [16, 16, 16]
-    patch_size: 4
+    patch_size: 2
     in_channels: 8
     hidden_size: 384
     depth: 6
@@ -37,5 +37,5 @@ model:
     num_classes: 0
     learn_sigma: false
     flash_attention: false
-    load_from_ckpt: result/checkpoints/voldit_xs_luna_pretrained.pth
+    load_from_ckpt: result/checkpoints/voldit_xs_luna_hf.pth
     strict_load: false

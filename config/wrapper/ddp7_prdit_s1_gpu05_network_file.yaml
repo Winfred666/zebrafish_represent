@@ -3,7 +3,6 @@ import_config: ddp4_prdit_s1.yaml
 trainer:
   params:
     devices: 7
-    check_val_every_n_epoch: 5
 
 logging:
   params:

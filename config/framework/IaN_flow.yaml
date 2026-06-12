@@ -1,12 +1,5 @@
+import_config: IaN_flow_s1.yaml
+
 framework:
-  class_name: IaNFlowModule
   params:
-    model: runtime.model
     stage: 2
-    optimization:
-      learning_rate: 0.00002  # 2e-5
-      weight_decay: 0.000001
-      loss_type: l1
-      sample_steps: 1000
-    diffusion:
-      timestep_respacing: null

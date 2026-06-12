@@ -1,8 +1,7 @@
 """Self-contained post-fit sample quality metrics for 3D volumes.
 
-FID and MMD use a MONAI 3D ResNet feature extractor applied to
-128³ patches extracted from each volume with 50% overlap.  This is the standard
-evaluation protocol for 3D generative models (matching PRDiT).
+FID and MMD use one 128³ volume-level feature vector per sample from a local
+vanilla MedicalNet ResNet backbone loaded through the standard MONAI wrapper.
 
 MS-SSIM and Wasserstein distance operate directly on jointly-normalised volume
 pairs.
@@ -12,68 +11,135 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable, Sequence
 
 import torch
 import torch.nn.functional as F
 
-from modules.model.perceptual_net import (
-    PERCEPTUALNET_CKPT_PATH,
-    PERCEPTUALNET_FEATURE_DIM,
-    PerceptualNetEncoder,
-)
+from modules.model.perceptual_net import PerceptualNetEncoder
 
-# Lazy singleton — model is ~14M params, loads in ~1 s.
+logger = logging.getLogger(__name__)
+
 _FEATURE_EXTRACTOR = None
+_FEATURE_EXTRACTOR_KEY = None
 _FEATURE_CODE_SHA1 = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
+_FALLBACK_WARNING_EMITTED = False
 
 PATCH_SIZE = 128
-PATCH_STRIDE = 64  # 50 % overlap
+_DEFAULT_MEDICALNET_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ("result/checkpoints/medicalnet_resnet50_23dataset.pth", "resnet50"),
+    ("result/checkpoints/resnet_50.pth", "resnet50"),
+    ("result/checkpoints/medicalnet_resnet10_23dataset.pth", "resnet10"),
+)
+
+
+def _feature_dim_for_backbone(backbone_name: str) -> int:
+    return 2048 if backbone_name in {"resnet50", "resnet101", "resnet152", "resnet200"} else 512
+
+
+def _infer_backbone_name_from_path(path: Path) -> str:
+    path_str = str(path).lower()
+    for backbone_name in ("resnet200", "resnet152", "resnet101", "resnet50", "resnet34", "resnet18", "resnet10"):
+        if backbone_name in path_str or backbone_name.replace("resnet", "resnet_") in path_str:
+            return backbone_name
+    return "resnet50"
+
+
+def _resolved_metric_backbone_spec(
+    checkpoint_path: str | None = None,
+) -> tuple[Path, str, int]:
+    global _FALLBACK_WARNING_EMITTED
+
+    if checkpoint_path is not None:
+        resolved = Path(checkpoint_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"MedicalNet checkpoint not found: {resolved}")
+        backbone_name = _infer_backbone_name_from_path(resolved)
+        return resolved, backbone_name, _feature_dim_for_backbone(backbone_name)
+
+    env_checkpoint = os.environ.get("PRDIT_FID_CHECKPOINT_PATH")
+    if env_checkpoint:
+        return _resolved_metric_backbone_spec(env_checkpoint)
+
+    project_root = Path(__file__).resolve().parents[2]
+    searched_paths: list[str] = []
+    for candidate, backbone_name in _DEFAULT_MEDICALNET_CANDIDATES:
+        resolved = (project_root / candidate).resolve()
+        searched_paths.append(str(resolved))
+        if resolved.exists():
+            if backbone_name != "resnet50" and not _FALLBACK_WARNING_EMITTED:
+                logger.warning(
+                    "No local MedicalNet ResNet-50 checkpoint was found; "
+                    "falling back to %s for FID/MMD until a ResNet-50 checkpoint is provided.",
+                    resolved,
+                )
+                _FALLBACK_WARNING_EMITTED = True
+            return resolved, backbone_name, _feature_dim_for_backbone(backbone_name)
+
+    raise FileNotFoundError(
+        "FID/MMD require a local vanilla MedicalNet checkpoint. "
+        f"Looked for: {searched_paths}. "
+        "Provide one via PRDIT_FID_CHECKPOINT_PATH or by placing a ResNet-50 checkpoint "
+        "under result/checkpoints/."
+    )
+
+
+def _prepare_feature_input(volumes: torch.Tensor, *, device: str) -> torch.Tensor:
+    x = volumes.to(dtype=torch.float32, device=device)
+    if x.ndim == 4:
+        x = x.unsqueeze(1)
+    if x.shape[1] > 1:
+        x = x.mean(dim=1, keepdim=True)
+    if x.shape[2:] != (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE):
+        x = F.interpolate(x, size=(PATCH_SIZE, PATCH_SIZE, PATCH_SIZE), mode="trilinear", align_corners=False)
+    return x
 
 
 class _FeatureExtractor:
-    """Thin wrapper: PerceptualNetEncoder → z-norm → pooled vectors."""
+    """Volume feature extractor backed by the standard MONAI ResNet wrapper."""
 
     def __init__(self, device: str = "cuda", checkpoint_path: str | None = None):
-        class _Cfg:
-            in_channels = 1
-            pretrained = (checkpoint_path is None)
-        self.encoder = PerceptualNetEncoder(_Cfg())
-        if checkpoint_path is not None:
-            self.encoder.load_ckpt(checkpoint_path)
+        resolved_checkpoint, backbone_name, feature_dim = _resolved_metric_backbone_spec(checkpoint_path)
+        self.checkpoint_path = resolved_checkpoint
+        self.backbone_name = backbone_name
+        self.feature_dim = feature_dim
+        self.encoder = PerceptualNetEncoder(
+            SimpleNamespace(
+                backbone=backbone_name,
+                in_channels=1,
+                spatial_dims=3,
+                feature_index=-1,
+                pretrained=False,
+                checkpoint_path=str(resolved_checkpoint),
+            )
+        )
         self.encoder.eval()
         self.encoder.to(device)
         self._device = device
-        self.feature_dim = self.encoder.out_channels
-        for p in self.encoder.parameters():
-            p.requires_grad = False
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad = False
 
     @torch.no_grad()
     def __call__(self, volumes: torch.Tensor) -> torch.Tensor:
-        x = volumes.to(dtype=torch.float32, device=self._device)
-        if x.ndim == 4:
-            x = x.unsqueeze(1)
-        if x.shape[1] > 1:
-            x = x.mean(dim=1, keepdim=True)
-        # Match the normalization used by the perceptual feature encoder.
-        mean = x.reshape(x.shape[0], -1).mean(dim=1).view(-1, 1, 1, 1, 1)
-        std = x.reshape(x.shape[0], -1).std(dim=1).view(-1, 1, 1, 1, 1).clamp(min=1e-6)
-        x = (x - mean) / std
-        feats = self.encoder(x)
-        pooled = F.adaptive_avg_pool3d(feats, (1, 1, 1))
-        return pooled.reshape(pooled.shape[0], -1).to(dtype=torch.float64)
+        feats = self.encoder(_prepare_feature_input(volumes, device=self._device))
+        if feats.ndim > 2:
+            feats = F.adaptive_avg_pool3d(feats, (1, 1, 1)).reshape(feats.shape[0], -1)
+        return feats.to(dtype=torch.float64)
 
 
 def _get_feature_extractor(device: str = "cuda",
                            checkpoint_path: str | None = None) -> _FeatureExtractor:
-    global _FEATURE_EXTRACTOR
-    if _FEATURE_EXTRACTOR is None:
-        # pretrained=True when no checkpoint is supplied: MONAI pretrained weights
-        # weights can collapse on zebrafish microscopy, so prefer a fine-tuned
-        # checkpoint_path from perceptual-net fine-tuning when available.
+    global _FEATURE_EXTRACTOR, _FEATURE_EXTRACTOR_KEY
+    resolved_checkpoint, backbone_name, _ = _resolved_metric_backbone_spec(checkpoint_path)
+    extractor_key = (str(device), str(resolved_checkpoint), backbone_name)
+    if _FEATURE_EXTRACTOR is None or _FEATURE_EXTRACTOR_KEY != extractor_key:
         _FEATURE_EXTRACTOR = _FeatureExtractor(device=device, checkpoint_path=checkpoint_path)
+        _FEATURE_EXTRACTOR_KEY = extractor_key
     return _FEATURE_EXTRACTOR
 
 
@@ -116,104 +182,16 @@ def _resize_to_common_spatial(
     )
 
 
-# ---------------------------------------------------------------------------
-# 128³ patch extraction
-# ---------------------------------------------------------------------------
-
-def _extract_128_patches(
-    volume: torch.Tensor,
-    stride: int = PATCH_STRIDE,
-) -> torch.Tensor:
-    """Slide a 128³ window over a single 5-D volume, returning all valid patches.
-
-    Dimensions smaller than 128 are padded with the volumeʼs minimum value
-    (background) so at least one patch is produced.
-
-    Parameters
-    ----------
-    volume : torch.Tensor
-        ``(1, C, D, H, W)`` float tensor.
-    stride : int
-        Step size between adjacent patch centres (default 64 = 50 % overlap).
-
-    Returns
-    -------
-    torch.Tensor
-        ``(N_patches, C, 128, 128, 128)``.
-    """
-    assert volume.ndim == 5 and volume.shape[0] == 1
-    _, C, D, H, W = volume.shape
-
-    # Pad dims smaller than 128
-    pad_d = max(0, PATCH_SIZE - D)
-    pad_h = max(0, PATCH_SIZE - H)
-    pad_w = max(0, PATCH_SIZE - W)
-    if pad_d > 0 or pad_h > 0 or pad_w > 0:
-        fill_val = volume.min()
-        volume = F.pad(volume, (0, pad_w, 0, pad_h, 0, pad_d), mode="constant", value=float(fill_val))
-        _, _, D, H, W = volume.shape
-
-    # Slide window
-    patches: list[torch.Tensor] = []
-    d_starts = list(range(0, D - PATCH_SIZE + 1, stride))
-    h_starts = list(range(0, H - PATCH_SIZE + 1, stride))
-    w_starts = list(range(0, W - PATCH_SIZE + 1, stride))
-    # Always include the last possible start to cover the trailing edge
-    if D > PATCH_SIZE and (D - PATCH_SIZE) not in d_starts:
-        d_starts.append(D - PATCH_SIZE)
-    if H > PATCH_SIZE and (H - PATCH_SIZE) not in h_starts:
-        h_starts.append(H - PATCH_SIZE)
-    if W > PATCH_SIZE and (W - PATCH_SIZE) not in w_starts:
-        w_starts.append(W - PATCH_SIZE)
-
-    for ds in d_starts:
-        for hs in h_starts:
-            for ws in w_starts:
-                patch = volume[:, :, ds:ds + PATCH_SIZE, hs:hs + PATCH_SIZE, ws:ws + PATCH_SIZE]
-                patches.append(patch)
-
-    return torch.cat(patches, dim=0)  # (N, C, 128, 128, 128)
-
-
-def _extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
-    """Extract perceptual features from 128³ patches covering each volume.
-
-    Parameters
-    ----------
-    volumes : torch.Tensor
-        ``(N, C, D, H, W)`` batch.  Each volume may have a different spatial
-        shape.
-
-    Returns
-    -------
-    torch.Tensor
-        ``(total_patches, 512)`` float64 feature vectors — one per 128³ patch
-        across all volumes.
-    """
-    extractor = _get_feature_extractor(device=str(volumes.device))
-    all_features: list[torch.Tensor] = []
-
-    for i in range(volumes.shape[0]):
-        vol = volumes[i:i + 1]  # (1, C, D, H, W)
-        patches = _extract_128_patches(vol)  # (N_p, C, 128, 128, 128)
-        if patches.shape[0] == 0:
-            continue
-        feats = extractor(patches)  # (N_p, 512)
-        all_features.append(feats)
-
-    if not all_features:
-        raise ValueError("No 128³ patches could be extracted — volumes too small")
-
-    return torch.cat(all_features, dim=0)
-
-
-def empty_feature_bank(feature_dim: int = PERCEPTUALNET_FEATURE_DIM) -> torch.Tensor:
-    return torch.empty((0, int(feature_dim)), dtype=torch.float64)
-
 
 def extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
-    return _extract_patch_features(volumes)
+    """Return one MedicalNet feature vector per input volume."""
+    return _get_feature_extractor(device=str(volumes.device))(volumes)
 
+
+def empty_feature_bank(feature_dim: int | None = None) -> torch.Tensor:
+    if feature_dim is None:
+        _, _, feature_dim = _resolved_metric_backbone_spec()
+    return torch.empty((0, int(feature_dim)), dtype=torch.float64)
 
 def summarize_feature_bank(features: torch.Tensor) -> dict[str, int | torch.Tensor]:
     if features.ndim != 2:
@@ -309,12 +287,11 @@ def compute_mmd_from_features(
 
 
 def _resolved_checkpoint_path(checkpoint_path: str | None = None) -> Path | None:
-    if checkpoint_path is not None:
-        return Path(checkpoint_path).expanduser().resolve()
-    default_path = Path(PERCEPTUALNET_CKPT_PATH)
-    if default_path.exists():
-        return default_path.resolve()
-    return None
+    try:
+        resolved_checkpoint, _, _ = _resolved_metric_backbone_spec(checkpoint_path)
+    except FileNotFoundError:
+        return None
+    return resolved_checkpoint
 
 
 def _dataset_signature(reference_dataset: object) -> dict[str, object]:
@@ -368,10 +345,13 @@ def build_feature_cache_key(
         checkpoint_signature = {"path": None}
     else:
         stat = resolved_checkpoint.stat()
+        backbone_name = _infer_backbone_name_from_path(resolved_checkpoint)
         checkpoint_signature = {
             "path": str(resolved_checkpoint),
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
+            "backbone_name": backbone_name,
+            "feature_dim": _feature_dim_for_backbone(backbone_name),
         }
 
     payload = {
@@ -545,22 +525,21 @@ def _frechet_distance(reference_features: torch.Tensor, generated_features: torc
 # ---------------------------------------------------------------------------
 
 def _mmd(reference_features: torch.Tensor, generated_features: torch.Tensor) -> float:
-    combined = torch.cat([reference_features, generated_features], dim=0)
-    if combined.shape[0] <= 1:
+    if reference_features.shape[0] <= 1:
         gamma = 1.0
     else:
-        pairwise = torch.pdist(combined, p=2).pow(2)
-        positive = pairwise[pairwise > 0]
-        median = positive.median().item() if positive.numel() > 0 else 1.0
+        pairwise = (reference_features.unsqueeze(1) - reference_features.unsqueeze(0)).pow(2).sum(-1).reshape(-1)
+        median = pairwise.median().item() if pairwise.numel() > 0 else 1.0
         gamma = 1.0 / max(2.0 * median, 1.0e-6)
 
-    dist_rr = torch.cdist(reference_features, reference_features, p=2).pow(2)
-    dist_gg = torch.cdist(generated_features, generated_features, p=2).pow(2)
-    dist_rg = torch.cdist(reference_features, generated_features, p=2).pow(2)
-
-    kernel_rr = torch.exp(-gamma * dist_rr)
-    kernel_gg = torch.exp(-gamma * dist_gg)
-    kernel_rg = torch.exp(-gamma * dist_rg)
+    xx = reference_features @ reference_features.T
+    yy = generated_features @ generated_features.T
+    xy = reference_features @ generated_features.T
+    x_norm = (reference_features ** 2).sum(dim=1, keepdim=True)
+    y_norm = (generated_features ** 2).sum(dim=1, keepdim=True)
+    kernel_rr = torch.exp(-gamma * (x_norm + x_norm.T - (2.0 * xx)))
+    kernel_gg = torch.exp(-gamma * (y_norm + y_norm.T - (2.0 * yy)))
+    kernel_rg = torch.exp(-gamma * (x_norm + y_norm.T - (2.0 * xy)))
     mmd2 = kernel_rr.mean() + kernel_gg.mean() - (2.0 * kernel_rg.mean())
     return float(torch.sqrt(torch.clamp(mmd2, min=0.0)).item())
 
@@ -653,22 +632,21 @@ def compute_sample_quality_metrics(
 ) -> dict[str, float | int | list[int]]:
     """Compute 3D quality metrics between generated and reference volumes.
 
-    FID and MMD extract 128³ patches from each volume with 50 % overlap, run
-    each patch through the perceptual encoder, and treat all patch features as
-    samples from the distribution.  This is the standard evaluation protocol
-    for 3D generative models (matching PRDiT).
+    FID and MMD resize each volume to 128³ if needed, run a vanilla MedicalNet
+    ResNet feature extractor once per volume, and compare the resulting
+    feature distributions.
 
     MS-SSIM and Wasserstein distance use joint-normalised volume pairs.
     """
     generated_batch = _as_volume_batch(generated)
     reference_batch = _as_volume_batch(reference)
 
-    # ---- feature-space metrics (FID, MMD) via 128³ patches ----
+    # ---- feature-space metrics (FID, MMD) via volume features ----
     generated_features = extract_patch_features(generated_batch)
     reference_features = extract_patch_features(reference_batch)
     feature_dim = int(generated_features.shape[1])
-    gen_patch_count = int(generated_features.shape[0])
-    ref_patch_count = int(reference_features.shape[0])
+    gen_feature_count = int(generated_features.shape[0])
+    ref_feature_count = int(reference_features.shape[0])
 
     # ---- volume-space metrics (MS-SSIM, Wasserstein) ----
     generated_norm, reference_norm = _normalize_pair(generated_batch, reference_batch)
@@ -681,8 +659,9 @@ def compute_sample_quality_metrics(
     return {
         "generated_count": int(generated_norm.shape[0]),
         "reference_count": int(reference_norm.shape[0]),
-        "generated_patches": gen_patch_count,
-        "reference_patches": ref_patch_count,
+        # Historical key kept for compatibility with existing logging/tests.
+        "generated_patches": gen_feature_count,
+        "reference_patches": ref_feature_count,
         "feature_dim": feature_dim,
         "fid": compute_fid_from_feature_stats(
             summarize_feature_bank(reference_features),

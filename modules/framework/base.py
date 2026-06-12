@@ -228,19 +228,34 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             self.parameters(),
             lr=self.optimization.learning_rate,
             weight_decay=self.optimization.weight_decay,
-            betas=(0.9, 0.95),
+            betas=(self.optimization.adam_beta1, self.optimization.adam_beta2),
         )
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=1e-6,
-            end_factor=1.0,
-            total_iters=500,
-        )
+        scheduler_name = self.optimization.lr_scheduler
+        if scheduler_name == "none":
+            return {"optimizer": optimizer}
+
+        if scheduler_name == "linear_warmup":
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1e-6,
+                end_factor=1.0,
+                total_iters=self.optimization.lr_warmup_steps,
+            )
+            interval = "step"
+        elif scheduler_name == "exponential":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=self.optimization.lr_decay_gamma,
+            )
+            interval = "epoch"
+        else:
+            raise ValueError(f"Unsupported lr_scheduler={scheduler_name!r}")
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": interval,
                 "frequency": 1,
             },
         }

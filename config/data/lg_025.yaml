@@ -9,7 +9,6 @@ train_dataset:
 
 train_dataloader:
   params:
-    shuffle: false
     persistent_workers: false
 
 val_dataset:

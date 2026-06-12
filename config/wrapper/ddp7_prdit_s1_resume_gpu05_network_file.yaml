@@ -1,0 +1,18 @@
+import_config: ddp7_prdit_s1_gpu05_network_file.yaml
+
+resume_ckpt_path: /tmp/prdit_s1_260608_064826_last.ckpt
+
+trainer:
+  params:
+    max_epochs: 40
+    check_val_every_n_epoch: 1
+
+logging:
+  params:
+    run_name: prdit_s1_ddp7_gpu05_network_file_resume
+    tags:
+      stage: "1"
+      node: gpu05
+      data_config: lg_025_network_file
+      devices: "7"
+      resume: last_ckpt_260608_064826

@@ -1,5 +1,4 @@
-# VolDiT stage-1 VQ-GAN model configuration.
-# Usage: --model-config config/model/vqvae.yaml
+# VolDiT stage-1 VQ-GAN finetune starting from the ddp3 resume2-trained zebrafish checkpoint.
 import_config: voldit_vqgan_ds8.yaml
 
 model:

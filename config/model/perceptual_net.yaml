@@ -1,5 +1,6 @@
 model:
   class_name: PerceptualNetEncoder
   params:
-    backbone: resnet10
-    pretrained: true
+    backbone: resnet50
+    pretrained: false
+    checkpoint_path: result/checkpoints/medicalnet_resnet50_23dataset.pth

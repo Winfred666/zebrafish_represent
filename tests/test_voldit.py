@@ -41,6 +41,10 @@ class TinyLatentModel(nn.Module):
     in_channels = 8
     input_size = (4, 4, 4)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(()))
+
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, pos_idx: torch.Tensor | None = None) -> torch.Tensor:
         del timesteps, pos_idx
         return torch.zeros_like(x)
@@ -49,6 +53,10 @@ class TinyLatentModel(nn.Module):
 class TinySampleModel(nn.Module):
     in_channels = 1
     input_size = (2, 2, 2)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(()))
 
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, pos_idx: torch.Tensor | None = None) -> torch.Tensor:
         del timesteps, pos_idx
@@ -256,6 +264,59 @@ class VolDiTIntegrationTest(unittest.TestCase):
         module = LatentDDPMModule(params)
         loss = module.training_step({"target": torch.randn(2, 1, 8, 8, 8)}, 0)
         self.assertEqual(loss.ndim, 0)
+
+    def test_base_framework_defaults_keep_linear_warmup(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=4,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinySampleFramework(params)
+        optim_config = module.configure_optimizers()
+
+        self.assertEqual(optim_config["optimizer"].param_groups[0]["betas"], (0.9, 0.95))
+        self.assertIsInstance(
+            optim_config["lr_scheduler"]["scheduler"],
+            torch.optim.lr_scheduler.LinearLR,
+        )
+        self.assertEqual(optim_config["lr_scheduler"]["interval"], "step")
+
+    def test_latent_ddpm_can_match_voldit_reference_lr_decay(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.01,
+                adam_beta1=0.9,
+                adam_beta2=0.999,
+                lr_scheduler="exponential",
+                lr_decay_gamma=0.999,
+                loss_type="smooth_l1",
+                sample_steps=300,
+            ),
+            diffusion=DDPMDiffusionParams(
+                beta_schedule="cosine",
+                prediction_type="v_prediction",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        optim_config = module.configure_optimizers()
+
+        self.assertEqual(optim_config["optimizer"].param_groups[0]["betas"], (0.9, 0.999))
+        self.assertAlmostEqual(optim_config["optimizer"].param_groups[0]["weight_decay"], 0.01)
+        self.assertIsInstance(
+            optim_config["lr_scheduler"]["scheduler"],
+            torch.optim.lr_scheduler.ExponentialLR,
+        )
+        self.assertEqual(optim_config["lr_scheduler"]["interval"], "epoch")
+        self.assertAlmostEqual(optim_config["lr_scheduler"]["scheduler"].gamma, 0.999)
 
     def test_latent_ddpm_make_clean_decodes_to_image_space(self) -> None:
         params = LatentDDPMModuleParams(

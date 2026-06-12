@@ -1,0 +1,7 @@
+# VolDiT-B/2 warm-start from the current best stage-2 Lightning checkpoint.
+import_config: voldit_dit_ds8_b2.yaml
+
+model:
+  params:
+    load_from_ckpt: /home/ym.xiao/workspace/zebrafish_represent/result/checkpoints/voldit_dit_ds8_b2_epoch032_step002739.ckpt
+    strict_load: false

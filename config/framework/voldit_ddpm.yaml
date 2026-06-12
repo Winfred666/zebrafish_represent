@@ -5,10 +5,14 @@ framework:
     model: runtime.model
     stage1_model: runtime.stage1_model
     scale_factor: 1.0
-    stat_metrics_every_n_epochs: 3
+    stat_metrics_every_n_epochs: 6
     optimization:
       learning_rate: 0.0001
-      weight_decay: 0.0001
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      lr_scheduler: exponential
+      lr_decay_gamma: 0.999
       loss_type: l1
       sample_steps: 300
     diffusion:

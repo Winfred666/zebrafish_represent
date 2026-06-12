@@ -80,10 +80,6 @@ class LatentDDPMModule(BaseTrainingFramework):
             gathered = gathered.unsqueeze(-1)
         return gathered
 
-    def _normalized_t(self, timesteps: Tensor) -> Tensor:
-        denominator = float(max(1, self.optimization.sample_steps - 1))
-        return timesteps.to(dtype=torch.float32) / denominator
-
     def get_t_from_sigma(self, sigma: float) -> float:
         sigma_value = float(min(max(sigma, 0.0), 1.0))
         sigma_table = self.sqrt_one_minus_alphas_cumprod.to(dtype=torch.float32)
@@ -136,8 +132,7 @@ class LatentDDPMModule(BaseTrainingFramework):
         )
         noise = torch.randn_like(clean_latents)
         noisy_latents = self._q_sample(clean_latents, timesteps, noise)
-        normalized_timesteps = self._normalized_t(timesteps)
-        prediction = self(noisy_latents, normalized_timesteps)
+        prediction = self(noisy_latents, timesteps.to(dtype=torch.float32))
         target = self._target_from_prediction_type(clean_latents, noise, timesteps)
         loss = self._ddpm_loss(prediction, target)
         return {"loss": loss}
@@ -196,8 +191,7 @@ class LatentDDPMModule(BaseTrainingFramework):
         timestep = max(0, min(total_steps - 1, timestep))
 
         t_tensor = torch.full((batch_size,), timestep, device=noisy.device, dtype=torch.long)
-        normalized_t = self._normalized_t(t_tensor)
-        prediction = self(noisy, normalized_t)
+        prediction = self(noisy, t_tensor.to(dtype=torch.float32))
         epsilon = self._epsilon_from_prediction(prediction, noisy, t_tensor)
 
         beta_t = self._extract(self.betas, t_tensor, noisy.ndim)

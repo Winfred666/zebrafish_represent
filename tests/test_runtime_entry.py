@@ -182,7 +182,7 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/framework/base.yaml")
         self.assertEqual(config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
-        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 3)
+        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 6)
 
     def test_base_framework_params_default_stat_metric_interval(self) -> None:
         from utils.sanitize.framework_config import BaseFrameworkParams

@@ -1,7 +1,7 @@
-"""Tests for 3D perceptual feature extractor and 128³ patch-based quality metrics.
+"""Tests for MONAI-backed 3D sample quality metrics.
 
-Verifies correctness, determinism, and consistency with the PRDiT evaluation
-protocol (MONAI 3D ResNet backbone, 128³ patch extraction).
+Verifies correctness, determinism, and consistency with the volume-level
+MedicalNet feature pipeline used for FID and MMD.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 import torch
 
-from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM
 from utils.eval.sample_quality import (
     PATCH_SIZE,
     _FeatureExtractor,
@@ -22,8 +21,7 @@ from utils.eval.sample_quality import (
     compute_fid_from_feature_stats,
     compute_mmd_from_features,
     empty_feature_bank,
-    _extract_128_patches,
-    _extract_patch_features,
+    extract_patch_features,
     extract_dataset_patch_features,
     _frechet_distance,
     feature_cache_path,
@@ -45,7 +43,13 @@ from utils.eval.sample_quality import (
 # ---------------------------------------------------------------------------
 
 def _requires_gpu() -> bool:
-    return torch.cuda.is_available()
+    if not torch.cuda.is_available():
+        return False
+    try:
+        torch.empty(1, device="cuda")
+    except RuntimeError:
+        return False
+    return True
 
 
 def _random_128_patches(n: int, c: int = 1) -> torch.Tensor:
@@ -62,7 +66,7 @@ def _random_volume(n: int = 1, c: int = 1, d: int = 200, h: int = 200, w: int = 
 # ---------------------------------------------------------------------------
 
 class TestFeatureExtractor:
-    """Tests for the _FeatureExtractor (PerceptualNetEncoder + z-norm + pool)."""
+    """Tests for the MONAI-backed volume feature extractor."""
 
     @pytest.fixture(scope="class")
     def extractor(self) -> _FeatureExtractor:
@@ -71,13 +75,13 @@ class TestFeatureExtractor:
     def test_output_shape(self, extractor: _FeatureExtractor) -> None:
         x = _random_128_patches(8)
         feats = extractor(x)
-        assert tuple(feats.shape) == (8, 512)
+        assert tuple(feats.shape) == (8, extractor.feature_dim)
         assert feats.dtype == torch.float64
 
     def test_single_patch(self, extractor: _FeatureExtractor) -> None:
         x = _random_128_patches(1)
         feats = extractor(x)
-        assert tuple(feats.shape) == (1, 512)
+        assert tuple(feats.shape) == (1, extractor.feature_dim)
 
     def test_deterministic(self, extractor: _FeatureExtractor) -> None:
         torch.manual_seed(42)
@@ -89,12 +93,12 @@ class TestFeatureExtractor:
     def test_4d_input_auto_unsqueezed(self, extractor: _FeatureExtractor) -> None:
         x = torch.randn(4, 128, 128, 128, dtype=torch.float32)
         feats = extractor(x)
-        assert tuple(feats.shape) == (4, 512)
+        assert tuple(feats.shape) == (4, extractor.feature_dim)
 
     def test_multichannel_averaged(self, extractor: _FeatureExtractor) -> None:
         x = torch.randn(4, 3, 128, 128, 128, dtype=torch.float32)
         feats = extractor(x)
-        assert tuple(feats.shape) == (4, 512)
+        assert tuple(feats.shape) == (4, extractor.feature_dim)
 
     def test_separated_batches_consistent(self, extractor: _FeatureExtractor) -> None:
         torch.manual_seed(99)
@@ -104,70 +108,28 @@ class TestFeatureExtractor:
         assert torch.allclose(batched, individual, atol=1e-5)
 
     def test_feature_dim_constant(self, extractor: _FeatureExtractor) -> None:
-        assert extractor.feature_dim == PERCEPTUALNET_FEATURE_DIM
+        assert extractor.feature_dim in (512, 2048)
 
 
 # ---------------------------------------------------------------------------
-# _extract_128_patches
-# ---------------------------------------------------------------------------
-
-class TestExtract128Patches:
-    """Tests for sliding-window 128³ patch extraction."""
-
-    def test_exact_size(self) -> None:
-        """A 128³ volume produces exactly 1 patch."""
-        vol = torch.randn(1, 1, 128, 128, 128, dtype=torch.float32)
-        patches = _extract_128_patches(vol)
-        assert patches.shape == (1, 1, 128, 128, 128)
-
-    def test_larger_volume(self) -> None:
-        """A 256³ volume produces multiple patches."""
-        vol = torch.randn(1, 1, 256, 256, 256, dtype=torch.float32)
-        patches = _extract_128_patches(vol)
-        # stride=64 → (256-128)//64 + 1 = 3 per dim → 27 total
-        assert patches.shape[0] == 27
-        assert patches.shape[1:] == (1, 128, 128, 128)
-
-    def test_small_dim_padded(self) -> None:
-        """A volume with one dim < 128 is padded so at least 1 patch is produced."""
-        vol = torch.randn(1, 1, 100, 200, 200, dtype=torch.float32)
-        patches = _extract_128_patches(vol)
-        assert patches.shape[0] >= 1
-        assert patches.shape[1:] == (1, 128, 128, 128)
-
-    def test_multichannel(self) -> None:
-        """Multi-channel volumes produce multi-channel patches."""
-        vol = torch.randn(1, 3, 128, 128, 128, dtype=torch.float32)
-        patches = _extract_128_patches(vol)
-        assert patches.shape[1] == 3
-
-    def test_anisotropic(self) -> None:
-        """Anisotropic volumes (e.g. 100×400×200) produce valid patches."""
-        vol = torch.randn(1, 1, 100, 400, 200, dtype=torch.float32)
-        patches = _extract_128_patches(vol)
-        assert patches.shape[0] >= 1
-        assert patches.shape[1:] == (1, 128, 128, 128)
-
-
-# ---------------------------------------------------------------------------
-# _extract_patch_features
+# extract_patch_features
 # ---------------------------------------------------------------------------
 
 class TestExtractPatchFeatures:
-    """Tests for volume → patches → features pipeline."""
+    """Tests for volume → MedicalNet feature pipeline."""
 
     def test_output_shape(self) -> None:
         vols = _random_volume(n=2, d=140, h=140, w=140)
-        feats = _extract_patch_features(vols)
-        assert feats.shape[1] == 512
-        assert feats.shape[0] > 0
+        feats = extract_patch_features(vols)
+        assert feats.shape[0] == 2
+        assert feats.shape[1] in (512, 2048)
         assert feats.dtype == torch.float64
 
     def test_single_volume(self) -> None:
         vol = _random_volume(n=1, d=140, h=140, w=140)
-        feats = _extract_patch_features(vol)
-        assert feats.shape[1] == 512
-        assert feats.shape[0] >= 1
+        feats = extract_patch_features(vol)
+        assert feats.shape == (1, feats.shape[1])
+        assert feats.shape[1] in (512, 2048)
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +435,9 @@ class TestValidationFeatureCacheHelpers:
 class TestComputeSampleQualityMetrics:
     """Integration tests for the public API.
 
-    Uses a class-scoped fixture so the perceptual encoder checkpoint is
-    loaded once and shared across all test methods.  Volumes are sized
-    down to ~140³ to minimise ResNet-10 forward passes while still
-    producing valid 128³ patches.
+    Uses a class-scoped fixture so the MedicalNet checkpoint is loaded once and
+    shared across all test methods. Volumes are sized down to ~140³ to keep the
+    feature extractor cheap while still exercising the resize path.
     """
 
     @pytest.fixture(scope="class", autouse=True)
@@ -503,11 +464,11 @@ class TestComputeSampleQualityMetrics:
             "feature_dim", "fid", "mmd", "ms_ssim",
         }
 
-    def test_feature_dim_is_512(self) -> None:
+    def test_feature_dim_matches_default_extractor(self) -> None:
         gen = self._small_vol(3)
         ref = self._small_vol(3)
         metrics = compute_sample_quality_metrics(gen, ref)
-        assert metrics["feature_dim"] == 512
+        assert metrics["feature_dim"] in (512, 2048)
 
     def test_counts_match(self) -> None:
         gen = self._small_vol(3)
@@ -516,12 +477,12 @@ class TestComputeSampleQualityMetrics:
         assert metrics["generated_count"] == 3
         assert metrics["reference_count"] == 5
 
-    def test_patches_greater_than_volumes(self) -> None:
+    def test_feature_rows_match_volumes(self) -> None:
         gen = _random_volume(n=2, d=256, h=256, w=256)
         ref = _random_volume(n=2, d=256, h=256, w=256)
         metrics = compute_sample_quality_metrics(gen, ref)
-        assert metrics["generated_patches"] > metrics["generated_count"]
-        assert metrics["reference_patches"] > metrics["reference_count"]
+        assert metrics["generated_patches"] == metrics["generated_count"]
+        assert metrics["reference_patches"] == metrics["reference_count"]
 
     def test_all_zero_volumes(self) -> None:
         gen = torch.zeros(2, 1, 140, 140, 140, dtype=torch.float32)
@@ -563,13 +524,13 @@ class TestGPU:
         extractor = _FeatureExtractor(device="cuda")
         x = _random_128_patches(4).cuda()
         feats = extractor(x)
-        assert tuple(feats.shape) == (4, 512)
+        assert tuple(feats.shape) == (4, extractor.feature_dim)
         assert feats.device.type == "cuda"
 
     def test_end_to_end_gpu(self) -> None:
         gen = _random_volume(n=2, d=200, h=200, w=200).cuda()
         ref = _random_volume(n=2, d=200, h=200, w=200).cuda()
         metrics = compute_sample_quality_metrics(gen, ref)
-        assert metrics["feature_dim"] == 512
+        assert metrics["feature_dim"] in (512, 2048)
         assert metrics["fid"] >= 0.0
         assert metrics["generated_patches"] > 0
