@@ -147,46 +147,6 @@ def normalize_volume(volume: np.ndarray,
     
     return volume
 
-def preprocess_npy_volume(
-        volume: np.ndarray,
-        *,
-        initial_clip: float = 0.01,
-        nonzero_low_percentile: float = 10.0,
-    ) -> np.ndarray:
-        """Preprocess a (D,H,W) or (D,H,W,C) volume already normalized to ~[0,1].
-
-        For bimodal histograms where the background mode is slightly above 0:
-          1) Clip low values to `initial_clip`
-          2) Compute `nonzero_low_percentile` over voxels > initial_clip
-          3) Clip again to that percentile level, then rescale to [0,1]
-        """
-        vol = volume.astype(np.float32, copy=False)
-
-        if not (0.0 <= initial_clip < 1.0):
-            raise ValueError("initial_clip must be in [0, 1).")
-        if not (0.0 <= nonzero_low_percentile <= 100.0):
-            raise ValueError("nonzero_low_percentile must be in [0, 100].")
-
-        # Step 1: remove tiny background bump near zero
-        vol = np.clip(vol, initial_clip, 1.0)
-
-        # Step 2: percentile on "non-zero" voxels (strictly above initial_clip)
-        nz = vol[vol > initial_clip]
-        if nz.size == 0:
-            # Degenerate case: everything is at/below initial_clip; map to zeros.
-            return np.zeros_like(vol, dtype=np.float32)
-
-        p = float(np.percentile(nz, nonzero_low_percentile))
-
-        # Step 3: clip to percentile level and rescale
-        vol = np.clip(vol, p, 1.0)
-        denom = 1.0 - p
-        if denom <= 0:
-            return np.zeros_like(vol, dtype=np.float32)
-
-        vol = (vol - p) / denom
-        return vol.astype(np.float32, copy=False)
-
 
 def _to_channel_first_4d(volume: np.ndarray) -> np.ndarray:
     """Ensure volume is channel-first 4D: (C, D, H, W).
@@ -234,7 +194,7 @@ def process_tif_to_array(
     *,
     scale_factor: Tuple[float, float, float] = (0.5, 0.5, 0.5),
     normalize: bool = True,
-    clip_percentile: Optional[Tuple[float, float]] = (1, 99),
+    clip_percentile: Optional[Tuple[float, float]] = (0, 100),
 ) -> np.ndarray:
     """Like :func:`process_tif_to_volume`, but returns the processed array.
 
@@ -251,7 +211,6 @@ def process_tif_to_array(
     if normalize:
         volume = normalize_volume(volume, method='minmax', clip_percentile=clip_percentile)
 
-    volume = preprocess_npy_volume(volume)
     volume = _to_channel_first_4d(volume).astype(np.float32, copy=False)
     return volume
 
@@ -262,10 +221,10 @@ def batch_process_tifs(
     *,
     mode: str = "downsample",
     block_size: int = 256,
-    block_drop_threshold: float = 0.5,
+    block_drop_threshold: float = 0.99,
     scale_factor: Tuple[float, float, float] = (0.5, 0.5, 0.5),
     normalize: bool = True,
-    clip_percentile: Optional[Tuple[float, float]] = (1, 99),
+    clip_percentile: Optional[Tuple[float, float]] = (0, 100),
     order: int = 1,
 ) -> str:
     """Batch convert TIFs with shared preprocessing.

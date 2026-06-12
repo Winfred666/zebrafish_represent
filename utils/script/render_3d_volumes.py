@@ -2,7 +2,7 @@
 """Render semi-transparent 3D volume PNGs for three zebrafish datasets using pyvista.
 
 Uses the project's own ``utils.tif2volume.process_tif_to_array`` for consistent
-preprocessing (percentile clipping, background suppression, normalization).
+preprocessing (optional percentile clipping and normalization).
 
 Each output PNG is saved next to its source TIFF file.
 
@@ -153,8 +153,8 @@ def load_volume(path: str, scale: tuple) -> tuple[np.ndarray, tuple[int, ...]]:
     """Load and preprocess a TIFF using the project's ``process_tif_to_array``.
 
     Returns (volume_DHW_0to1, original_shape).
-    Volume is float32 in [0, 1] after percentile clipping, background suppression,
-    and min-max normalization — consistent with the training dataset pipeline.
+    Volume is float32 in [0, 1] after percentile clipping and min-max
+    normalization — consistent with the training dataset pipeline.
     """
     print(f"  Loading via process_tif_to_array (scale={scale}, clip_pct=(1,99)) ...")
 

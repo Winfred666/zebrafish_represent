@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import json
 import os
+import random
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,10 +94,12 @@ class CropTifVolumeHotDataset(Dataset):
 
         self.data_dir = Path(config.data_dir)
         self.cache_root = Path(config.cache_root) if getattr(config, "cache_root", None) else None
-        self._file_paths = self._discover_files() if discover_files else []
-        self.file_count = len(self._file_paths)
-        self._selected_file_keys_value = self._build_selected_file_keys()
-        self._cache_key_value = self._build_cache_key()
+        self._all_file_paths: list[Path] = []
+        self._file_paths: list[Path] = []
+        self.file_count = 0
+        self._selected_file_keys_value: list[str] = []
+        self._cache_key_value = ""
+        self._initialize_file_inventory(discover_files=discover_files)
         self._crop_cache_dir_value = (
             self.cache_root / f".crop_cache_{self._cache_key_value}"
             if self.cache_root is not None
@@ -124,36 +127,43 @@ class CropTifVolumeHotDataset(Dataset):
 
     # ── file discovery ────────────────────────────────────────────
 
-    def _discover_files(self) -> list[Path]:
-        if self.config.max_files is not None and int(self.config.max_files) == 0:
-            return []
+    def _initialize_file_inventory(self, *, discover_files: bool) -> None:
+        """Build runtime file order and cache identity from one shared file scan."""
+        self._all_file_paths = self._discover_all_files()
+        self._file_paths = self._select_runtime_files(self._all_file_paths) if discover_files else []
+        self.file_count = len(self._file_paths)
+        self._selected_file_keys_value = self._build_selected_file_keys()
+        self._cache_key_value = self._build_cache_key(all_files=self._all_file_paths)
+
+    def _discover_all_files(self) -> list[Path]:
         files = sorted(
             list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
         )
-        if not files:
+        if not files and not (
+            self.config.max_files is not None and int(self.config.max_files) == 0
+        ):
             raise ValueError(f"No tif files found in {self.data_dir}")
-        import random
-
         rng = random.Random(42)
         rng.shuffle(files)
-        if self.config.max_files is not None:
-            files = files[: int(self.config.max_files)]
         return files
+
+    def _select_runtime_files(self, all_files: list[Path]) -> list[Path]:
+        if self.config.max_files is not None and int(self.config.max_files) == 0:
+            return []
+        if self.config.max_files is not None:
+            return all_files[: int(self.config.max_files)]
+        return list(all_files)
+
+    def _discover_files(self) -> list[Path]:
+        return self._select_runtime_files(self._discover_all_files())
 
     # ── cache identity ────────────────────────────────────────────
 
-    def _build_cache_key(self) -> str:
-        # Discover ALL files (ignoring max_files) and apply the same sort +
-        # deterministic shuffle as _discover_files so the cache key is stable
-        # regardless of max_files. The key matches what build_hot_cache.py
-        # produces with max_files=None.
-        all_files = sorted(
-            list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
-        )
-        import random
-
-        rng = random.Random(42)
-        rng.shuffle(all_files)
+    def _build_cache_key(self, all_files: list[Path] | None = None) -> str:
+        # The cache key intentionally uses the full deterministic file order,
+        # independent of max_files, so cache lookup matches the builder.
+        if all_files is None:
+            all_files = self._discover_all_files()
         files = []
         for path in all_files:
             try:

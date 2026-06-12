@@ -276,6 +276,20 @@ def _extract_crop(
     return crop.astype(np.float32, copy=False)
 
 
+def _should_keep_crop(crop_np: np.ndarray, normalize: bool) -> bool:
+    """Return whether a crop should be kept in the cache.
+
+    Comment out the call site in `_materialize_one_volume` to disable this
+    filtering without touching the threshold logic.
+    """
+    if not normalize:
+        return True
+
+    signal_threshold = -1.0 + 0.001 * 2  # 0.001 in [0,1] -> -0.998 in [-1,1]
+    signal_fraction = np.mean(crop_np > signal_threshold)
+    return bool(signal_fraction >= 0.001)  # exclude crops that are >=99.9% background
+
+
 def _materialize_one_volume(
     *,
     ds: CropTifVolumeHotDataset,
@@ -308,20 +322,16 @@ def _materialize_one_volume(
     )
 
     # ── extract & filter crops ──
-    # WARNING: filter rule here: lower than 0.1% of pixels above -0.998 (if normalized) or 0.001 (if not) are considered empty and dropped from the cache. 
+    # WARNING: comment out the _should_keep_crop call below to disable empty-crop filtering.
     # This is a heuristic, may need adjustment for other datasets.
     kept_crops: list[np.ndarray] = []
     kept_starts: list[tuple[int, int, int]] = []
     empty_count = 0
     for start_d, start_h, start_w in all_starts:
         crop_np = _extract_crop(volume, start_d, start_h, start_w, ds.crop_size, ds.normalize)
-        if ds.normalize:
-            signal_threshold = -1.0 + 0.001 * 2  # 0.001 in [0,1] → -0.998 in [-1,1]
-            signal_fraction = np.mean(crop_np > signal_threshold) # WARNING: change to max to make it easier to pass as long as one pixel is above the threshold,
-            # can be changed back to mean if we want to be more strict about empty crops
-            if signal_fraction < 0.001:  # exclude crops that are ≥99.9% background
-                empty_count += 1
-                continue
+        if not _should_keep_crop(crop_np, ds.normalize):
+            empty_count += 1
+            continue
         kept_crops.append(crop_np.copy())
         kept_starts.append((start_d, start_h, start_w))
 

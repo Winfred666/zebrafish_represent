@@ -17,7 +17,7 @@ class CropTifVolumeHotDatasetParams(IngestibleParams):
     max_files: int | None = None
     scale_factor: tuple[float, float, float] = (0.5, 0.5, 0.5)
     normalize: bool = True
-    clip_percentile: tuple[float, float] = (1.0, 99.0)
+    clip_percentile: tuple[float, float] = (0.0, 100.0)
     overlap: tuple[float, float, float] = (0.0, 0.0, 0.0)
     in_channels: int = Field(default=1, ge=1)
     pad_to_multiple: tuple[int, int, int] | None = None
