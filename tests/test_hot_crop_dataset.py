@@ -11,11 +11,16 @@ import tifffile
 import torch
 from torch.utils.data import DataLoader
 
+from utils.dataset.augment import clip_to_percentile_cmax
 from utils.dataset.crop_volume import CropTifVolumeHotDataset
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
 
-def _build_dummy_cache_bundle(data_dir: Path, params: dict) -> None:
+def _build_dummy_cache_bundle(
+    data_dir: Path,
+    params: dict,
+    volume_specs: list[dict[str, object]] | None = None,
+) -> None:
     """Build a minimal mmap-ready cache bundle for the dataset tests."""
     config = CropTifVolumeHotDatasetParams.model_validate(params)
     ds = CropTifVolumeHotDataset.build_stub(config)
@@ -32,13 +37,21 @@ def _build_dummy_cache_bundle(data_dir: Path, params: dict) -> None:
 
     crop_size = config.crop_size
     for vol_idx in range(ds.file_count):
-        full_size = np.asarray((config.in_channels, 2, 4, 2), dtype=np.int64)
-        starts = [(0, 0, 0), (0, 2, 0)] if crop_size == (2, 2, 2) else [(0, 0, 0)]
-        if crop_size is not None and crop_size[0] > 2:
-            starts = [(0, 0, 0)]
-        crop_shape = (config.in_channels, *crop_size) if crop_size else tuple(full_size.tolist())
-        crops = np.full((len(starts), *crop_shape), fill_value=-1.0, dtype=np.float32)
-        starts_array = np.asarray(starts, dtype=np.int64)
+        spec = volume_specs[vol_idx] if volume_specs is not None else None
+        if spec is None:
+            full_size = np.asarray((config.in_channels, 2, 4, 2), dtype=np.int64)
+            starts = [(0, 0, 0), (0, 2, 0)] if crop_size == (2, 2, 2) else [(0, 0, 0)]
+            if crop_size is not None and crop_size[0] > 2:
+                starts = [(0, 0, 0)]
+            crop_shape = (config.in_channels, *crop_size) if crop_size else tuple(full_size.tolist())
+            crops = np.full((len(starts), *crop_shape), fill_value=-1.0, dtype=np.float32)
+            starts_array = np.asarray(starts, dtype=np.int64)
+        else:
+            crops = np.asarray(spec["crops"], dtype=np.float32)
+            starts_array = np.asarray(spec["starts"], dtype=np.int64)
+            crop_shape = tuple(int(dim) for dim in crops.shape[1:])
+            full_size = np.asarray(spec.get("full_size", (config.in_channels, *crops.shape[2:])), dtype=np.int64)
+
         crop_numel = int(np.prod(crop_shape, dtype=np.int64))
 
         crop_chunks.append(crops)
@@ -80,7 +93,7 @@ class HotCropDatasetTest(unittest.TestCase):
             "crop_size": (2, 2, 2),
             "scale_factor": (1.0, 1.0, 1.0),
             "normalize": True,
-            "clip_percentile": (0.0, 100.0),
+            "percentile_cmax": 100.0,
             "overlap": (0.0, 0.0, 0.0),
             "in_channels": 1,
             "cache_root": str(data_dir / "cache_root"),
@@ -88,9 +101,15 @@ class HotCropDatasetTest(unittest.TestCase):
         params.update(overrides)
         return params
 
-    def _make_dataset(self, data_dir: Path, **overrides) -> CropTifVolumeHotDataset:
+    def _make_dataset(
+        self,
+        data_dir: Path,
+        *,
+        volume_specs: list[dict[str, object]] | None = None,
+        **overrides,
+    ) -> CropTifVolumeHotDataset:
         params = self._params(data_dir, **overrides)
-        _build_dummy_cache_bundle(data_dir, params)
+        _build_dummy_cache_bundle(data_dir, params, volume_specs=volume_specs)
         return CropTifVolumeHotDataset(
             CropTifVolumeHotDatasetParams.model_validate(params)
         )
@@ -178,6 +197,69 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(dataset.overlap, (0.25, 0.25, 0.25))
             self.assertEqual(dataset.in_channels, 1)
             self.assertTrue(dataset.normalize)
+            self.assertEqual(dataset.percentile_cmax, 100.0)
+
+    def test_cache_directory_unchanged_when_only_percentile_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            ds_a = CropTifVolumeHotDataset.build_stub(
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_cmax=95.0))
+            )
+            ds_b = CropTifVolumeHotDataset.build_stub(
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_cmax=99.9))
+            )
+            self.assertEqual(ds_a._crop_cache_dir(), ds_b._crop_cache_dir())
+
+    def test_attach_computes_thresholds_per_fusion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "a.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            tifffile.imwrite(data_dir / "b.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            volume_specs = [
+                {
+                    "crops": np.linspace(-1.0, 1.0, num=16, dtype=np.float32).reshape(2, 1, 2, 2, 2),
+                    "starts": [(0, 0, 0), (0, 2, 0)],
+                },
+                {
+                    "crops": np.linspace(-1.0, 0.5, num=16, dtype=np.float32).reshape(2, 1, 2, 2, 2),
+                    "starts": [(0, 0, 0), (0, 2, 0)],
+                },
+            ]
+            dataset = self._make_dataset(data_dir, volume_specs=volume_specs, percentile_cmax=75.0)
+
+            expected = []
+            for spec in volume_specs:
+                crops = torch.from_numpy(np.asarray(spec["crops"], dtype=np.float32))
+                crop_block = torch.clamp((crops + 1.0) * 0.5, 0.0, 1.0).reshape(-1)
+                expected.append(float(torch.quantile(crop_block, 0.75).item()))
+
+            self.assertEqual(len(dataset._fusion_thresholds_01), 2)
+            self.assertTrue(np.allclose(dataset._fusion_thresholds_01, expected))
+
+    def test_getitem_returns_lazily_clipped_crops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            raw_crops = np.asarray(
+                [
+                    np.linspace(-1.0, 1.0, num=8, dtype=np.float32).reshape(1, 2, 2, 2),
+                    np.linspace(-0.5, 0.5, num=8, dtype=np.float32).reshape(1, 2, 2, 2),
+                ],
+                dtype=np.float32,
+            )
+            dataset = self._make_dataset(
+                data_dir,
+                volume_specs=[{"crops": raw_crops, "starts": [(0, 0, 0), (0, 2, 0)]}],
+                percentile_cmax=75.0,
+            )
+
+            stored_before = dataset._crop_storage.narrow(0, 0, 8).view(1, 2, 2, 2).clone()
+            item = dataset[0]
+            expected = clip_to_percentile_cmax(stored_before, dataset._fusion_thresholds_01[0])
+
+            self.assertTrue(torch.allclose(item["target"], expected))
+            self.assertTrue(torch.allclose(dataset._crop_storage.narrow(0, 0, 8).view(1, 2, 2, 2), stored_before))
 
     def test_cache_bundle_reused_by_second_dataset_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

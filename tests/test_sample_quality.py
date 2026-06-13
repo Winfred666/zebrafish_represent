@@ -380,10 +380,11 @@ class TestValidationFeatureCacheHelpers:
 
     def test_feature_cache_key_changes_with_dataset_signature(self) -> None:
         class DummyDataset:
-            def __init__(self, cache_key: str):
+            def __init__(self, cache_key: str, percentile_cmax: float):
                 self.crop_size = (32, 32, 32)
                 self.overlap = (0.5, 0.5, 0.5)
                 self._cache_key_value = cache_key
+                self.percentile_cmax = percentile_cmax
 
             def __len__(self) -> int:
                 return 4
@@ -394,8 +395,8 @@ class TestValidationFeatureCacheHelpers:
             def _selected_file_keys(self) -> list[str]:
                 return ["a.tif", "b.tif"]
 
-        key_a = build_feature_cache_key(DummyDataset("abc"))
-        key_b = build_feature_cache_key(DummyDataset("xyz"))
+        key_a = build_feature_cache_key(DummyDataset("abc", 95.0))
+        key_b = build_feature_cache_key(DummyDataset("abc", 99.9))
         assert key_a != key_b
 
     def test_feature_cache_path_suffix(self, tmp_path: Path) -> None:

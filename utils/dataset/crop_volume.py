@@ -22,6 +22,7 @@ from typing import Dict, Iterator
 import torch
 from torch.utils.data import Dataset
 
+from utils.dataset.augment import clip_to_percentile_cmax
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
 _CROP_STORAGE_DTYPE = torch.float32
@@ -80,7 +81,7 @@ class CropTifVolumeHotDataset(Dataset):
     ) -> None:
         self.config = config
         self.normalize = bool(config.normalize)
-        self.clip_percentile = config.clip_percentile
+        self.percentile_cmax = float(config.percentile_cmax)
         self.in_channels = int(config.in_channels)
         self.crop_size = config.crop_size
         self.overlap = (
@@ -118,6 +119,7 @@ class CropTifVolumeHotDataset(Dataset):
         self._crop_storage = torch.empty(0, dtype=_CROP_STORAGE_DTYPE)
         self._starts_storage = torch.empty((0, 3), dtype=_INDEX_STORAGE_DTYPE)
         self._full_sizes_storage = torch.empty((0, 4), dtype=_INDEX_STORAGE_DTYPE)
+        self._fusion_thresholds_01: list[float] = []
 
     @classmethod
     def build_stub(cls, config: CropTifVolumeHotDatasetParams) -> "CropTifVolumeHotDataset":
@@ -186,7 +188,9 @@ class CropTifVolumeHotDataset(Dataset):
             "patch_grid_multiple": self.patch_grid_multiple,
             "pad_to_multiple": self.pad_to_multiple,
             "normalize": self.normalize,
-            "clip_percentile": self.clip_percentile,
+            # Intensity clipping happens lazily in __getitem__ and must not
+            # affect the binary cache identity.
+            # "percentile_cmax": self.percentile_cmax,
         }
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
@@ -364,9 +368,26 @@ class CropTifVolumeHotDataset(Dataset):
             size=self.file_count * 4,
             dtype=_INDEX_STORAGE_DTYPE,
         ).view(self.file_count, 4)
+        self._fusion_thresholds_01 = self._compute_fusion_thresholds()
 
         if enable_warmup:
             self._warm_cache_once()
+
+    def _compute_fusion_thresholds(self) -> list[float]:
+        if not self.normalize:
+            return [1.0 for _ in self._volume_entries]
+
+        q = self.percentile_cmax / 100.0
+        thresholds: list[float] = []
+        for entry in self._volume_entries:
+            block = self._crop_storage.narrow(
+                0,
+                entry.crop_offset,
+                entry.crop_count * entry.crop_numel,
+            )
+            block_01 = torch.clamp((block + 1.0) * 0.5, 0.0, 1.0)
+            thresholds.append(float(torch.quantile(block_01, q).item()))
+        return thresholds
 
     def _warm_cache_once(self, chunk_bytes: int = 64 * 1024 * 1024) -> None:
         manifest_token = hashlib.md5(
@@ -417,9 +438,13 @@ class CropTifVolumeHotDataset(Dataset):
         crop_start = entry.crop_offset + local_idx * entry.crop_numel
         crop = self._crop_storage.narrow(0, crop_start, entry.crop_numel).view(entry.crop_shape)
         start = self._starts_storage[entry.starts_offset + local_idx]
+        if self.normalize:
+            target = clip_to_percentile_cmax(crop, self._fusion_thresholds_01[vol_idx])
+        else:
+            target = crop.clone()
 
         return {
-            "target": crop.clone(),
+            "target": target,
             "fusion_id": entry.fusion_id,
             "pos_idx": start.clone(),
             "full_size": self._full_sizes_storage[vol_idx].clone(),
@@ -441,5 +466,6 @@ class CropTifVolumeHotDataset(Dataset):
             self._crop_storage = torch.empty(0, dtype=_CROP_STORAGE_DTYPE)
             self._starts_storage = torch.empty((0, 3), dtype=_INDEX_STORAGE_DTYPE)
             self._full_sizes_storage = torch.empty((0, 4), dtype=_INDEX_STORAGE_DTYPE)
+            self._fusion_thresholds_01 = []
             return
         self._attach_cache(enable_warmup=False)

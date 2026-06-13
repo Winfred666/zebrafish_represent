@@ -2,12 +2,12 @@ import_config: lg_025.yaml
 
 train_dataset:
   params:
-    clip_percentile: [0.0, 100.0]
+    percentile_cmax: 100.0
     # cache_root: null
 
 val_dataset:
   params:
-    clip_percentile: [0.0, 100.0]
+    percentile_cmax: 100.0
     # cache_root: null
 
 train_dataloader:

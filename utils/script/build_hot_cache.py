@@ -303,7 +303,7 @@ def _materialize_one_volume(
         str(file_path),
         scale_factor=ds.scale_factor,
         normalize=ds.normalize,
-        clip_percentile=ds.clip_percentile,
+        clip_percentile=None,
     )
     if ds.normalize:
         volume = volume * 2.0 - 1.0
