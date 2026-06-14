@@ -85,3 +85,4 @@ class DataLoaderParams(IngestibleParams):
     shuffle: bool = False
     pin_memory: bool = True
     persistent_workers: bool = False
+    drop_last: bool = False

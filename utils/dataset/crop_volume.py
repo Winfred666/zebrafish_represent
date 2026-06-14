@@ -376,6 +376,8 @@ class CropTifVolumeHotDataset(Dataset):
     def _compute_fusion_thresholds(self) -> list[float]:
         if not self.normalize:
             return [1.0 for _ in self._volume_entries]
+        if self.percentile_cmax >= 100.0:
+            return [1.0 for _ in self._volume_entries]
 
         q = self.percentile_cmax / 100.0
         thresholds: list[float] = []

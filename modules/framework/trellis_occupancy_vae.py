@@ -1,0 +1,81 @@
+"""Dense occupancy KL-VAE training module aligned with TRELLIS sparse-structure VAE."""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+
+from modules.framework.base import BaseTrainingFramework
+from utils.sanitize.framework_config import TRELLISOccupancyVAEModuleParams
+
+
+class TRELLISOccupancyVAEModule(BaseTrainingFramework):
+    """Train a TRELLIS-compatible occupancy VAE on dense binary volumes."""
+
+    config: TRELLISOccupancyVAEModuleParams
+
+    def __init__(self, config: TRELLISOccupancyVAEModuleParams):
+        super().__init__(config)
+        self.loss_type = str(config.loss_type)
+        self.lambda_kl = float(config.lambda_kl)
+        self.occupancy_threshold = float(config.occupancy_threshold)
+
+    def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
+        del t, noise
+        return clean
+
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(min(max(sigma, 0.0), 1.0))
+
+    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
+        del t, step_size
+        return self.model.reconstruct_probabilities(noisy, sample_posterior=False)
+
+    def _prepare_target(self, batch: dict[str, Tensor]) -> Tensor:
+        x = batch["target"].float()
+        if x.ndim != 5:
+            raise ValueError(f"Expected occupancy tensor with shape (B, C, D, H, W), got {tuple(x.shape)}")
+        if x.shape[1] != int(getattr(self.model, "in_channels", x.shape[1])):
+            raise ValueError(
+                "Occupancy VAE input channel count does not match model. "
+                f"batch={x.shape[1]}, model={getattr(self.model, 'in_channels', 'unknown')}"
+            )
+        if any(size % int(self.model.downsample_factor) != 0 for size in x.shape[-3:]):
+            raise ValueError(
+                "Occupancy VAE input spatial shape must be divisible by the model downsample factor. "
+                f"shape={tuple(x.shape[-3:])}, factor={self.model.downsample_factor}"
+            )
+        min_value = float(x.detach().min())
+        max_value = float(x.detach().max())
+        if min_value < -1.0e-6 or max_value > 1.0 + 1.0e-6:
+            raise ValueError(
+                "TRELLIS occupancy VAE expects dense occupancy targets in [0, 1]. "
+                f"Got min={min_value:.6f}, max={max_value:.6f}"
+            )
+        return x
+
+    def _reconstruction_loss(self, logits: Tensor, target: Tensor) -> Tensor:
+        if self.loss_type == "bce":
+            return F.binary_cross_entropy_with_logits(logits, target, reduction="mean")
+        if self.loss_type == "l1":
+            return F.l1_loss(torch.sigmoid(logits), target, reduction="mean")
+        if self.loss_type == "dice":
+            probabilities = torch.sigmoid(logits)
+            intersection = (probabilities * target).sum()
+            return 1.0 - (2.0 * intersection + 1.0) / (probabilities.sum() + target.sum() + 1.0)
+        raise ValueError(f"Unsupported occupancy reconstruction loss {self.loss_type!r}")
+
+    def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        target = self._prepare_target(batch)
+        logits, stats = self.model(target, sample_posterior=True, return_stats=True)
+        recon_loss = self._reconstruction_loss(logits, target)
+        mean = stats["mean"]
+        logvar = stats["logvar"]
+        kl_loss = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1.0)
+        loss = recon_loss + self.lambda_kl * kl_loss
+        return {
+            "loss": loss,
+            "recon_loss": recon_loss,
+            "kl_loss": kl_loss,
+        }

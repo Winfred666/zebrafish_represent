@@ -23,8 +23,9 @@ class RuntimeEntryTest(unittest.TestCase):
         """build_any_runtime_object resolves key classes via globals()."""
         _ensure_heavy_imports()
         expected_classes = {
-            "DiT3D", "MONAIVQGAN", "PerceptualNetEncoder", "PRDiT", "VolDiT",
-            "RectifiedFlowModule", "LatentDDPMModule",
+            "DiT3D", "MONAIVQGAN", "PerceptualNetEncoder", "PRDiT",
+            "TRELLISSparseStructureVAE", "VolDiT",
+            "RectifiedFlowModule", "LatentDDPMModule", "TRELLISOccupancyVAEModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
@@ -115,7 +116,12 @@ class RuntimeEntryTest(unittest.TestCase):
             ModelCheckpointParams.model_validate({"monitor": "val/loss"})
 
     def test_model_param_validation(self) -> None:
-        from utils.sanitize.model_config import DiT3DParams, MONAIVQGANParams, VolDiTParams
+        from utils.sanitize.model_config import (
+            DiT3DParams,
+            MONAIVQGANParams,
+            TRELLISSparseStructureVAEParams,
+            VolDiTParams,
+        )
 
         params = DiT3DParams.model_validate({
             "in_channels": 1, "out_channels": 1,
@@ -142,6 +148,14 @@ class RuntimeEntryTest(unittest.TestCase):
             "upsample_parameters": [[2, 4, 1, 1, 0], [2, 4, 1, 1, 0]],
         })
         self.assertEqual(monai_params.embedding_dim, 8)
+
+        trellis_params = TRELLISSparseStructureVAEParams.model_validate({
+            "channels": [8, 16],
+            "decoder_channels": [16, 8],
+            "num_res_blocks": 1,
+            "latent_channels": 4,
+        })
+        self.assertEqual(trellis_params.latent_channels, 4)
 
         voldit_params = VolDiTParams.model_validate({
             "input_size": [8, 8, 8],
@@ -200,6 +214,12 @@ class RuntimeEntryTest(unittest.TestCase):
             }
         )
         self.assertEqual(params.stat_metrics_every_n_epochs, 0)
+
+    def test_trellis_framework_config_defaults(self) -> None:
+        config = load_yaml_config("config/framework/trellis_ss_vae.yaml")
+        self.assertEqual(config["framework"]["class_name"], "TRELLISOccupancyVAEModule")
+        self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
+        self.assertEqual(config["framework"]["params"]["loss_type"], "bce")
 
     def test_wrapper_override_inherits_base_callbacks(self) -> None:
         """Child wrapper config inherits callbacks from base, unless overridden."""

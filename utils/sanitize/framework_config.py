@@ -165,3 +165,31 @@ class VQVAES2ModuleParams(IngestibleParams):
         if any(size < 1 for size in self.patch_size):
             raise ValueError(f"patch_size must contain positive integers, got {self.patch_size}")
         return self
+
+
+class TRELLISOccupancyVAEModuleParams(BaseFrameworkParams):
+    """Params for TRELLISOccupancyVAEModule."""
+
+    optimization: OptimizationParams = Field(
+        default_factory=lambda: OptimizationParams(
+            learning_rate=1e-4,
+            weight_decay=0.0,
+            loss_type="mse",
+            sample_steps=1,
+        )
+    )
+    diffusion: CommonDiffusionParams = Field(
+        default_factory=lambda: CommonDiffusionParams(gen_noise_weight=1.0)
+    )
+    testing: TestingParams = Field(
+        default_factory=lambda: TestingParams(run_sampling_after_fit=False)
+    )
+    loss_type: Literal["bce", "l1", "dice"] = "bce"
+    lambda_kl: float = Field(default=1e-3, ge=0.0)
+    occupancy_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_single_step_reconstruction(self) -> "TRELLISOccupancyVAEModuleParams":
+        if self.optimization.sample_steps != 1:
+            raise ValueError("TRELLIS occupancy VAE requires optimization.sample_steps=1")
+        return self

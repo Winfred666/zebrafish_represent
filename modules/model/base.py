@@ -13,7 +13,16 @@ from torch import Tensor
 
 
 def load_raw_checkpoint(ckpt_path: str | Path) -> Any:
-    return torch.load(Path(ckpt_path), map_location="cpu")
+    path = Path(ckpt_path)
+    if path.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise ImportError(
+                "Loading .safetensors checkpoints requires the safetensors package."
+            ) from exc
+        return load_file(str(path), device="cpu")
+    return torch.load(path, map_location="cpu")
 
 
 def extract_checkpoint_state_dict(raw_checkpoint: Any) -> dict[str, Any]:

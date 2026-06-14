@@ -5,9 +5,11 @@ train_dataloader:
     batch_size: 2
     num_workers: 0
     persistent_workers: false
+    drop_last: true
 
 val_dataloader:
   params:
     batch_size: 2
     num_workers: 0
     persistent_workers: false
+    drop_last: true

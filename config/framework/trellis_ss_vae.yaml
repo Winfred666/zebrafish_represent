@@ -1,0 +1,18 @@
+# TRELLIS-aligned KL-VAE framework for dense binary occupancy volumes.
+# Usage: --framework-config config/framework/trellis_ss_vae.yaml
+framework:
+  class_name: TRELLISOccupancyVAEModule
+  params:
+    model: runtime.model
+    optimization:
+      learning_rate: 0.0001
+      weight_decay: 0.0
+      loss_type: mse
+      sample_steps: 1
+    diffusion:
+      gen_noise_weight: 1.0
+    testing:
+      run_sampling_after_fit: false
+    loss_type: bce
+    lambda_kl: 0.001
+    occupancy_threshold: 0.5

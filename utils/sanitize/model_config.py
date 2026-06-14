@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -125,6 +125,50 @@ class MONAIVQGANParams(IngestibleParams):
     use_checkpointing: bool = False
     load_from_ckpt: str | None = None
     strict_load: bool = True
+
+
+class TRELLISSparseStructureVAEParams(IngestibleParams):
+    """Params for the TRELLIS sparse-structure VAE wrapper."""
+
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=1, ge=1)
+    channels: tuple[int, ...] = (32, 128, 512)
+    decoder_channels: tuple[int, ...] | None = None
+    latent_channels: int = Field(default=8, ge=1)
+    num_res_blocks: int = Field(default=2, ge=1)
+    num_res_blocks_middle: int = Field(default=2, ge=0)
+    norm_type: Literal["group", "layer"] = "layer"
+    use_fp16: bool = False
+    load_from_ckpt: str | None = None
+    encoder_ckpt_path: str | None = None
+    decoder_ckpt_path: str | None = None
+    strict_load: bool = True
+
+    @model_validator(mode="after")
+    def _validate_channel_schedule(self) -> "TRELLISSparseStructureVAEParams":
+        if len(self.channels) == 0:
+            raise ValueError("channels must be non-empty")
+        if any(channel < 1 for channel in self.channels):
+            raise ValueError("TRELLIS sparse-structure encoder channels must be positive integers")
+        decoder_channels = self.decoder_channels or tuple(reversed(self.channels))
+        if len(decoder_channels) != len(self.channels):
+            raise ValueError(
+                "decoder_channels must match the number of encoder channel stages. "
+                f"Got {len(decoder_channels)} decoder stages for {len(self.channels)} encoder stages"
+            )
+        if any(channel < 1 for channel in decoder_channels):
+            raise ValueError("TRELLIS sparse-structure decoder channels must be positive integers")
+        if self.norm_type == "group":
+            bad_widths = [
+                channel for channel in (*self.channels, *decoder_channels)
+                if channel % 32 != 0
+            ]
+            if bad_widths:
+                raise ValueError(
+                    "TRELLIS group normalization requires every channel width to be divisible by 32. "
+                    f"Got incompatible widths {bad_widths}"
+                )
+        return self
 
 
 class VolDiTParams(IngestibleParams):

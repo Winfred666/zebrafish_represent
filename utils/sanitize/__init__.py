@@ -14,6 +14,7 @@ from utils.sanitize.framework_config import (
     OptimizationParams,
     RectifiedFlowModuleParams,
     TestingParams,
+    TRELLISOccupancyVAEModuleParams,
     VICRegModuleParams,
     VQVAES1ModuleParams,
     VQVAES2ModuleParams,
@@ -24,6 +25,7 @@ from utils.sanitize.model_config import (
     MONAIVQGANParams,
     PerceptualNetEncoderParams,
     PRDiTParams,
+    TRELLISSparseStructureVAEParams,
     VolDiTParams,
 )
 from utils.sanitize.param_class import IngestibleParams
@@ -49,6 +51,7 @@ __all__ = [
     "MONAIVQGANParams",
     "PerceptualNetEncoderParams",
     "PRDiTParams",
+    "TRELLISSparseStructureVAEParams",
     "VolDiTParams",
     "OptimizationParams",
     "DDPMDiffusionParams",
@@ -58,6 +61,7 @@ __all__ = [
     "MAEFinetuneModuleParams",
     "MAEParams",
     "RectifiedFlowModuleParams",
+    "TRELLISOccupancyVAEModuleParams",
     "VICRegModuleParams",
     "VQVAES1ModuleParams",
     "VQVAES2ModuleParams",

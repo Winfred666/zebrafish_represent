@@ -9,6 +9,8 @@ from modules.block.dit import DiTBackbone3D, DiTBlock3D
 from modules.block.encoder import ConvPatchTokenizer3D, ExtractPatches3D
 from modules.block.mlp import MlpDenoiser
 from modules.block.time_enc import DualHeadTimestepEmbedder, TimestepEmbedder
+from modules.block.trellis_sparse_structure import (SparseStructureDecoder,
+                                                    SparseStructureEncoder)
 from modules.block.unet import (Block, Downsample, ResnetBlock,
                                 SinusoidalPosEmb, SpatialAttentionBlock,
                                 SpatialLayerNorm, Upsample)
@@ -31,6 +33,8 @@ __all__ = [
     "SinusoidalPosEmb",
     "SpatialAttentionBlock",
     "SpatialLayerNorm",
+    "SparseStructureDecoder",
+    "SparseStructureEncoder",
     "Upsample",
     "VolumeUnpatchify3D",
     "modulate",
