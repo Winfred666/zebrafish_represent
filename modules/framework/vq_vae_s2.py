@@ -68,7 +68,7 @@ class VQVAES2Module(L.LightningModule):
             n_layers=int(config.disc_layers),
         )
 
-        self.perceptual_loss_fn = MONAIPerceptualLoss()
+        self.perceptual_loss_fn: MONAIPerceptualLoss | None = None
 
         if config.disc_loss_type == "hinge":
             self.disc_loss_fn = hinge_d_loss
@@ -129,7 +129,12 @@ class VQVAES2Module(L.LightningModule):
     def _forward_gen(self, x: Tensor) -> tuple[Tensor, dict, Tensor, Tensor, Tensor]:
         x_recon, vq_output = self._forward_patched(x)
         recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
-        perceptual_loss_val = self.perceptual_weight * self.perceptual_loss_fn(x, x_recon)
+        if self.perceptual_weight > 0:
+            if self.perceptual_loss_fn is None:
+                self.perceptual_loss_fn = MONAIPerceptualLoss().to(device=x.device)
+            perceptual_loss_val = self.perceptual_weight * self.perceptual_loss_fn(x, x_recon)
+        else:
+            perceptual_loss_val = torch.zeros_like(recon_loss)
 
         if self.global_step > self.discriminator_iter_start and self.volume_gan_weight > 0:
             logits_fake, pred_fake = self.volume_discriminator(x_recon)
@@ -191,7 +196,12 @@ class VQVAES2Module(L.LightningModule):
         x = batch["target"]
         x_recon, vq_output = self._forward_patched(x)
         recon_loss = F.l1_loss(x_recon, x)
-        perceptual_loss_val = self.perceptual_loss_fn(x, x_recon)
+        if self.perceptual_weight > 0:
+            if self.perceptual_loss_fn is None:
+                self.perceptual_loss_fn = MONAIPerceptualLoss().to(device=x.device)
+            perceptual_loss_val = self.perceptual_loss_fn(x, x_recon)
+        else:
+            perceptual_loss_val = torch.zeros_like(recon_loss)
 
         self.log("val_recon_loss", recon_loss, prog_bar=True, sync_dist=True, on_epoch=True)
         self.log("val_perceptual_loss", perceptual_loss_val, sync_dist=True, on_epoch=True)

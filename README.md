@@ -27,9 +27,9 @@ If you only want to check the environment:
 uv run python -V
 ```
 
-## 2. Prepare Your Data
+## 2. Prepare Data
 
-Prepare a directory that contains your `.tif` or `.tiff` volumes.
+Prepare a directory that contains `.tif` or `.tiff` volumes.
 
 Then point the config to that directory:
 
@@ -44,7 +44,6 @@ There is also a tiny fixture under `tests/fixtures/tif/` for smoke testing.
 The supported config surface is intentionally split into four small files:
 
 - `config/data/base.yaml`: base data config
-- `config/data/scale_0p0625.yaml`: runnable data override that imports `config/data/base.yaml`
 - `config/model/base.yaml`: base DiT model config
 - `config/framework/base.yaml`: base framework and loss config
 - `config/wrapper/base.yaml`: trainer, logging, checkpoint, early-stopping, and testing config

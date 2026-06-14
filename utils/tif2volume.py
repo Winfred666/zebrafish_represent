@@ -192,7 +192,7 @@ def resample_volume_to_shape(volume: np.ndarray, target_shape: Tuple[int, int, i
 def process_tif_to_array(
     tif_path: str,
     *,
-    scale_factor: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+    scale_factor: Tuple[float, float, float] = (0.25, 0.25, 0.25),
     normalize: bool = True,
     clip_percentile: Optional[Tuple[float, float]] = (0, 100),
 ) -> np.ndarray:
