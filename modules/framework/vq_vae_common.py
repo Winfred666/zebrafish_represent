@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -10,6 +11,13 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from modules.model.perceptual_net import PerceptualNetEncoder
+
+_VQ_VAE_PERCEPTUAL_CKPT = (
+    Path(__file__).resolve().parents[2]
+    / "result"
+    / "checkpoints"
+    / "medicalnet_resnet50_vicregfinetune.ckpt"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +41,14 @@ class MONAIPerceptualLoss(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.backbone = PerceptualNetEncoder(
-            SimpleNamespace(backbone="resnet10", in_channels=1, pretrained=True)
+            SimpleNamespace(
+                backbone="resnet50",
+                in_channels=1,
+                spatial_dims=3,
+                feature_index=-1,
+                pretrained=False,
+                checkpoint_path=str(_VQ_VAE_PERCEPTUAL_CKPT),
+            )
         )
         self.backbone.eval()
         for param in self.backbone.parameters():

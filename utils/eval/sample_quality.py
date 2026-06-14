@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,18 +21,15 @@ import torch.nn.functional as F
 
 from modules.model.perceptual_net import PerceptualNetEncoder
 
-logger = logging.getLogger(__name__)
-
 _FEATURE_EXTRACTOR = None
 _FEATURE_EXTRACTOR_KEY = None
 _FEATURE_CODE_SHA1 = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
-_FALLBACK_WARNING_EMITTED = False
-
 PATCH_SIZE = 128
-_DEFAULT_MEDICALNET_CANDIDATES: tuple[tuple[str, str], ...] = (
-    ("result/checkpoints/medicalnet_resnet50_23dataset.pth", "resnet50"),
-    ("result/checkpoints/resnet_50.pth", "resnet50"),
-    ("result/checkpoints/medicalnet_resnet10_23dataset.pth", "resnet10"),
+_DEFAULT_MEDICALNET_RESNET50 = (
+    Path(__file__).resolve().parents[2]
+    / "result"
+    / "checkpoints"
+    / "medicalnet_resnet50_23dataset.pth"
 )
 
 
@@ -53,8 +48,6 @@ def _infer_backbone_name_from_path(path: Path) -> str:
 def _resolved_metric_backbone_spec(
     checkpoint_path: str | None = None,
 ) -> tuple[Path, str, int]:
-    global _FALLBACK_WARNING_EMITTED
-
     if checkpoint_path is not None:
         resolved = Path(checkpoint_path).expanduser().resolve()
         if not resolved.exists():
@@ -62,31 +55,10 @@ def _resolved_metric_backbone_spec(
         backbone_name = _infer_backbone_name_from_path(resolved)
         return resolved, backbone_name, _feature_dim_for_backbone(backbone_name)
 
-    env_checkpoint = os.environ.get("PRDIT_FID_CHECKPOINT_PATH")
-    if env_checkpoint:
-        return _resolved_metric_backbone_spec(env_checkpoint)
-
-    project_root = Path(__file__).resolve().parents[2]
-    searched_paths: list[str] = []
-    for candidate, backbone_name in _DEFAULT_MEDICALNET_CANDIDATES:
-        resolved = (project_root / candidate).resolve()
-        searched_paths.append(str(resolved))
-        if resolved.exists():
-            if backbone_name != "resnet50" and not _FALLBACK_WARNING_EMITTED:
-                logger.warning(
-                    "No local MedicalNet ResNet-50 checkpoint was found; "
-                    "falling back to %s for FID/MMD until a ResNet-50 checkpoint is provided.",
-                    resolved,
-                )
-                _FALLBACK_WARNING_EMITTED = True
-            return resolved, backbone_name, _feature_dim_for_backbone(backbone_name)
-
-    raise FileNotFoundError(
-        "FID/MMD require a local vanilla MedicalNet checkpoint. "
-        f"Looked for: {searched_paths}. "
-        "Provide one via PRDIT_FID_CHECKPOINT_PATH or by placing a ResNet-50 checkpoint "
-        "under result/checkpoints/."
-    )
+    resolved = _DEFAULT_MEDICALNET_RESNET50.resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"FID/MMD MedicalNet checkpoint not found: {resolved}")
+    return resolved, "resnet50", _feature_dim_for_backbone("resnet50")
 
 
 def _prepare_feature_input(volumes: torch.Tensor, *, device: str) -> torch.Tensor:
