@@ -132,6 +132,8 @@ class TRELLISSparseStructureVAEParams(IngestibleParams):
 
     in_channels: int = Field(default=1, ge=1)
     out_channels: int = Field(default=1, ge=1)
+    input_size: tuple[int, int, int] = (128, 832, 192)
+    latent_input_size: tuple[int, int, int] = (32, 208, 48)
     channels: tuple[int, ...] = (32, 128, 512)
     decoder_channels: tuple[int, ...] | None = None
     latent_channels: int = Field(default=8, ge=1)
@@ -168,6 +170,47 @@ class TRELLISSparseStructureVAEParams(IngestibleParams):
                     "TRELLIS group normalization requires every channel width to be divisible by 32. "
                     f"Got incompatible widths {bad_widths}"
                 )
+        downsample_factor = 2 ** max(len(self.channels) - 1, 0)
+        if any(size % downsample_factor != 0 for size in self.input_size):
+            raise ValueError(
+                "input_size must be divisible by the sparse-structure downsample factor. "
+                f"Got input_size={self.input_size}, downsample_factor={downsample_factor}"
+            )
+        expected_latent_size = tuple(size // downsample_factor for size in self.input_size)
+        if self.latent_input_size != expected_latent_size:
+            raise ValueError(
+                "latent_input_size must match input_size // downsample_factor. "
+                f"Got latent_input_size={self.latent_input_size}, expected={expected_latent_size}"
+            )
+        return self
+
+
+class TRELLISSparseStructureFlowParams(IngestibleParams):
+    """Params for the local TRELLIS-style sparse-structure latent flow backbone."""
+
+    input_size: tuple[int, int, int]
+    patch_size: int = Field(default=16, ge=1)
+    in_channels: int = Field(default=8, ge=1)
+    out_channels: int = Field(default=8, ge=1)
+    hidden_size: int = Field(default=1024, ge=1)
+    cond_channels: int = Field(default=1024, ge=1)
+    depth: int = Field(default=32, ge=1)
+    num_heads: int = Field(default=16, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0)
+    load_from_ckpt: str | None = None
+    strict_load: bool = False
+
+    @model_validator(mode="after")
+    def _validate_patch_grid(self) -> "TRELLISSparseStructureFlowParams":
+        if any(size % self.patch_size != 0 for size in self.input_size):
+            raise ValueError(
+                "input_size must be divisible by patch_size. "
+                f"Got input_size={self.input_size}, patch_size={self.patch_size}"
+            )
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_size={self.hidden_size} must be divisible by num_heads={self.num_heads}"
+            )
         return self
 
 

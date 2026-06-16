@@ -187,6 +187,8 @@ class TRELLISOccupancyVaeFrameworkTest(unittest.TestCase):
             ),
             diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            sample_quality_checkpoint_path="/tmp/configured_resnet18.ckpt",
+            sample_quality_input_normalization="sample_zscore",
             loss_type="dice",
             lambda_kl=1e-3,
             occupancy_threshold=0.5,
@@ -206,12 +208,25 @@ class TRELLISOccupancyVaeFrameworkTest(unittest.TestCase):
         module._validation_dataset = lambda: dataset
         module._validation_batch_size = lambda: 1
 
-        def _fake_extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+        extract_kwargs: list[dict[str, object]] = []
+
+        def _fake_extract_patch_features(volumes: torch.Tensor, **kwargs) -> torch.Tensor:
+            extract_kwargs.append(kwargs)
             return volumes.reshape(volumes.shape[0], -1).to(dtype=torch.float64)
 
         with mock.patch("utils.eval.sample_quality.extract_patch_features", side_effect=_fake_extract_patch_features):
             bank = module._build_generated_feature_bank(len(dataset))
 
+        self.assertTrue(extract_kwargs)
+        self.assertTrue(
+            all(
+                kwargs == {
+                    "checkpoint_path": "/tmp/configured_resnet18.ckpt",
+                    "input_normalization": "sample_zscore",
+                }
+                for kwargs in extract_kwargs
+            )
+        )
         self.assertEqual(tuple(bank.shape), (2, 512))
         self.assertTrue(torch.all(bank >= 0.0))
         self.assertTrue(torch.all(bank <= 1.0))
@@ -277,7 +292,7 @@ class TRELLISOccupancyVaeFrameworkTest(unittest.TestCase):
         module._validation_dataset = lambda: dataset
         module._validation_batch_size = lambda: 2
 
-        def _fake_extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+        def _fake_extract_patch_features(volumes: torch.Tensor, **kwargs) -> torch.Tensor:
             features = volumes.mean(dim=(1, 2, 3, 4), keepdim=False)
             return features.unsqueeze(1).repeat(1, 4).to(dtype=torch.float64)
 

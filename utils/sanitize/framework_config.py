@@ -44,6 +44,8 @@ class BaseFrameworkParams(IngestibleParams):
     diffusion: CommonDiffusionParams
     testing: TestingParams = TestingParams()
     stat_metrics_every_n_epochs: int = Field(default=0, ge=0)
+    sample_quality_checkpoint_path: str | None = None
+    sample_quality_input_normalization: Literal["raw", "sample_zscore"] = "raw"
 
 
 class DDPMDiffusionParams(CommonDiffusionParams):
@@ -63,6 +65,13 @@ class DDPMDiffusionParams(CommonDiffusionParams):
 
 class RectifiedFlowModuleParams(BaseFrameworkParams):
     """Params for RectifiedFlowModule — model reference resolved at build time."""
+
+    stage1_model: object = None
+    sigma_min: float = Field(default=0.0, ge=0.0, lt=1.0)
+    t_schedule_name: Literal["uniform", "logit_normal", "logitNormal"] = "uniform"
+    t_schedule_mean: float = 0.0
+    t_schedule_std: float = Field(default=1.0, gt=0.0)
+    null_cond_channels: int = Field(default=1024, ge=1)
 
 
 class LatentDDPMModuleParams(BaseFrameworkParams):
@@ -109,6 +118,9 @@ class VICRegModuleParams(IngestibleParams):
     cov_weight: float = 1.0
     lr: float = 1e-4
     weight_decay: float = 1e-6
+    input_normalization: Literal["raw", "sample_zscore"] = "raw"
+    freeze_encoder_batchnorm: bool = True
+    anchor_weight: float = Field(default=1.0, ge=0.0)
 
 
 class VQVAES1ModuleParams(BaseFrameworkParams):

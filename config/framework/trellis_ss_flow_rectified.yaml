@@ -1,0 +1,21 @@
+# Latent rectified flow over frozen TRELLIS sparse-structure VAE latents.
+framework:
+  class_name: RectifiedFlowModule
+  params:
+    model: runtime.model
+    stage1_model: runtime.stage1_model
+    sigma_min: 1.0e-5
+    t_schedule_name: logitNormal
+    t_schedule_mean: 1.0
+    t_schedule_std: 1.0
+    null_cond_channels: 1024
+    stat_metrics_every_n_epochs: 0
+    optimization:
+      learning_rate: 0.00002
+      weight_decay: 0.0
+      loss_type: mse
+      sample_steps: 50
+    diffusion:
+      gen_noise_weight: 1.0
+    testing:
+      run_sampling_after_fit: false

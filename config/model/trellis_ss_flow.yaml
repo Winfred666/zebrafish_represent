@@ -1,0 +1,34 @@
+# TRELLIS sparse-structure latent flow over the full canonical occupancy canvas.
+stage1_model:
+  class_name: TRELLISSparseStructureVAE
+  params:
+    in_channels: 1
+    out_channels: 1
+    input_size: [128, 832, 192]
+    latent_input_size: [32, 208, 48]
+    channels: [32, 128, 512]
+    decoder_channels: [512, 128, 32]
+    latent_channels: 8
+    num_res_blocks: 2
+    num_res_blocks_middle: 2
+    norm_type: layer
+    use_fp16: false
+    load_from_ckpt: null
+    encoder_ckpt_path: result/checkpoints/sparse_structure/ss_enc_conv3d_16l8_fp16.safetensors
+    decoder_ckpt_path: result/checkpoints/sparse_structure/ss_dec_conv3d_16l8_fp16.safetensors
+    strict_load: true
+
+model:
+  class_name: TRELLISSparseStructureFlow
+  params:
+    input_size: [32, 208, 48]
+    patch_size: 16
+    in_channels: 8
+    out_channels: 8
+    hidden_size: 1024
+    cond_channels: 1024
+    depth: 24
+    num_heads: 16
+    mlp_ratio: 4.0
+    load_from_ckpt: result/checkpoints/sparse_structure/ss_flow_img_dit_L_fullcanvas_patch16_localwarm.safetensors
+    strict_load: true

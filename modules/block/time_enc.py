@@ -35,6 +35,10 @@ class TimestepEmbedder(nn.Module):
         if t.ndim != 1:
             raise ValueError(f"Expected 1D timesteps, got shape={tuple(t.shape)}")
         timestep_features = self.timestep_embedding(t, self.frequency_embedding_size)
+        timestep_features = timestep_features.to(
+            device=self.mlp[0].weight.device,
+            dtype=self.mlp[0].weight.dtype,
+        )
         return self.mlp(timestep_features)
 
 

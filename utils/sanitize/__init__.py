@@ -3,6 +3,7 @@
 from utils.sanitize.data_config import (
     DataLoaderParams,
     CropTifVolumeHotDatasetParams,
+    OccupancyPtDatasetParams,
 )
 from utils.sanitize.framework_config import (
     DDPMDiffusionParams,
@@ -25,6 +26,7 @@ from utils.sanitize.model_config import (
     MONAIVQGANParams,
     PerceptualNetEncoderParams,
     PRDiTParams,
+    TRELLISSparseStructureFlowParams,
     TRELLISSparseStructureVAEParams,
     VolDiTParams,
 )
@@ -45,12 +47,14 @@ from utils.sanitize.wrapper_config import (
 __all__ = [
     "IngestibleParams",
     "CropTifVolumeHotDatasetParams",
+    "OccupancyPtDatasetParams",
     "DataLoaderParams",
     "BiFlowNetParams",
     "DiT3DParams",
     "MONAIVQGANParams",
     "PerceptualNetEncoderParams",
     "PRDiTParams",
+    "TRELLISSparseStructureFlowParams",
     "TRELLISSparseStructureVAEParams",
     "VolDiTParams",
     "OptimizationParams",

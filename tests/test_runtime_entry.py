@@ -29,7 +29,7 @@ class RuntimeEntryTest(unittest.TestCase):
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
-            "CropTifVolumeHotDataset", "DataLoader",
+            "CropTifVolumeHotDataset", "OccupancyPtDataset", "DataLoader",
         }
         import utils.runtime_factory as rf
         available = set(rf.__dict__)
@@ -115,10 +115,21 @@ class RuntimeEntryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ModelCheckpointParams.model_validate({"monitor": "val/loss"})
 
+    def test_base_wrapper_uses_explicit_postfit_checkpoint_upload(self) -> None:
+        config = load_yaml_config("config/wrapper/base.yaml")
+        self.assertFalse(config["logging"]["params"]["log_model"])
+        callbacks = config["trainer"]["params"]["callbacks"]
+        checkpoint_params = callbacks[0]["params"]
+        self.assertEqual(
+            checkpoint_params["dirpath"],
+            "runtime.artifact_manager.checkpoint_dir",
+        )
+
     def test_model_param_validation(self) -> None:
         from utils.sanitize.model_config import (
             DiT3DParams,
             MONAIVQGANParams,
+            TRELLISSparseStructureFlowParams,
             TRELLISSparseStructureVAEParams,
             VolDiTParams,
         )
@@ -150,12 +161,36 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(monai_params.embedding_dim, 8)
 
         trellis_params = TRELLISSparseStructureVAEParams.model_validate({
+            "input_size": [8, 8, 8],
+            "latent_input_size": [4, 4, 4],
             "channels": [8, 16],
             "decoder_channels": [16, 8],
             "num_res_blocks": 1,
             "latent_channels": 4,
         })
         self.assertEqual(trellis_params.latent_channels, 4)
+
+        trellis_flow_params = TRELLISSparseStructureFlowParams.model_validate({
+            "input_size": [8, 16, 8],
+            "patch_size": 4,
+            "in_channels": 8,
+            "out_channels": 8,
+            "hidden_size": 64,
+            "cond_channels": 64,
+            "depth": 2,
+            "num_heads": 4,
+        })
+        self.assertEqual(trellis_flow_params.patch_size, 4)
+
+        with self.assertRaises(ValueError):
+            TRELLISSparseStructureVAEParams.model_validate({
+                "input_size": [10, 8, 8],
+                "latent_input_size": [3, 2, 2],
+                "channels": [8, 16],
+                "decoder_channels": [16, 8],
+                "num_res_blocks": 1,
+                "latent_channels": 4,
+            })
 
         voldit_params = VolDiTParams.model_validate({
             "input_size": [8, 8, 8],
@@ -219,7 +254,17 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/framework/trellis_ss_vae.yaml")
         self.assertEqual(config["framework"]["class_name"], "TRELLISOccupancyVAEModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
-        self.assertEqual(config["framework"]["params"]["loss_type"], "bce")
+        self.assertEqual(config["framework"]["params"]["loss_type"], "dice")
+        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 1)
+
+    def test_occupancy_pt_data_config_defaults(self) -> None:
+        config = load_yaml_config("config/data/trellis_ss_occupancy_pt.yaml")
+        self.assertEqual(config["train_dataset"]["class_name"], "OccupancyPtDataset")
+        self.assertEqual(
+            config["train_dataloader"]["params"]["collate_fn"],
+            "runtime.train_dataset.collate_fn",
+        )
+        self.assertEqual(config["val_dataloader"]["params"]["batch_size"], 1)
 
     def test_wrapper_override_inherits_base_callbacks(self) -> None:
         """Child wrapper config inherits callbacks from base, unless overridden."""
@@ -239,6 +284,18 @@ class RuntimeEntryTest(unittest.TestCase):
             framework_config["framework"]["params"]["diffusion"]["prediction_type"],
             "v_prediction",
         )
+
+    def test_trellis_sparse_flow_configs_load(self) -> None:
+        model_config = load_yaml_config("config/model/trellis_ss_flow.yaml")
+        self.assertEqual(model_config["stage1_model"]["class_name"], "TRELLISSparseStructureVAE")
+        self.assertEqual(model_config["model"]["class_name"], "TRELLISSparseStructureFlow")
+        self.assertEqual(model_config["stage1_model"]["params"]["input_size"], [128, 832, 192])
+        self.assertEqual(model_config["model"]["params"]["input_size"], [32, 208, 48])
+
+        framework_config = load_yaml_config("config/framework/trellis_ss_flow_rectified.yaml")
+        self.assertEqual(framework_config["framework"]["class_name"], "RectifiedFlowModule")
+        self.assertEqual(framework_config["framework"]["params"]["stage1_model"], "runtime.stage1_model")
+        self.assertEqual(framework_config["framework"]["params"]["t_schedule_name"], "logitNormal")
 
 
 if __name__ == "__main__":
