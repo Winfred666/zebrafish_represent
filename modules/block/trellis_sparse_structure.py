@@ -21,12 +21,28 @@ _FP16_MODULES = (
 
 class LayerNorm32(nn.LayerNorm):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x.float()).type(x.dtype)
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        return F.layer_norm(
+            x.float(),
+            self.normalized_shape,
+            weight,
+            bias,
+            self.eps,
+        ).type(x.dtype)
 
 
 class GroupNorm32(nn.GroupNorm):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(x.float()).type(x.dtype)
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        return F.group_norm(
+            x.float(),
+            self.num_groups,
+            weight,
+            bias,
+            self.eps,
+        ).type(x.dtype)
 
 
 class ChannelLayerNorm32(LayerNorm32):
@@ -210,6 +226,14 @@ class SparseStructureEncoder(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def _compute_dtype(self) -> torch.dtype:
+        if len(self.blocks) > 0:
+            return next(self.blocks.parameters()).dtype
+        return self.input_layer.weight.dtype
+
+    def _output_dtype(self) -> torch.dtype:
+        return next(self.out_layer.parameters()).dtype
+
     def convert_to_fp16(self) -> None:
         self.use_fp16 = True
         self.dtype = torch.float16
@@ -229,11 +253,11 @@ class SparseStructureEncoder(nn.Module):
         return_raw: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.input_layer(x)
-        h = h.type(self.dtype)
+        h = h.to(dtype=self._compute_dtype())
         for block in self.blocks:
             h = block(h)
         h = self.middle_block(h)
-        h = h.type(x.dtype)
+        h = h.to(dtype=self._output_dtype())
         mean, logvar = self.out_layer(h).chunk(2, dim=1)
         if sample_posterior:
             std = torch.exp(0.5 * logvar)
@@ -294,6 +318,12 @@ class SparseStructureDecoder(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def _compute_dtype(self) -> torch.dtype:
+        return next(self.middle_block.parameters()).dtype
+
+    def _output_dtype(self) -> torch.dtype:
+        return next(self.out_layer.parameters()).dtype
+
     def convert_to_fp16(self) -> None:
         self.use_fp16 = True
         self.dtype = torch.float16
@@ -308,10 +338,9 @@ class SparseStructureDecoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.input_layer(x)
-        h = h.type(self.dtype)
+        h = h.to(dtype=self._compute_dtype())
         h = self.middle_block(h)
         for block in self.blocks:
             h = block(h)
-        h = h.type(x.dtype)
+        h = h.to(dtype=self._output_dtype())
         return self.out_layer(h)
-

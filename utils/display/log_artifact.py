@@ -15,6 +15,27 @@ import yaml
 from torch.utils.data import DataLoader
 
 
+def _tracking_uri_from_logger(logger: Any) -> str | None:
+    tracking_uri = getattr(logger, "_tracking_uri", None)
+    if tracking_uri is None:
+        print("[MLFLOW] Logger has no tracking URI; skipping artifact upload to avoid local fallback")
+        return None
+    tracking_uri_str = str(tracking_uri).strip()
+    if not tracking_uri_str:
+        print("[MLFLOW] Logger tracking URI is empty; skipping artifact upload to avoid local fallback")
+        return None
+    return tracking_uri_str
+
+
+def _require_tracking_uri_from_logger(logger: Any) -> str:
+    if logger is None:
+        raise ValueError("ArtifactManager requires a logger with a non-empty tracking URI")
+    tracking_uri = _tracking_uri_from_logger(logger)
+    if tracking_uri is None:
+        raise ValueError("ArtifactManager requires a logger with a non-empty tracking URI")
+    return tracking_uri
+
+
 @dataclass
 class ArtifactManager:
     """Artifact manager backed by a local staging directory.
@@ -28,8 +49,10 @@ class ArtifactManager:
     config_dir: Path
     sample_dir: Path
     logger: Any = field(default=None, repr=False)
+    tracking_uri: str = field(default="", repr=False)
 
     def __init__(self, logger: Any = None) -> "ArtifactManager":
+        tracking_uri = _require_tracking_uri_from_logger(logger)
         staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
 
         artifact_root = staging_root.resolve()
@@ -45,6 +68,7 @@ class ArtifactManager:
         self.config_dir = config_dir
         self.sample_dir = sample_dir
         self.logger = logger
+        self.tracking_uri = tracking_uri
 
     # ── upload ──
 
@@ -57,7 +81,9 @@ class ArtifactManager:
         run_id = getattr(self.logger, "run_id", None)
         if not run_id:
             return
-        tracking_uri = getattr(self.logger, "_tracking_uri", None) or None
+        tracking_uri = _tracking_uri_from_logger(self.logger)
+        if tracking_uri is None:
+            return
         client = mlflow.MlflowClient(tracking_uri=tracking_uri)
         client.log_artifact(run_id, str(local_path), artifact_path=artifact_subdir)
 
@@ -120,31 +146,39 @@ def log_image_artifact(
     )
 
 
-# ---------------------------------------------------------------------------
-# post-fit testing helpers (used by BaseTrainingFramework.on_train_end)
-# ---------------------------------------------------------------------------
-
 def upload_checkpoints(trainer, logger) -> None:
-    """Upload ModelCheckpoint .ckpt files to MLflow artifacts."""
+    """Upload the current run's best/last checkpoint files into MLflow artifacts/checkpoints."""
     import mlflow
 
     ckpt_callback = getattr(trainer, "checkpoint_callback", None)
     if ckpt_callback is None:
         return
-    checkpoint_dir = Path(ckpt_callback.dirpath) if ckpt_callback.dirpath else None
-    if checkpoint_dir is None or not checkpoint_dir.exists():
-        return
-    ckpt_files = sorted(checkpoint_dir.glob("*.ckpt"))
-    if not ckpt_files:
-        return
     run_id = getattr(logger, "run_id", None)
     if not run_id:
         return
-    tracking_uri = getattr(logger, "_tracking_uri", None) or None
+
+    checkpoint_paths: list[Path] = []
+    seen: set[Path] = set()
+    for attr_name in ("best_model_path", "last_model_path"):
+        raw_path = getattr(ckpt_callback, attr_name, None)
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        checkpoint_paths.append(path)
+    if not checkpoint_paths:
+        return
+
+    tracking_uri = _require_tracking_uri_from_logger(logger)
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
-    for ckpt_path in ckpt_files:
+    for ckpt_path in checkpoint_paths:
         client.log_artifact(run_id, str(ckpt_path), artifact_path="checkpoints")
-    print(f"[MLFLOW] Uploaded {len(ckpt_files)} checkpoint(s) to artifacts/checkpoints")
+    print(f"[MLFLOW] Uploaded {len(checkpoint_paths)} checkpoint(s) to artifacts/checkpoints")
 
 
 def run_postfit_testing(framework_module, trainer, logger,

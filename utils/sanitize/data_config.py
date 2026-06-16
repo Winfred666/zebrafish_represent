@@ -86,3 +86,36 @@ class DataLoaderParams(IngestibleParams):
     pin_memory: bool = True
     persistent_workers: bool = False
     drop_last: bool = False
+    collate_fn: object | None = None
+
+
+class OccupancyPtDatasetParams(IngestibleParams):
+    """Params for OccupancyPtDataset full-volume binary occupancy tensors."""
+
+    data_dir: str
+    max_files: int | None = None
+    pad_to_multiple: tuple[int, int, int] = (4, 4, 4)
+    scale_factor: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+    @field_validator("data_dir")
+    @classmethod
+    def _to_abs_occupancy_path(cls, value: str) -> str:
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            return str(candidate.resolve())
+        return str((Path.cwd() / candidate).resolve())
+
+    @field_validator("pad_to_multiple")
+    @classmethod
+    def _validate_pad_multiple(cls, value: tuple[int, int, int]) -> tuple[int, int, int]:
+        if any(dim <= 0 for dim in value):
+            raise ValueError("pad_to_multiple values must be positive")
+        return tuple(int(dim) for dim in value)
+
+    @field_validator("scale_factor")
+    @classmethod
+    def _validate_occupancy_scale(cls, value: tuple[float, float, float]) -> tuple[float, float, float]:
+        scale = tuple(float(dim) for dim in value)
+        if any(dim <= 0.0 or dim > 1.0 for dim in scale):
+            raise ValueError("scale_factor values must satisfy 0 < scale_factor <= 1")
+        return scale

@@ -45,6 +45,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     # ── fusion validation protocol ───────────────────────────────
     FUSION_SIG_KEYS = ("sig050",)
     FUSION_SIG_VALS = (0.5,)
+    DATA_DEFAULT_COLORBAR_LIMIT = (-1.0, 1.0)
     FUSION_NUMBER = 4
     FUSION_SLICE_NUMBER = 8
 
@@ -493,7 +494,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                                 fix_2d_scalar(
                                     clean_center[:, :, mid_w],
                                     denoised_center[:, :, mid_w],
-                                    colorbar_limits=(-1.0, 1.0),
+                                    colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
                                     show_residual=False,
                                     show_colorbar=False,
                                 )
@@ -552,7 +553,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                             fix_2d_scalar(
                                 c0_padded[:, :, wi],
                                 d0_padded[:, :, wi],
-                                colorbar_limits=(-1.0, 1.0),
+                                colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
                             )
                         )
 

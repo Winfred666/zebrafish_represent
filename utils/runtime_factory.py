@@ -229,6 +229,7 @@ def _ensure_heavy_imports() -> None:
     import modules.framework as _fw
     import modules.model as _md
     import utils.sanitize as _sn
+    import utils.sanitize.data_config as _sn_data
 
     _g = globals()
     _g["Trainer"] = _pl.Trainer
@@ -241,7 +242,7 @@ def _ensure_heavy_imports() -> None:
     _g["IntegratedGPUMemoryMonitor"] = _lg.IntegratedGPUMemoryMonitor
 
     # Replicate the former ``from X import *`` effect
-    for _mod in (_ds, _fw, _md, _sn):
+    for _mod in (_ds, _fw, _md, _sn, _sn_data):
         _names = getattr(_mod, "__all__", None) or [
             n for n in dir(_mod) if not n.startswith("_")
         ]

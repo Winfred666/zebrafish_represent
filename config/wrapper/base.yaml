@@ -36,7 +36,7 @@ trainer:
           save_top_k: 1
           save_last: true
           filename: "epoch{epoch:03d}-step{step:06d}"
-          dirpath: /tmp/mlflow_checkpoints
+          dirpath: runtime.artifact_manager.checkpoint_dir
       - class_name: IntegratedGPUMemoryMonitor
         params:
           log_frequency_mins: 1

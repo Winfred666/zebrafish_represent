@@ -40,7 +40,9 @@ class TRELLISSparseStructureVAE(nn.Module):
         *,
         in_channels: int = 1,
         out_channels: int = 1,
-        channels: tuple[int, ...] = (32, 128, 512),
+        input_size: tuple[int, int, int] = (128, 832, 192),
+        latent_input_size: tuple[int, int, int] = (32, 208, 48),
+        channels: tuple[int, ...] = (32, 128, 512), # downsample rate = 2 ** (len(channels) - 1) = 4 here.
         decoder_channels: tuple[int, ...] | None = None,
         latent_channels: int = 8,
         num_res_blocks: int = 2,
@@ -55,6 +57,8 @@ class TRELLISSparseStructureVAE(nn.Module):
         super().__init__()
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
+        self.input_size = tuple(int(dim) for dim in input_size)
+        self.latent_input_size = tuple(int(dim) for dim in latent_input_size)
         self.channels = tuple(int(channel) for channel in channels)
         self.decoder_channels = tuple(
             int(channel) for channel in (decoder_channels or tuple(reversed(self.channels)))
@@ -65,6 +69,17 @@ class TRELLISSparseStructureVAE(nn.Module):
         self.norm_type = str(norm_type)
         self.use_fp16 = bool(use_fp16)
         self.downsample_factor = 2 ** max(len(self.channels) - 1, 0)
+        if any(size % self.downsample_factor != 0 for size in self.input_size):
+            raise ValueError(
+                "input_size must be divisible by downsample_factor. "
+                f"Got input_size={self.input_size}, downsample_factor={self.downsample_factor}"
+            )
+        expected_latent_size = tuple(size // self.downsample_factor for size in self.input_size)
+        if self.latent_input_size != expected_latent_size:
+            raise ValueError(
+                "latent_input_size must equal input_size // downsample_factor. "
+                f"Got latent_input_size={self.latent_input_size}, expected={expected_latent_size}"
+            )
 
         self.encoder = SparseStructureEncoder(
             in_channels=self.in_channels,
@@ -92,6 +107,10 @@ class TRELLISSparseStructureVAE(nn.Module):
         if decoder_ckpt_path:
             self.load_decoder_ckpt(decoder_ckpt_path, strict=strict_load)
 
+    @staticmethod
+    def _module_input_dtype(module: nn.Module) -> torch.dtype:
+        return next(module.parameters()).dtype
+
     def forward(
         self,
         x: torch.Tensor,
@@ -99,12 +118,13 @@ class TRELLISSparseStructureVAE(nn.Module):
         sample_posterior: bool = True,
         return_stats: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        x = x.to(dtype=self._module_input_dtype(self.encoder))
         latent, mean, logvar = self.encoder(
             x,
             sample_posterior=sample_posterior,
             return_raw=True,
         )
-        logits = self.decoder(latent)
+        logits = self.decoder(latent.to(dtype=self._module_input_dtype(self.decoder)))
         if return_stats:
             return logits, {"latent": latent, "mean": mean, "logvar": logvar}
         return logits
@@ -116,9 +136,11 @@ class TRELLISSparseStructureVAE(nn.Module):
         sample_posterior: bool = False,
         return_raw: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = x.to(dtype=self._module_input_dtype(self.encoder))
         return self.encoder(x, sample_posterior=sample_posterior, return_raw=return_raw)
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        latent = latent.to(dtype=self._module_input_dtype(self.decoder))
         return self.decoder(latent)
 
     def reconstruct_logits(self, x: torch.Tensor, *, sample_posterior: bool = False) -> torch.Tensor:

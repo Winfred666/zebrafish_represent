@@ -15,6 +15,10 @@ class TRELLISOccupancyVAEModule(BaseTrainingFramework):
 
     config: TRELLISOccupancyVAEModuleParams
 
+    DATA_DEFAULT_COLORBAR_LIMIT = (0.0, 1.0)
+    FUSION_SIG_KEYS = ("t050",)
+    FUSION_SIG_VALS = (0.5,)
+
     def __init__(self, config: TRELLISOccupancyVAEModuleParams):
         super().__init__(config)
         self.loss_type = str(config.loss_type)
@@ -65,6 +69,60 @@ class TRELLISOccupancyVAEModule(BaseTrainingFramework):
             intersection = (probabilities * target).sum()
             return 1.0 - (2.0 * intersection + 1.0) / (probabilities.sum() + target.sum() + 1.0)
         raise ValueError(f"Unsupported occupancy reconstruction loss {self.loss_type!r}")
+
+    @torch.no_grad()
+    def _build_generated_feature_bank(self, total_samples: int) -> Tensor:
+        """Use deterministic validation reconstructions for FID/MMD on this VAE path."""
+        from utils.eval.sample_quality import empty_feature_bank, extract_patch_features
+
+        val_dataset = self._validation_dataset()
+        if val_dataset is None or total_samples <= 0:
+            return empty_feature_bank()
+
+        rank, world_size = self._validation_stat_rank_world()
+        local_indices = list(range(rank, total_samples, world_size))
+        if not local_indices:
+            return empty_feature_bank()
+
+        feature_batches: list[Tensor] = []
+        batch_size = self._validation_batch_size()
+        collate_fn = getattr(val_dataset, "collate_fn", None)
+        for start in range(0, len(local_indices), batch_size):
+            sample_indices = local_indices[start:start + batch_size]
+            samples = [val_dataset[int(sample_idx)] for sample_idx in sample_indices]
+            if collate_fn is not None:
+                batch = collate_fn(samples)
+                volumes = torch.as_tensor(batch["target"], dtype=torch.float32).to(device=self.device)
+                spatial_shapes = torch.as_tensor(batch["spatial_shape"], dtype=torch.long)
+            else:
+                targets: list[Tensor] = []
+                shapes: list[Tensor] = []
+                for sample in samples:
+                    if not isinstance(sample, dict) or "target" not in sample:
+                        raise ValueError("Validation dataset samples must be dicts containing a 'target' volume")
+                    target = torch.as_tensor(sample["target"], dtype=torch.float32)
+                    if target.ndim == 3:
+                        target = target.unsqueeze(0)
+                    if target.ndim != 4:
+                        raise ValueError(
+                            f"Expected validation target shaped (C, D, H, W), got {tuple(target.shape)}"
+                        )
+                    targets.append(target)
+                    shapes.append(torch.tensor(target.shape[-3:], dtype=torch.long))
+                volumes = torch.stack(targets, dim=0).to(device=self.device)
+                spatial_shapes = torch.stack(shapes, dim=0)
+            reconstructions = self.model.reconstruct_probabilities(
+                volumes,
+                sample_posterior=False,
+            )
+            for recon, spatial_shape in zip(reconstructions, spatial_shapes):
+                depth, height, width = (int(dim) for dim in spatial_shape.tolist())
+                cropped = recon[:, :depth, :height, :width].unsqueeze(0)
+                feature_batches.append(extract_patch_features(cropped).cpu())
+
+        if not feature_batches:
+            return empty_feature_bank()
+        return torch.cat(feature_batches, dim=0)
 
     def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         target = self._prepare_target(batch)

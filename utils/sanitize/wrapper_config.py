@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -70,7 +71,7 @@ class MLFlowLoggerParams(IngestibleParams):
 class ModelCheckpointParams(IngestibleParams):
     """Params for ModelCheckpoint callback."""
 
-    dirpath: str | None = None
+    dirpath: str | Path | None = None
     monitor: str = "val_loss"
     mode: Literal["min", "max"] = "min"
     save_top_k: int = 1

@@ -84,14 +84,24 @@ def train(
     if resume_ckpt:
         print(f"Resuming full trainer state from checkpoint: {resume_ckpt}")
 
-    runtime.trainer.fit(
-        framework_module,
-        train_dataloaders=runtime.train_loader,
-        val_dataloaders=runtime.val_loader,
-        ckpt_path=resume_ckpt,
-    )
-
-    print("\nTraining complete")
+    run_mode = str(config.get("run_mode", "fit")).strip().lower()
+    if run_mode == "validate":
+        runtime.trainer.validate(
+            framework_module,
+            dataloaders=runtime.val_loader,
+            ckpt_path=resume_ckpt,
+        )
+        print("\nValidation complete")
+    elif run_mode == "fit":
+        runtime.trainer.fit(
+            framework_module,
+            train_dataloaders=runtime.train_loader,
+            val_dataloaders=runtime.val_loader,
+            ckpt_path=resume_ckpt,
+        )
+        print("\nTraining complete")
+    else:
+        raise ValueError(f"Unsupported run_mode={run_mode!r}. Expected 'fit' or 'validate'.")
 
     if runtime.artifact_manager is not None:
         runtime.artifact_manager.cleanup_temp_folder()

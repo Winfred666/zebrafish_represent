@@ -1,0 +1,37 @@
+train_dataset:
+  class_name: OccupancyPtDataset
+  params:
+    data_dir: data/raw/sample_full/train/.mask_cache_fba7deb7a868
+    max_files: null
+    pad_to_multiple: [4, 4, 4]
+    scale_factor: [0.5, 0.5, 0.5]
+
+train_dataloader:
+  class_name: DataLoader
+  params:
+    dataset: runtime.train_dataset
+    batch_size: 1
+    num_workers: 0
+    shuffle: true
+    pin_memory: true
+    persistent_workers: false
+    collate_fn: runtime.train_dataset.collate_fn
+
+val_dataset:
+  class_name: OccupancyPtDataset
+  params:
+    data_dir: data/raw/sample_full/val/.mask_cache_dc0eeca21ae8
+    max_files: null
+    pad_to_multiple: [4, 4, 4]
+    scale_factor: [0.5, 0.5, 0.5]
+
+val_dataloader:
+  class_name: DataLoader
+  params:
+    dataset: runtime.val_dataset
+    batch_size: 1
+    num_workers: 0
+    shuffle: false
+    pin_memory: true
+    persistent_workers: false
+    collate_fn: runtime.val_dataset.collate_fn
