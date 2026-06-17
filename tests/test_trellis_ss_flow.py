@@ -204,6 +204,56 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
         self.assertTrue(torch.all(decoded >= 0.0))
         self.assertTrue(torch.all(decoded <= 1.0))
 
+    def test_latent_validation_probe_reports_nonzero_latent_activity(self) -> None:
+        stage1 = TinyStage1()
+        module = RectifiedFlowModule(
+            RectifiedFlowModuleParams(
+                model=TinyLatentFlowModel(),
+                stage1_model=stage1,
+                sigma_min=0.1,
+                t_schedule_name="uniform",
+                null_cond_channels=16,
+                optimization=OptimizationParams(
+                    learning_rate=1.0e-4,
+                    weight_decay=0.0,
+                    loss_type="mse",
+                    sample_steps=4,
+                ),
+                diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+                testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            )
+        )
+        clean = torch.zeros((1, 1, 6, 4, 8), dtype=torch.float32)
+        clean[:, :, 2:4, 1:3, 3:5] = 1.0
+        probe = module._latent_validation_probe(clean)
+        self.assertIn("denoised_latent_abs_mean", probe)
+        self.assertIn("denoised_latent_nonzero_ratio", probe)
+        self.assertGreaterEqual(float(probe["denoised_latent_abs_mean"]), 0.0)
+        self.assertGreaterEqual(float(probe["denoised_latent_nonzero_ratio"]), 0.0)
+        self.assertLessEqual(float(probe["denoised_latent_nonzero_ratio"]), 1.0)
+
+    def test_sparse_structure_flow_backward_stays_finite(self) -> None:
+        model = TRELLISSparseStructureFlow(
+            input_size=(4, 8, 4),
+            patch_size=2,
+            in_channels=8,
+            out_channels=8,
+            hidden_size=32,
+            cond_channels=32,
+            depth=2,
+            num_heads=4,
+            mlp_ratio=2.0,
+        )
+        x = torch.randn(2, 8, 4, 8, 4)
+        t = torch.rand(2)
+        cond = torch.zeros((2, 1, 32))
+        y = model(x, t, cond=cond)
+        loss = y.square().mean()
+        loss.backward()
+        out_grad = model.out_layer.weight.grad
+        self.assertIsNotNone(out_grad)
+        self.assertTrue(torch.isfinite(out_grad).all())
+
     @unittest.skipUnless(importlib.util.find_spec("safetensors") is not None, "safetensors is not installed")
     def test_checkpoint_rewrite_replaces_only_geometry_keys(self) -> None:
         from safetensors.torch import save_file

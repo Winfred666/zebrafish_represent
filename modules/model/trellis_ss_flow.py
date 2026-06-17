@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from modules.block.common import modulate
 from modules.block.time_enc import TimestepEmbedder
+from modules.block.trellis_sparse_structure import LayerNorm32
 from modules.model.base import (
     BaseVolumeModel,
     extract_checkpoint_state_dict,
@@ -149,9 +150,11 @@ class _TRELLISMLP(nn.Module):
 class _TRELLISFlowBlock(nn.Module):
     def __init__(self, hidden_size: int, cond_channels: int, num_heads: int, mlp_ratio: float):
         super().__init__()
+        self.norm1 = LayerNorm32(hidden_size, elementwise_affine=False, eps=1.0e-6)
+        self.norm2 = LayerNorm32(hidden_size, elementwise_affine=True, eps=1.0e-6)
+        self.norm3 = LayerNorm32(hidden_size, elementwise_affine=False, eps=1.0e-6)
         self.self_attn = _TRELLISSelfAttention(hidden_size, num_heads)
         self.cross_attn = _TRELLISCrossAttention(hidden_size, cond_channels, num_heads)
-        self.norm2 = nn.LayerNorm(hidden_size)
         self.mlp = _TRELLISMLP(hidden_size, mlp_ratio)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
@@ -167,10 +170,11 @@ class _TRELLISFlowBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(condition).chunk(6, dim=1)
         )
-        attn_input = modulate(x, shift_msa, scale_msa)
-        attn_out = self.self_attn(attn_input) + self.cross_attn(attn_input, cond)
+        attn_input = modulate(self.norm1(x), shift_msa, scale_msa)
+        attn_out = self.self_attn(attn_input)
         x = x + gate_msa.unsqueeze(1) * attn_out
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + self.cross_attn(self.norm2(x), cond)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm3(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -220,7 +224,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
 
         self.input_layer = nn.Linear(self.token_dim, self.hidden_size)
         self.t_embedder = TimestepEmbedder(self.hidden_size)
-        self.pos_emb = nn.Parameter(torch.zeros(self.num_patches, self.hidden_size))
+        self.pos_emb = nn.Parameter(torch.zeros(self.num_patches, self.hidden_size), requires_grad=False)
         self.blocks = nn.ModuleList(
             [
                 _TRELLISFlowBlock(
@@ -324,6 +328,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
         time_condition = time_condition.to(dtype=tokens.dtype)
         for block in self.blocks:
             tokens = block(tokens, time_condition, cond)
+        tokens = F.layer_norm(tokens, (tokens.shape[-1],))
         return self.unpatchify(self.out_layer(tokens))
 
     def load_ckpt(self, ckpt_path: str | Path, *, strict: bool = False) -> None:

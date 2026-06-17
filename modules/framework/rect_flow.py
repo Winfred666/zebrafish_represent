@@ -138,6 +138,11 @@ class RectifiedFlowModule(BaseTrainingFramework):
         decoded = self.stage1_model.decode(clean)
         return torch.sigmoid(decoded).detach()
 
+    def _make_clean_latent(self, noisy: Tensor, t_start: float) -> Tensor:
+        if not self._uses_stage1:
+            raise RuntimeError("_make_clean_latent is only defined for latent rectified flow")
+        return self._reverse_process(noisy, t_start=t_start)
+
     def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
         """x_t = (1−t)·x₀ + t·ε   (t=0 → clean,  t=1 → noise)."""
         t_view = t
@@ -201,6 +206,24 @@ class RectifiedFlowModule(BaseTrainingFramework):
         denoised = self._make_clean(noisy, t_val)
         return F.mse_loss(denoised, canonical_clean)
 
+    @torch.no_grad()
+    def _latent_validation_probe(self, clean_volume: Tensor) -> Dict[str, Tensor]:
+        if not self._uses_stage1:
+            return {}
+        probe_clean = clean_volume[:1]
+        t_val = self.get_t_from_sigma(0.5)
+        t_tensor = torch.full((1,), t_val, device=probe_clean.device)
+        noisy_latent, _ = self._make_noisy_with_seed(
+            probe_clean,
+            t_tensor,
+            seed=self._seed_from_parts("latent_probe", int(self.current_epoch)),
+        )
+        denoised_latent = self._make_clean_latent(noisy_latent, t_val)
+        return {
+            "denoised_latent_abs_mean": denoised_latent.abs().mean(),
+            "denoised_latent_nonzero_ratio": (denoised_latent.abs() > 1.0e-4).float().mean(),
+        }
+
     # ── sampling ────────────────────────────────────────────────
 
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
@@ -212,3 +235,18 @@ class RectifiedFlowModule(BaseTrainingFramework):
         t_tensor = torch.full((batch_size,), t, device=noisy.device, dtype=noisy.dtype)
         velocity = self(noisy, t_tensor)
         return noisy - step_size * velocity
+
+    def validation_step(
+        self, batch: Dict[str, Tensor], batch_idx: int
+    ) -> Tensor:
+        loss = super().validation_step(batch, batch_idx)
+        if self._uses_stage1 and batch_idx == 0:
+            for key, value in self._latent_validation_probe(batch["target"]).items():
+                self.log(
+                    f"val_{key}",
+                    value,
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=True,
+                )
+        return loss
