@@ -1,0 +1,9 @@
+import_config: voldit_dit_ds8_b2_whole_ds0125.yaml
+
+stage1_model:
+  params:
+    load_from_ckpt: result/checkpoints/voldit_vqgan_lg00625.pth
+
+model:
+  params:
+    input_size: [8, 64, 8]

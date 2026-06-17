@@ -6,7 +6,6 @@ logging:
   params:
     run_name: prdit_s2_ddp4_gpu07_resume_sparse_val
     tags:
-      stage: "2"
       node: gpu07
       data_config: lg_025
       devices: "4"

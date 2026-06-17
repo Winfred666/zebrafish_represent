@@ -8,7 +8,6 @@ logging:
   params:
     run_name: prdit_s1_ddp7_gpu05_network_file
     tags:
-      stage: "1"
       node: gpu05
       data_config: lg_025_network_file
       devices: "7"

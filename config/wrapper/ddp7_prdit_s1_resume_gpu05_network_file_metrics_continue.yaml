@@ -1,4 +1,6 @@
-import_config: ddp7_prdit_s1_gpu05_network_file.yaml
+import_config:
+  - ddp7_prdit_s1_gpu05_network_file.yaml
+  - _callbacks_val_loss_no_early_stopping.yaml
 
 resume_ckpt_path: /tmp/mlflow_checkpoints/last-v6.ckpt
 
@@ -6,28 +8,9 @@ trainer:
   params:
     max_epochs: 80
     check_val_every_n_epoch: 1
-    callbacks:
-      - class_name: ModelCheckpoint
-        params:
-          monitor: val_loss
-          mode: min
-          save_top_k: 1
-          save_last: true
-          filename: "epoch{epoch:03d}-step{step:06d}"
-          dirpath: /tmp/mlflow_checkpoints
-      - class_name: IntegratedGPUMemoryMonitor
-        params:
-          log_frequency_mins: 1
-      - class_name: LearningRateMonitor
-        params:
-          logging_interval: epoch
 
 logging:
   params:
     run_name: prdit_s1_ddp7_gpu05_network_file_resume_metrics_continue
     tags:
-      stage: "1"
-      node: gpu05
-      data_config: lg_025_network_file
-      devices: "7"
       resume: last_v6_metrics_continue

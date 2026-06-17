@@ -19,7 +19,7 @@ PERCEPTUALNET_CKPT_PATH = _os.path.join(
     _os.path.dirname(_os.path.dirname(_PERCEPTUALNET_DIR)),
     "result",
     "checkpoints",
-    "medicalnet_resnet10_vicregfinetune.ckpt",
+    "medicalnet_resnet50_vicreg_reliable_mild.ckpt",
 )
 
 _RESNET_FEATURE_DIMS: dict[str, tuple[int, ...]] = {
@@ -60,7 +60,7 @@ class PerceptualNetEncoder(BaseVolumeModel):
         if (
             pretrained
             and checkpoint_path is None
-            and self.backbone_name == "resnet10"
+            and self.backbone_name == "resnet50"
             and Path(PERCEPTUALNET_CKPT_PATH).exists()
         ):
             checkpoint_path = PERCEPTUALNET_CKPT_PATH

@@ -9,5 +9,4 @@ logging:
   params:
     run_name: vqvae-ddp3_vqvae_s1_resume2-lg_025-vq_vae_s1-260607_000000
     tags:
-      job_type: train
       stage: s1_resume2_ddp3

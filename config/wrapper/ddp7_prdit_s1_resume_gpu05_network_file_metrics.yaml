@@ -4,15 +4,10 @@ resume_ckpt_path: /tmp/mlflow_checkpoints/last-v6.ckpt
 
 trainer:
   params:
-    max_epochs: 40
     check_val_every_n_epoch: 1
 
 logging:
   params:
     run_name: prdit_s1_ddp7_gpu05_network_file_resume_metrics
     tags:
-      stage: "1"
-      node: gpu05
-      data_config: lg_025_network_file
-      devices: "7"
       resume: last_v6_metrics_fix

@@ -1,0 +1,10 @@
+import_config: ddp4_voldit_whole_gpu07_warmstart60.yaml
+
+trainer:
+  params:
+    devices: 3
+
+logging:
+  params:
+    tags:
+      launch_profile: ddp3_gpu07_partial

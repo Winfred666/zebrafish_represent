@@ -4,7 +4,6 @@ trainer:
   params:
     max_epochs: 10
     accelerator: gpu
-    devices: 1
 
 logging:
   params:

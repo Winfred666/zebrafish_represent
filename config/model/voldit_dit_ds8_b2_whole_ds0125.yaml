@@ -1,0 +1,7 @@
+import_config: voldit_dit_ds8_b2.yaml
+
+model:
+  params:
+    input_size: [16, 128, 16]
+    load_from_ckpt: /tmp/mlflow_checkpoints/epoch053-step004482.ckpt
+    strict_load: false

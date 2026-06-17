@@ -30,7 +30,7 @@ _DEFAULT_MEDICALNET_RESNET50 = (
     Path(__file__).resolve().parents[2]
     / "result"
     / "checkpoints"
-    / "medicalnet_resnet50_vicregfinetune.ckpt"
+    / "medicalnet_resnet50_vicreg_reliable_mild.ckpt"
 )
 
 

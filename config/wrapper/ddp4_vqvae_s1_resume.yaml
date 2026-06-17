@@ -5,8 +5,6 @@ resume_ckpt_path: /tmp/mlflow_checkpoints/epoch005-step001476.ckpt
 
 logging:
   params:
-    experiment_name: zebrafish_volume_gen
     run_name: vqvae-ddp4_vqvae_s1-lg_025-vq_vae_s1-resume_260606
     tags:
-      job_type: train
       stage: s1_resume

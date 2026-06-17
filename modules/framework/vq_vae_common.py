@@ -17,7 +17,7 @@ _VQ_VAE_PERCEPTUAL_CKPT = (
     Path(__file__).resolve().parents[2]
     / "result"
     / "checkpoints"
-    / "medicalnet_resnet50_vicregfinetune.ckpt"
+    / "medicalnet_resnet50_vicreg_reliable_mild.ckpt"
 )
 
 

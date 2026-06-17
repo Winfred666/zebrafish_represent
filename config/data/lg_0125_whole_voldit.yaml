@@ -1,0 +1,27 @@
+import_config: lg_025.yaml
+
+train_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/voldit_ds0125/train
+    crop_size: [128, 1024, 128]
+    scale_factor: [0.125, 0.125, 0.125]
+
+train_dataloader:
+  params:
+    batch_size: 1
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+
+val_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/voldit_ds0125/val
+    crop_size: [128, 1024, 128]
+    scale_factor: [0.125, 0.125, 0.125]
+
+val_dataloader:
+  params:
+    batch_size: 1
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false

@@ -1,0 +1,29 @@
+import_config:
+  - base.yaml
+  - _callbacks_val_loss_no_early_stopping.yaml
+
+resume_ckpt_path: /tmp/mlflow_checkpoints/prdit_s2_ddp4_resume_gpu07_260609_150700_last-v20.ckpt
+
+framework:
+  params:
+    stat_metrics_every_n_epochs: 0
+
+trainer:
+  params:
+    max_epochs: 100
+    accelerator: gpu
+    devices: 1
+    strategy: auto
+    num_sanity_val_steps: 0
+
+logging:
+  params:
+    experiment_name: prdit_s2_IaN
+    run_name: prdit_s2_ddp1_gpu05_resume_from_gpu07_lastv20_bs8_converge
+    tags:
+      stage: "2"
+      node: gpu05
+      data_config: lg_025_network_file_bs8
+      devices: "1"
+      resume: gpu07_last_v20_local_tmp_to_epoch100
+      stat_metrics: disabled_for_convergence

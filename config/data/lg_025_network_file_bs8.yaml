@@ -1,0 +1,9 @@
+import_config: lg_025_network_file.yaml
+
+train_dataloader:
+  params:
+    batch_size: 8
+
+val_dataloader:
+  params:
+    batch_size: 2

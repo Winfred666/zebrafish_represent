@@ -6,14 +6,10 @@ trainer:
     max_epochs: 20
     devices: 4
     strategy: ddp_find_unused_parameters_true
-    accumulate_grad_batches: 1
     precision: "bf16-mixed"
-    num_sanity_val_steps: 10
-    limit_val_batches: 0.75
 
 logging:
   params:
     experiment_name: voldit_finetune
     tags:
-      job_type: train
       stage: s2_voldit
