@@ -72,6 +72,21 @@ class LatentDDPMModule(BaseTrainingFramework):
         self.register_buffer("sqrt_recip_alphas", torch.sqrt(1.0 / alphas))
         self.register_buffer("posterior_variance", posterior_variance.clamp(min=1e-20))
 
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: float | int | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        clip_val = float(gradient_clip_val or 0.0)
+        if clip_val <= 0.0 or clip_val > 1.0:
+            clip_val = 1.0
+        super().configure_gradient_clipping(
+            optimizer,
+            gradient_clip_val=clip_val,
+            gradient_clip_algorithm=gradient_clip_algorithm or "norm",
+        )
+
     @staticmethod
     def _extract(coefficients: Tensor, timesteps: Tensor, target_ndim: int) -> Tensor:
         """Select one schedule value per batch item and expand it for broadcasting."""
@@ -79,6 +94,11 @@ class LatentDDPMModule(BaseTrainingFramework):
         while gathered.ndim < target_ndim:
             gathered = gathered.unsqueeze(-1)
         return gathered
+
+    def _normalized_t_to_timestep(self, t: float) -> int:
+        total_steps = self.optimization.sample_steps
+        scaled = math.ceil(float(min(max(t, 0.0), 1.0)) * float(total_steps)) - 1
+        return max(0, min(total_steps - 1, int(scaled)))
 
     def get_t_from_sigma(self, sigma: float) -> float:
         sigma_value = float(min(max(sigma, 0.0), 1.0))
@@ -98,7 +118,7 @@ class LatentDDPMModule(BaseTrainingFramework):
                 timestep = lower_idx
             else:
                 timestep = upper_idx
-        return float(timestep) / float(max(1, self.optimization.sample_steps - 1))
+        return float(timestep + 1) / float(max(1, self.optimization.sample_steps))
 
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
         self.stage1_model.eval()
@@ -132,7 +152,7 @@ class LatentDDPMModule(BaseTrainingFramework):
         )
         noise = torch.randn_like(clean_latents)
         noisy_latents = self._q_sample(clean_latents, timesteps, noise)
-        prediction = self(noisy_latents, timesteps.to(dtype=torch.float32))
+        prediction = self(noisy_latents, timesteps)
         target = self._target_from_prediction_type(clean_latents, noise, timesteps)
         loss = self._ddpm_loss(prediction, target)
         return {"loss": loss}
@@ -140,7 +160,7 @@ class LatentDDPMModule(BaseTrainingFramework):
     def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
         if t.dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
             total_steps = self.optimization.sample_steps
-            t = (t * (total_steps - 1)).long().clamp(0, total_steps - 1)
+            t = torch.ceil(t.clamp(0.0, 1.0) * total_steps).long().sub(1).clamp(0, total_steps - 1)
         alpha = self._extract(self.sqrt_alphas_cumprod, t, clean.ndim)
         sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, t, clean.ndim)
         return alpha * clean + sigma * noise
@@ -183,15 +203,10 @@ class LatentDDPMModule(BaseTrainingFramework):
             return (prediction - target).abs().mean()
         return F.smooth_l1_loss(prediction.float(), target.float())
 
-    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
-        del step_size
+    def _ddpm_step(self, noisy: Tensor, timestep: int) -> Tensor:
         batch_size = noisy.shape[0]
-        total_steps = self.optimization.sample_steps
-        timestep = int(t * (total_steps - 1))
-        timestep = max(0, min(total_steps - 1, timestep))
-
         t_tensor = torch.full((batch_size,), timestep, device=noisy.device, dtype=torch.long)
-        prediction = self(noisy, t_tensor.to(dtype=torch.float32))
+        prediction = self(noisy, t_tensor)
         epsilon = self._epsilon_from_prediction(prediction, noisy, t_tensor)
 
         beta_t = self._extract(self.betas, t_tensor, noisy.ndim)
@@ -207,3 +222,7 @@ class LatentDDPMModule(BaseTrainingFramework):
             posterior_variance = self._extract(self.posterior_variance, t_tensor, noisy.ndim)
             return model_mean + torch.sqrt(posterior_variance) * torch.randn_like(noisy)
         return model_mean
+
+    def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
+        del step_size
+        return self._ddpm_step(noisy, self._normalized_t_to_timestep(t))
