@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 import sys
 from typing import Any
@@ -17,7 +16,6 @@ if str(_REPO_ROOT) not in sys.path:
 from modules.model.trellis_ss_flow import (
     TRELLISSparseStructureFlow,
     _build_input_layer_weight,
-    _build_pos_emb,
     _build_zero_linear_weight,
 )
 from utils.runtime_factory import load_yaml_config
@@ -31,7 +29,6 @@ DEFAULT_OUTPUT_PATH = (
     "ss_flow_img_dit_L_fullcanvas_patch16_localwarm.safetensors"
 )
 GEOMETRY_REWRITE_KEYS = {
-    "pos_emb",
     "input_layer.weight",
     "input_layer.bias",
     "out_layer.weight",
@@ -80,12 +77,6 @@ def _build_geometry_tensor(
     target_shape: torch.Size,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    if key == "pos_emb":
-        return _build_pos_emb(
-            math.prod(size // params.patch_size for size in params.input_size),
-            params.hidden_size,
-            dtype=dtype,
-        )
     if key == "input_layer.weight":
         return _build_input_layer_weight(
             params.hidden_size,

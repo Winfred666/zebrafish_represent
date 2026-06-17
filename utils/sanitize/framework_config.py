@@ -71,6 +71,7 @@ class RectifiedFlowModuleParams(BaseFrameworkParams):
     t_schedule_name: Literal["uniform", "logit_normal", "logitNormal"] = "uniform"
     t_schedule_mean: float = 0.0
     t_schedule_std: float = Field(default=1.0, gt=0.0)
+    total_timesteps: int = Field(default=1000, ge=1)
     null_cond_channels: int = Field(default=1024, ge=1)
 
 

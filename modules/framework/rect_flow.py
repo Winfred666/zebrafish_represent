@@ -71,6 +71,7 @@ class RectifiedFlowModule(BaseTrainingFramework):
         self.t_schedule_name = str(config.t_schedule_name)
         self.t_schedule_mean = float(config.t_schedule_mean)
         self.t_schedule_std = float(config.t_schedule_std)
+        self.total_timesteps = int(config.total_timesteps)
         self.null_cond_channels = int(config.null_cond_channels)
         self._uses_stage1 = self.stage1_model is not None
 
@@ -115,11 +116,15 @@ class RectifiedFlowModule(BaseTrainingFramework):
     def get_data_loss(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
         return self._rectified_flow_loss(batch["target"])
 
+    def _model_timesteps(self, timesteps: Tensor) -> Tensor:
+        return timesteps * self.total_timesteps
+
     def forward(self, x: Tensor, timesteps: Tensor) -> Tensor:
+        model_timesteps = self._model_timesteps(timesteps)
         if not self._uses_stage1:
-            return super().forward(x, timesteps)
+            return super().forward(x, model_timesteps)
         cond = self._build_null_condition(x.shape[0], device=x.device, dtype=x.dtype)
-        return self.model(x, timesteps, cond=cond)
+        return self.model(x, model_timesteps, cond=cond)
 
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
         if not self._uses_stage1:

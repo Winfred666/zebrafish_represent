@@ -179,8 +179,23 @@ class RuntimeEntryTest(unittest.TestCase):
             "cond_channels": 64,
             "depth": 2,
             "num_heads": 4,
+            "pos_encoding_type": "sinusoidal",
         })
         self.assertEqual(trellis_flow_params.patch_size, 4)
+        self.assertEqual(trellis_flow_params.pos_encoding_type, "sinusoidal")
+
+        with self.assertRaises(ValueError):
+            TRELLISSparseStructureFlowParams.model_validate({
+                "input_size": [8, 16, 8],
+                "patch_size": 4,
+                "in_channels": 8,
+                "out_channels": 8,
+                "hidden_size": 64,
+                "cond_channels": 64,
+                "depth": 2,
+                "num_heads": 4,
+                "pos_encoding_type": "fourier",
+            })
 
         with self.assertRaises(ValueError):
             TRELLISSparseStructureVAEParams.model_validate({
@@ -232,6 +247,39 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
         self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 6)
+
+    def test_rectified_flow_total_timesteps_validation(self) -> None:
+        from utils.sanitize.framework_config import RectifiedFlowModuleParams
+
+        params = RectifiedFlowModuleParams.model_validate(
+            {
+                "model": None,
+                "optimization": {
+                    "learning_rate": 1e-4,
+                    "weight_decay": 0.0,
+                    "loss_type": "mse",
+                    "sample_steps": 4,
+                },
+                "diffusion": {"gen_noise_weight": 0.5},
+                "total_timesteps": 1000,
+            }
+        )
+        self.assertEqual(params.total_timesteps, 1000)
+
+        with self.assertRaises(ValueError):
+            RectifiedFlowModuleParams.model_validate(
+                {
+                    "model": None,
+                    "optimization": {
+                        "learning_rate": 1e-4,
+                        "weight_decay": 0.0,
+                        "loss_type": "mse",
+                        "sample_steps": 4,
+                    },
+                    "diffusion": {"gen_noise_weight": 0.5},
+                    "total_timesteps": 0,
+                }
+            )
 
     def test_base_framework_params_default_stat_metric_interval(self) -> None:
         from utils.sanitize.framework_config import BaseFrameworkParams
@@ -291,11 +339,14 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(model_config["model"]["class_name"], "TRELLISSparseStructureFlow")
         self.assertEqual(model_config["stage1_model"]["params"]["input_size"], [128, 832, 192])
         self.assertEqual(model_config["model"]["params"]["input_size"], [32, 208, 48])
+        self.assertEqual(model_config["model"]["params"]["pos_encoding_type"], "sinusoidal")
+        self.assertFalse(model_config["model"]["params"]["strict_load"])
 
         framework_config = load_yaml_config("config/framework/trellis_ss_flow_rectified.yaml")
         self.assertEqual(framework_config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(framework_config["framework"]["params"]["stage1_model"], "runtime.stage1_model")
         self.assertEqual(framework_config["framework"]["params"]["t_schedule_name"], "logitNormal")
+        self.assertEqual(framework_config["framework"]["params"]["total_timesteps"], 1000)
 
 
 if __name__ == "__main__":

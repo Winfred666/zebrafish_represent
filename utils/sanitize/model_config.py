@@ -197,6 +197,7 @@ class TRELLISSparseStructureFlowParams(IngestibleParams):
     depth: int = Field(default=32, ge=1)
     num_heads: int = Field(default=16, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
+    pos_encoding_type: Literal["learned", "sinusoidal"] = "sinusoidal"
     load_from_ckpt: str | None = None
     strict_load: bool = False
 

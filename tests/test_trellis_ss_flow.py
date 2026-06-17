@@ -54,6 +54,7 @@ class TinyLatentFlowModel(nn.Module):
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
         self.last_cond_shape: tuple[int, ...] | None = None
+        self.last_timesteps: torch.Tensor | None = None
 
     def forward(
         self,
@@ -63,8 +64,9 @@ class TinyLatentFlowModel(nn.Module):
         cond: torch.Tensor | None = None,
         pos_idx: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del timesteps, pos_idx
+        del pos_idx
         self.last_cond_shape = None if cond is None else tuple(cond.shape)
+        self.last_timesteps = None if timesteps is None else timesteps.detach().clone()
         return torch.zeros_like(x)
 
 
@@ -75,9 +77,11 @@ class TinyDenseModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
+        self.last_timesteps: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, pos_idx: torch.Tensor | None = None) -> torch.Tensor:
-        del timesteps, pos_idx
+        del pos_idx
+        self.last_timesteps = timesteps.detach().clone()
         return torch.zeros_like(x)
 
 
@@ -106,12 +110,14 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
             depth=2,
             num_heads=4,
             mlp_ratio=2.0,
+            pos_encoding_type="sinusoidal",
         )
         x = torch.randn(2, 8, 4, 8, 4)
         t = torch.rand(2)
         cond = torch.zeros((2, 1, 32))
         y = model(x, t, cond=cond)
         self.assertEqual(tuple(y.shape), tuple(x.shape))
+        self.assertEqual(model.pos_encoding_type, "sinusoidal")
 
     def test_latent_rectified_flow_uses_stage1_encode_and_null_condition(self) -> None:
         stage1 = TinyStage1()
@@ -124,6 +130,7 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
                 t_schedule_name="logitNormal",
                 t_schedule_mean=1.0,
                 t_schedule_std=1.0,
+                total_timesteps=1000,
                 null_cond_channels=16,
                 optimization=OptimizationParams(
                     learning_rate=1.0e-4,
@@ -145,9 +152,21 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
         self.assertFalse(stage1.training)
         self.assertTrue(all(not parameter.requires_grad for parameter in stage1.parameters()))
 
+        fixed_timesteps = torch.tensor([0.25, 0.75], dtype=torch.float32)
+        recorded_q_sample_t: dict[str, torch.Tensor] = {}
+        original_q_sample = module._q_sample
+
+        def _record_q_sample(clean: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+            recorded_q_sample_t["t"] = t.detach().clone()
+            return original_q_sample(clean, t, noise)
+
+        module._sample_timesteps = lambda batch_size, device: fixed_timesteps.to(device=device)
+        module._q_sample = _record_q_sample
         losses = module.get_data_loss({"target": clean})
         self.assertIn("loss", losses)
         self.assertEqual(model.last_cond_shape, (2, 1, 16))
+        self.assertTrue(torch.allclose(recorded_q_sample_t["t"], fixed_timesteps))
+        self.assertTrue(torch.allclose(model.last_timesteps, fixed_timesteps * 1000.0))
 
         sample_t = torch.tensor([0.25], dtype=torch.float32)
         sample_clean = torch.ones((1, 2, 2, 2, 2), dtype=torch.float32)
@@ -168,6 +187,7 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
         module = RectifiedFlowModule(
             RectifiedFlowModuleParams(
                 model=TinyDenseModel(),
+                total_timesteps=1000,
                 optimization=OptimizationParams(
                     learning_rate=1.0e-4,
                     weight_decay=0.0,
@@ -189,6 +209,7 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
                 stage1_model=stage1,
                 sigma_min=0.1,
                 t_schedule_name="uniform",
+                total_timesteps=1000,
                 null_cond_channels=16,
                 optimization=OptimizationParams(
                     learning_rate=1.0e-4,
@@ -212,6 +233,7 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
                 stage1_model=stage1,
                 sigma_min=0.1,
                 t_schedule_name="uniform",
+                total_timesteps=1000,
                 null_cond_channels=16,
                 optimization=OptimizationParams(
                     learning_rate=1.0e-4,
@@ -232,6 +254,31 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
         self.assertGreaterEqual(float(probe["denoised_latent_nonzero_ratio"]), 0.0)
         self.assertLessEqual(float(probe["denoised_latent_nonzero_ratio"]), 1.0)
 
+    def test_latent_rectified_flow_one_step_sample_scales_model_timesteps(self) -> None:
+        model = TinyLatentFlowModel()
+        module = RectifiedFlowModule(
+            RectifiedFlowModuleParams(
+                model=model,
+                stage1_model=TinyStage1(),
+                sigma_min=0.1,
+                t_schedule_name="uniform",
+                total_timesteps=1000,
+                null_cond_channels=16,
+                optimization=OptimizationParams(
+                    learning_rate=1.0e-4,
+                    weight_decay=0.0,
+                    loss_type="mse",
+                    sample_steps=4,
+                ),
+                diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+                testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            )
+        )
+        noisy = torch.randn(2, 2, 4, 4, 4)
+        denoised = module.one_step_sample(noisy, t=0.125, step_size=0.25)
+        self.assertEqual(tuple(denoised.shape), tuple(noisy.shape))
+        self.assertTrue(torch.allclose(model.last_timesteps, torch.full((2,), 125.0)))
+
     def test_sparse_structure_flow_backward_stays_finite(self) -> None:
         model = TRELLISSparseStructureFlow(
             input_size=(4, 8, 4),
@@ -243,16 +290,24 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
             depth=2,
             num_heads=4,
             mlp_ratio=2.0,
+            pos_encoding_type="sinusoidal",
         )
         x = torch.randn(2, 8, 4, 8, 4)
         t = torch.rand(2)
-        cond = torch.zeros((2, 1, 32))
+        cond = torch.randn(2, 3, 32)
         y = model(x, t, cond=cond)
         loss = y.square().mean()
         loss.backward()
         out_grad = model.out_layer.weight.grad
+        cross_attn = model.blocks[0].cross_attn
         self.assertIsNotNone(out_grad)
         self.assertTrue(torch.isfinite(out_grad).all())
+        self.assertTrue(hasattr(cross_attn, "q_rms_norm"))
+        self.assertTrue(hasattr(cross_attn, "k_rms_norm"))
+        self.assertIsNotNone(cross_attn.q_rms_norm.gamma.grad)
+        self.assertIsNotNone(cross_attn.k_rms_norm.gamma.grad)
+        self.assertTrue(torch.isfinite(cross_attn.q_rms_norm.gamma.grad).all())
+        self.assertTrue(torch.isfinite(cross_attn.k_rms_norm.gamma.grad).all())
 
     @unittest.skipUnless(importlib.util.find_spec("safetensors") is not None, "safetensors is not installed")
     def test_checkpoint_rewrite_replaces_only_geometry_keys(self) -> None:

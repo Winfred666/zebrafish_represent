@@ -8,6 +8,8 @@ from modules.block.discriminator import NLayerDiscriminator3D
 from modules.block.dit import DiTBackbone3D, DiTBlock3D
 from modules.block.encoder import ConvPatchTokenizer3D, ExtractPatches3D
 from modules.block.mlp import MlpDenoiser
+from modules.block.pos_enc import (LearnablePosEmbedder, SinusoidalPosEmbedder,
+                                   TRELLISSinusoidalPosEmbedder)
 from modules.block.time_enc import DualHeadTimestepEmbedder, TimestepEmbedder
 from modules.block.trellis_sparse_structure import (SparseStructureDecoder,
                                                     SparseStructureEncoder)
@@ -26,8 +28,10 @@ __all__ = [
     "NLayerDiscriminator3D",
     "ExtractPatches3D",
     "FinalLayer3D",
+    "LearnablePosEmbedder",
     "MlpDenoiser",
     "DualHeadTimestepEmbedder",
+    "SinusoidalPosEmbedder",
     "TimestepEmbedder",
     "ResnetBlock",
     "SinusoidalPosEmb",
@@ -35,6 +39,7 @@ __all__ = [
     "SpatialLayerNorm",
     "SparseStructureDecoder",
     "SparseStructureEncoder",
+    "TRELLISSinusoidalPosEmbedder",
     "Upsample",
     "VolumeUnpatchify3D",
     "modulate",

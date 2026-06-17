@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.block.common import modulate
+from modules.block.pos_enc import LearnablePosEmbedder, TRELLISSinusoidalPosEmbedder
 from modules.block.time_enc import TimestepEmbedder
 from modules.block.trellis_sparse_structure import LayerNorm32
 from modules.model.base import (
@@ -30,10 +31,16 @@ def _init_linear_(linear: nn.Linear) -> None:
         nn.init.zeros_(linear.bias)
 
 
-def _build_pos_emb(num_patches: int, hidden_size: int, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    pos_emb = torch.empty((num_patches, hidden_size), dtype=dtype)
-    nn.init.normal_(pos_emb, std=0.02)
-    return pos_emb
+def _build_pos_embedder(
+    pos_encoding_type: str,
+    grid_size: tuple[int, int, int],
+    hidden_size: int,
+) -> nn.Module:
+    if pos_encoding_type == "learned":
+        return LearnablePosEmbedder(math.prod(grid_size), hidden_size)
+    if pos_encoding_type == "sinusoidal":
+        return TRELLISSinusoidalPosEmbedder(grid_size, hidden_size)
+    raise ValueError(f"Unsupported pos_encoding_type={pos_encoding_type}")
 
 
 def _build_input_layer_weight(
@@ -113,6 +120,8 @@ class _TRELLISCrossAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.to_q = nn.Linear(self.hidden_size, self.hidden_size)
         self.to_kv = nn.Linear(self.cond_channels, 2 * self.hidden_size)
+        self.q_rms_norm = _RMSNormPerHead(self.num_heads, self.head_dim)
+        self.k_rms_norm = _RMSNormPerHead(self.num_heads, self.head_dim)
         self.to_out = nn.Linear(self.hidden_size, self.hidden_size)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
@@ -121,6 +130,8 @@ class _TRELLISCrossAttention(nn.Module):
         q = self.to_q(x).view(batch_size, token_count, self.num_heads, self.head_dim)
         kv = self.to_kv(cond).view(batch_size, cond_tokens, 2, self.num_heads, self.head_dim)
         k, v = kv.unbind(dim=2)
+        q = self.q_rms_norm(q)
+        k = self.k_rms_norm(k)
         attn = F.scaled_dot_product_attention(
             q.transpose(1, 2),
             k.transpose(1, 2),
@@ -193,6 +204,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
         depth: int = 32,
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
+        pos_encoding_type: str = "sinusoidal",
         load_from_ckpt: str | None = None,
         strict_load: bool = False,
     ):
@@ -206,6 +218,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
         self.depth = int(depth)
         self.num_heads = int(num_heads)
         self.mlp_ratio = float(mlp_ratio)
+        self.pos_encoding_type = str(pos_encoding_type)
 
         if any(size % self.patch_size != 0 for size in self.input_size):
             raise ValueError(
@@ -224,7 +237,11 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
 
         self.input_layer = nn.Linear(self.token_dim, self.hidden_size)
         self.t_embedder = TimestepEmbedder(self.hidden_size)
-        self.pos_emb = nn.Parameter(torch.zeros(self.num_patches, self.hidden_size), requires_grad=False)
+        self.pos_embedder = _build_pos_embedder(
+            self.pos_encoding_type,
+            self.grid_size,
+            self.hidden_size,
+        )
         self.blocks = nn.ModuleList(
             [
                 _TRELLISFlowBlock(
@@ -252,7 +269,6 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
 
         self.apply(_init)
         with torch.no_grad():
-            self.pos_emb.copy_(_build_pos_emb(self.num_patches, self.hidden_size, dtype=self.pos_emb.dtype))
             nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
             nn.init.zeros_(self.t_embedder.mlp[0].bias)
             nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -302,7 +318,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
         pos_idx: torch.Tensor | None = None,
         validate: bool = False,
     ) -> torch.Tensor:
-        del pos_idx, validate
+        del validate
         if timesteps is None:
             timesteps = t
         if timesteps is None:
@@ -322,7 +338,7 @@ class TRELLISSparseStructureFlow(BaseVolumeModel):
             )
 
         tokens = self.input_layer(self.patchify(x))
-        tokens = tokens + self.pos_emb.unsqueeze(0).to(device=tokens.device, dtype=tokens.dtype)
+        tokens = tokens + self.pos_embedder(pos_idx).to(device=tokens.device, dtype=tokens.dtype)
         time_condition = self.t_embedder(timesteps.to(device=x.device, dtype=torch.float32))
         cond = cond.to(device=tokens.device, dtype=tokens.dtype)
         time_condition = time_condition.to(dtype=tokens.dtype)
