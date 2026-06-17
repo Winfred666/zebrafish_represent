@@ -602,6 +602,12 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def _validation_stat_interval(self) -> int:
         return int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)
 
+    def _sample_quality_checkpoint_path(self) -> str | None:
+        return getattr(self.config, "sample_quality_checkpoint_path", None)
+
+    def _sample_quality_input_normalization(self) -> str:
+        return str(getattr(self.config, "sample_quality_input_normalization", "raw"))
+
     def _should_run_validation_stat_metrics(self) -> bool:
         trainer = getattr(self, "trainer", None)
         if trainer is None or getattr(trainer, "sanity_checking", False):
@@ -631,7 +637,13 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             save_feature_cache,
         )
 
-        cache_key = build_feature_cache_key(val_dataset)
+        checkpoint_path = self._sample_quality_checkpoint_path()
+        input_normalization = self._sample_quality_input_normalization()
+        cache_key = build_feature_cache_key(
+            val_dataset,
+            checkpoint_path=checkpoint_path,
+            input_normalization=input_normalization,
+        )
         cache_file = feature_cache_path(cache_key)
         rank, world_size = self._validation_stat_rank_world()
 
@@ -664,6 +676,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             local_indices,
             batch_size=self._validation_batch_size(),
             device=self.device,
+            checkpoint_path=checkpoint_path,
+            input_normalization=input_normalization,
         )
         gathered = gather_tensor_rows_to_rank0(local_features.to(device=self.device))
         if rank != 0 or gathered is None:
@@ -675,13 +689,15 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def _build_generated_feature_bank(self, total_samples: int) -> torch.Tensor:
         from utils.eval.sample_quality import empty_feature_bank, extract_patch_features
 
+        checkpoint_path = self._sample_quality_checkpoint_path()
+        input_normalization = self._sample_quality_input_normalization()
         if total_samples <= 0:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         rank, world_size = self._validation_stat_rank_world()
         local_indices = list(range(rank, total_samples, world_size))
         if not local_indices:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         feature_batches: list[torch.Tensor] = []
         batch_size = self._validation_batch_size()
@@ -698,10 +714,16 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 dim=0,
             )
             samples = self._make_clean(initial_noise, t_start=1.0)
-            feature_batches.append(extract_patch_features(samples).cpu())
+            feature_batches.append(
+                extract_patch_features(
+                    samples,
+                    checkpoint_path=checkpoint_path,
+                    input_normalization=input_normalization,
+                ).cpu()
+            )
 
         if not feature_batches:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
         return torch.cat(feature_batches, dim=0)
 
     @torch.no_grad()
@@ -710,15 +732,19 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             compute_fid_from_feature_stats,
             compute_mmd_from_features,
             gather_tensor_rows_to_rank0,
+            release_cached_feature_extractor,
             summarize_feature_bank,
         )
 
         if self._val_stat_generated_features is None:
             return
 
-        local_features = self._val_stat_generated_features.to(device=self.device)
-        generated_features = gather_tensor_rows_to_rank0(local_features)
-        self._val_stat_generated_features = None
+        try:
+            local_features = self._val_stat_generated_features.to(device=self.device)
+            generated_features = gather_tensor_rows_to_rank0(local_features)
+        finally:
+            self._val_stat_generated_features = None
+            release_cached_feature_extractor()
 
         rank, _ = self._validation_stat_rank_world()
         if rank != 0 or generated_features is None or self._val_stat_real_cache is None:

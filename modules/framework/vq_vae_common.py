@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from modules.model.perceptual_net import PerceptualNetEncoder
+from utils.eval.feature_input import normalize_feature_input
 
 _VQ_VAE_PERCEPTUAL_CKPT = (
     Path(__file__).resolve().parents[2]
@@ -18,16 +19,6 @@ _VQ_VAE_PERCEPTUAL_CKPT = (
     / "checkpoints"
     / "medicalnet_resnet50_vicregfinetune.ckpt"
 )
-
-
-# ---------------------------------------------------------------------------
-# perceptual loss
-# ---------------------------------------------------------------------------
-
-def _mednet_norm(x: Tensor, eps: float = 1.0e-5) -> Tensor:
-    mean = x.mean()
-    std = x.std()
-    return (x - mean) / (std + eps)
 
 
 def _l2_normalize(x: Tensor, eps: float = 1.0e-7) -> Tensor:
@@ -38,8 +29,13 @@ def _l2_normalize(x: Tensor, eps: float = 1.0e-7) -> Tensor:
 class MONAIPerceptualLoss(nn.Module):
     """Feature-space perceptual loss backed by a MONAI ResNetFeatures encoder."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        checkpoint_path: str | Path | None = None,
+        input_normalization: str = "sample_zscore",
+    ) -> None:
         super().__init__()
+        self.input_normalization = input_normalization
         self.backbone = PerceptualNetEncoder(
             SimpleNamespace(
                 backbone="resnet50",
@@ -47,7 +43,7 @@ class MONAIPerceptualLoss(nn.Module):
                 spatial_dims=3,
                 feature_index=-1,
                 pretrained=False,
-                checkpoint_path=str(_VQ_VAE_PERCEPTUAL_CKPT),
+                checkpoint_path=str(checkpoint_path or _VQ_VAE_PERCEPTUAL_CKPT),
             )
         )
         self.backbone.eval()
@@ -65,12 +61,14 @@ class MONAIPerceptualLoss(nn.Module):
         backbone_dtype = next(self.backbone.parameters()).dtype
 
         for channel_idx in range(input.shape[1]):
-            input_channel = _mednet_norm(
-                input[:, channel_idx, ...], eps=1.0e-5
-            ).unsqueeze(1).to(dtype=backbone_dtype)
-            target_channel = _mednet_norm(
-                target[:, channel_idx, ...], eps=1.0e-5
-            ).unsqueeze(1).to(dtype=backbone_dtype)
+            input_channel = normalize_feature_input(
+                input[:, channel_idx, ...].unsqueeze(1),
+                self.input_normalization,
+            ).to(dtype=backbone_dtype)
+            target_channel = normalize_feature_input(
+                target[:, channel_idx, ...].unsqueeze(1),
+                self.input_normalization,
+            ).to(dtype=backbone_dtype)
             input_features.append(self.backbone(input_channel))
             target_features.append(self.backbone(target_channel))
 

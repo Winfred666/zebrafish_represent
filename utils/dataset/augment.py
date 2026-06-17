@@ -59,9 +59,9 @@ def random_affine(
     theta[:, 0, 0] = scale
     theta[:, 1, 1] = scale
     theta[:, 2, 2] = scale
-    theta[:, 0, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range * D
-    theta[:, 1, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range * H
-    theta[:, 2, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range * W
+    theta[:, 0, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range
+    theta[:, 1, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range
+    theta[:, 2, 3] = (torch.rand(B, device=device) * 2.0 - 1.0) * shift_range
     grid = F.affine_grid(theta, x.shape, align_corners=False)
     return F.grid_sample(x, grid, mode="bilinear", padding_mode="border",
                          align_corners=False)

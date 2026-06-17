@@ -198,7 +198,7 @@ class TestVICRegModule:
     @pytest.fixture
     def module(self) -> VICRegModule:
         enc = _make_encoder()
-        return VICRegModule(enc)
+        return VICRegModule(enc, anchor_weight=0.0, freeze_encoder_batchnorm=False)
 
     def test_training_step(self, module: VICRegModule) -> None:
         batch = _random_batch(4)
@@ -249,6 +249,35 @@ class TestVICRegModule:
         assert math.isfinite(l1.item())
         assert math.isfinite(l2.item())
 
+    def test_default_freezes_encoder_batchnorm_affine(self) -> None:
+        module = VICRegModule(_make_encoder(), anchor_weight=0.0)
+        bn_params = [
+            param
+            for layer in module.encoder.modules()
+            if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
+            for param in layer.parameters(recurse=False)
+        ]
+        assert bn_params
+        assert not any(param.requires_grad for param in bn_params)
+        module.train()
+        assert all(
+            not layer.training
+            for layer in module.encoder.modules()
+            if isinstance(layer, torch.nn.modules.batchnorm._BatchNorm)
+        )
+
+    def test_sample_zscore_normalizes_features_input(self) -> None:
+        module = VICRegModule(
+            _make_encoder(),
+            input_normalization="sample_zscore",
+            anchor_weight=0.0,
+            freeze_encoder_batchnorm=False,
+        )
+        x = torch.randn(2, 1, 16, 16, 16) * 0.05 - 0.97
+        z = module._normalize_input(x)
+        assert torch.allclose(z.mean(dim=(1, 2, 3, 4)), torch.zeros(2), atol=1e-5)
+        assert torch.allclose(z.std(dim=(1, 2, 3, 4), correction=0), torch.ones(2), atol=1e-5)
+
 
 # ---------------------------------------------------------------------------
 # augmentations
@@ -271,6 +300,29 @@ class TestAugmentations:
         x = torch.randn(2, 1, 32, 32, 32)
         out = random_affine(x)
         assert out.shape == x.shape
+
+    def test_random_affine_uses_normalized_translation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = iter([
+            torch.tensor([0.0]),  # apply transform
+            torch.tensor([0.5]),  # scale = 1.0
+            torch.tensor([1.0]),  # +shift_range in D
+            torch.tensor([1.0]),  # +shift_range in H
+            torch.tensor([1.0]),  # +shift_range in W
+        ])
+
+        def _fake_rand(*shape, **kwargs):
+            del shape, kwargs
+            return next(calls)
+
+        monkeypatch.setattr(torch, "rand", _fake_rand)
+        axis = torch.linspace(-1.0, 1.0, 64)
+        z, y, w = torch.meshgrid(axis, axis, axis, indexing="ij")
+        x = (z + y + w).reshape(1, 1, 64, 64, 64)
+        out = random_affine(x, scale_range=0.0, shift_range=0.05, p=1.0)
+        border_value = x[0, 0, -1, -1, -1]
+
+        assert out.std().item() > 0.5
+        assert torch.isclose(out, border_value).float().mean().item() < 0.25
 
     def test_gaussian_noise_shape(self) -> None:
         x = torch.randn(2, 1, 32, 32, 32)

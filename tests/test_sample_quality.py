@@ -30,12 +30,14 @@ from utils.eval.sample_quality import (
     _mmd,
     _ms_ssim,
     _normalize_pair,
+    release_cached_feature_extractor,
     save_feature_cache,
     _ssim3d,
     summarize_feature_bank,
     _wasserstein_distance_1d,
     compute_sample_quality_metrics,
 )
+from utils.eval.feature_input import normalize_feature_input
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,12 @@ class TestExtractPatchFeatures:
         feats = extract_patch_features(vol)
         assert feats.shape == (1, feats.shape[1])
         assert feats.shape[1] in (512, 2048)
+
+    def test_sample_zscore_normalization(self) -> None:
+        x = torch.randn(3, 1, 8, 8, 8) * 0.1 - 0.9
+        z = normalize_feature_input(x, "sample_zscore")
+        assert torch.allclose(z.mean(dim=(1, 2, 3, 4)), torch.zeros(3), atol=1e-6)
+        assert torch.allclose(z.std(dim=(1, 2, 3, 4), correction=0), torch.ones(3), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +348,41 @@ class TestValidationFeatureCacheHelpers:
         assert bank.shape == (0, 7)
         assert bank.dtype == torch.float64
 
+    def test_empty_feature_bank_uses_checkpoint_feature_dim(self, tmp_path: Path) -> None:
+        checkpoint = tmp_path / "medicalnet_resnet18.ckpt"
+        checkpoint.write_bytes(b"checkpoint")
+
+        bank = empty_feature_bank(checkpoint_path=str(checkpoint))
+
+        assert bank.shape == (0, 512)
+
+    def test_release_cached_feature_extractor(self) -> None:
+        import utils.eval.sample_quality as sq
+
+        class _Encoder:
+            def __init__(self) -> None:
+                self.devices: list[str] = []
+
+            def to(self, device: str) -> None:
+                self.devices.append(str(device))
+
+        class _Extractor:
+            def __init__(self) -> None:
+                self.encoder = _Encoder()
+                self._device = "cpu"
+
+        extractor = _Extractor()
+        sq._FEATURE_EXTRACTOR = extractor
+        sq._FEATURE_EXTRACTOR_KEY = ("cpu",)
+        try:
+            release_cached_feature_extractor()
+            assert extractor.encoder.devices == ["cpu"]
+            assert sq._FEATURE_EXTRACTOR is None
+            assert sq._FEATURE_EXTRACTOR_KEY is None
+        finally:
+            sq._FEATURE_EXTRACTOR = None
+            sq._FEATURE_EXTRACTOR_KEY = None
+
     def test_summarize_feature_bank(self) -> None:
         feats = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
         stats = summarize_feature_bank(feats)
@@ -399,6 +442,17 @@ class TestValidationFeatureCacheHelpers:
         key_b = build_feature_cache_key(DummyDataset("abc", 99.9))
         assert key_a != key_b
 
+    def test_feature_cache_key_changes_with_input_normalization(self) -> None:
+        class DummyDataset:
+            crop_size = (32, 32, 32)
+
+            def __len__(self) -> int:
+                return 4
+
+        key_raw = build_feature_cache_key(DummyDataset(), input_normalization="raw")
+        key_zscore = build_feature_cache_key(DummyDataset(), input_normalization="sample_zscore")
+        assert key_raw != key_zscore
+
     def test_feature_cache_path_suffix(self, tmp_path: Path) -> None:
         cache_file = feature_cache_path("abc123", cache_root=tmp_path)
         assert cache_file.name == "real_feature_cache_abc123.pt"
@@ -420,7 +474,7 @@ class TestValidationFeatureCacheHelpers:
                 value = float(index + 1)
                 return {"target": torch.full((1, 4, 4, 4), value, dtype=torch.float32)}
 
-        def _fake_extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+        def _fake_extract_patch_features(volumes: torch.Tensor, **kwargs) -> torch.Tensor:
             flat = volumes.reshape(volumes.shape[0], -1).mean(dim=1, keepdim=True)
             return flat.to(dtype=torch.float64)
 

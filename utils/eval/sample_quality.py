@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from modules.model.perceptual_net import PerceptualNetEncoder
+from utils.eval.feature_input import normalize_feature_input
 
 _FEATURE_EXTRACTOR = None
 _FEATURE_EXTRACTOR_KEY = None
@@ -29,7 +30,7 @@ _DEFAULT_MEDICALNET_RESNET50 = (
     Path(__file__).resolve().parents[2]
     / "result"
     / "checkpoints"
-    / "medicalnet_resnet50_23dataset.pth"
+    / "medicalnet_resnet50_vicregfinetune.ckpt"
 )
 
 
@@ -61,7 +62,12 @@ def _resolved_metric_backbone_spec(
     return resolved, "resnet50", _feature_dim_for_backbone("resnet50")
 
 
-def _prepare_feature_input(volumes: torch.Tensor, *, device: str) -> torch.Tensor:
+def _prepare_feature_input(
+    volumes: torch.Tensor,
+    *,
+    device: str,
+    input_normalization: str = "raw",
+) -> torch.Tensor:
     x = volumes.to(dtype=torch.float32, device=device)
     if x.ndim == 4:
         x = x.unsqueeze(1)
@@ -69,17 +75,23 @@ def _prepare_feature_input(volumes: torch.Tensor, *, device: str) -> torch.Tenso
         x = x.mean(dim=1, keepdim=True)
     if x.shape[2:] != (PATCH_SIZE, PATCH_SIZE, PATCH_SIZE):
         x = F.interpolate(x, size=(PATCH_SIZE, PATCH_SIZE, PATCH_SIZE), mode="trilinear", align_corners=False)
-    return x
+    return normalize_feature_input(x, input_normalization)
 
 
 class _FeatureExtractor:
     """Volume feature extractor backed by the standard MONAI ResNet wrapper."""
 
-    def __init__(self, device: str = "cuda", checkpoint_path: str | None = None):
+    def __init__(
+        self,
+        device: str = "cuda",
+        checkpoint_path: str | None = None,
+        input_normalization: str = "raw",
+    ):
         resolved_checkpoint, backbone_name, feature_dim = _resolved_metric_backbone_spec(checkpoint_path)
         self.checkpoint_path = resolved_checkpoint
         self.backbone_name = backbone_name
         self.feature_dim = feature_dim
+        self.input_normalization = input_normalization
         self.encoder = PerceptualNetEncoder(
             SimpleNamespace(
                 backbone=backbone_name,
@@ -98,21 +110,48 @@ class _FeatureExtractor:
 
     @torch.no_grad()
     def __call__(self, volumes: torch.Tensor) -> torch.Tensor:
-        feats = self.encoder(_prepare_feature_input(volumes, device=self._device))
+        feats = self.encoder(
+            _prepare_feature_input(
+                volumes,
+                device=self._device,
+                input_normalization=self.input_normalization,
+            )
+        )
         if feats.ndim > 2:
             feats = F.adaptive_avg_pool3d(feats, (1, 1, 1)).reshape(feats.shape[0], -1)
         return feats.to(dtype=torch.float64)
 
 
 def _get_feature_extractor(device: str = "cuda",
-                           checkpoint_path: str | None = None) -> _FeatureExtractor:
+                           checkpoint_path: str | None = None,
+                           input_normalization: str = "raw") -> _FeatureExtractor:
     global _FEATURE_EXTRACTOR, _FEATURE_EXTRACTOR_KEY
     resolved_checkpoint, backbone_name, _ = _resolved_metric_backbone_spec(checkpoint_path)
-    extractor_key = (str(device), str(resolved_checkpoint), backbone_name)
+    extractor_key = (str(device), str(resolved_checkpoint), backbone_name, input_normalization)
     if _FEATURE_EXTRACTOR is None or _FEATURE_EXTRACTOR_KEY != extractor_key:
-        _FEATURE_EXTRACTOR = _FeatureExtractor(device=device, checkpoint_path=checkpoint_path)
+        _FEATURE_EXTRACTOR = _FeatureExtractor(
+            device=device,
+            checkpoint_path=checkpoint_path,
+            input_normalization=input_normalization,
+        )
         _FEATURE_EXTRACTOR_KEY = extractor_key
     return _FEATURE_EXTRACTOR
+
+
+def release_cached_feature_extractor() -> None:
+    """Release the cached MedicalNet encoder after sparse validation-stat passes."""
+    global _FEATURE_EXTRACTOR, _FEATURE_EXTRACTOR_KEY
+
+    extractor = _FEATURE_EXTRACTOR
+    if extractor is None:
+        return
+
+    device = torch.device(extractor._device)
+    extractor.encoder.to("cpu")
+    _FEATURE_EXTRACTOR = None
+    _FEATURE_EXTRACTOR_KEY = None
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -155,14 +194,27 @@ def _resize_to_common_spatial(
 
 
 
-def extract_patch_features(volumes: torch.Tensor) -> torch.Tensor:
+def extract_patch_features(
+    volumes: torch.Tensor,
+    *,
+    checkpoint_path: str | None = None,
+    input_normalization: str = "raw",
+) -> torch.Tensor:
     """Return one MedicalNet feature vector per input volume."""
-    return _get_feature_extractor(device=str(volumes.device))(volumes)
+    return _get_feature_extractor(
+        device=str(volumes.device),
+        checkpoint_path=checkpoint_path,
+        input_normalization=input_normalization,
+    )(volumes)
 
 
-def empty_feature_bank(feature_dim: int | None = None) -> torch.Tensor:
+def empty_feature_bank(
+    feature_dim: int | None = None,
+    *,
+    checkpoint_path: str | None = None,
+) -> torch.Tensor:
     if feature_dim is None:
-        _, _, feature_dim = _resolved_metric_backbone_spec()
+        _, _, feature_dim = _resolved_metric_backbone_spec(checkpoint_path)
     return torch.empty((0, int(feature_dim)), dtype=torch.float64)
 
 def summarize_feature_bank(features: torch.Tensor) -> dict[str, int | torch.Tensor]:
@@ -310,6 +362,7 @@ def build_feature_cache_key(
     reference_dataset: object,
     *,
     checkpoint_path: str | None = None,
+    input_normalization: str = "raw",
 ) -> str:
     resolved_checkpoint = _resolved_checkpoint_path(checkpoint_path)
     checkpoint_signature: dict[str, object]
@@ -329,6 +382,7 @@ def build_feature_cache_key(
     payload = {
         "dataset": _dataset_signature(reference_dataset),
         "checkpoint": checkpoint_signature,
+        "input_normalization": input_normalization,
         "feature_code_sha1": _FEATURE_CODE_SHA1,
     }
     raw = json.dumps(payload, sort_keys=True, default=str)
@@ -402,6 +456,8 @@ def extract_dataset_patch_features(
     *,
     batch_size: int,
     device: str | torch.device,
+    checkpoint_path: str | None = None,
+    input_normalization: str = "raw",
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -420,15 +476,27 @@ def extract_dataset_patch_features(
         target_batch.append(target)
         if len(target_batch) == batch_size:
             volumes = torch.stack(target_batch, dim=0).to(device=device)
-            feature_batches.append(extract_patch_features(volumes).cpu())
+            feature_batches.append(
+                extract_patch_features(
+                    volumes,
+                    checkpoint_path=checkpoint_path,
+                    input_normalization=input_normalization,
+                ).cpu()
+            )
             target_batch.clear()
 
     if target_batch:
         volumes = torch.stack(target_batch, dim=0).to(device=device)
-        feature_batches.append(extract_patch_features(volumes).cpu())
+        feature_batches.append(
+            extract_patch_features(
+                volumes,
+                checkpoint_path=checkpoint_path,
+                input_normalization=input_normalization,
+            ).cpu()
+        )
 
     if not feature_batches:
-        return empty_feature_bank()
+        return empty_feature_bank(checkpoint_path=checkpoint_path)
     return torch.cat(feature_batches, dim=0)
 
 
@@ -601,6 +669,9 @@ def _ms_ssim(reference: torch.Tensor, generated: torch.Tensor) -> float:
 def compute_sample_quality_metrics(
     generated: torch.Tensor | Sequence[float],
     reference: torch.Tensor | Sequence[float],
+    *,
+    checkpoint_path: str | None = None,
+    input_normalization: str = "raw",
 ) -> dict[str, float | int | list[int]]:
     """Compute 3D quality metrics between generated and reference volumes.
 
@@ -614,8 +685,16 @@ def compute_sample_quality_metrics(
     reference_batch = _as_volume_batch(reference)
 
     # ---- feature-space metrics (FID, MMD) via volume features ----
-    generated_features = extract_patch_features(generated_batch)
-    reference_features = extract_patch_features(reference_batch)
+    generated_features = extract_patch_features(
+        generated_batch,
+        checkpoint_path=checkpoint_path,
+        input_normalization=input_normalization,
+    )
+    reference_features = extract_patch_features(
+        reference_batch,
+        checkpoint_path=checkpoint_path,
+        input_normalization=input_normalization,
+    )
     feature_dim = int(generated_features.shape[1])
     gen_feature_count = int(generated_features.shape[0])
     ref_feature_count = int(reference_features.shape[0])

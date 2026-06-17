@@ -1,0 +1,14 @@
+import_config: vic_reg.yaml
+
+framework:
+  params:
+    lr: 0.0000005
+    weight_decay: 0.00001
+    cov_weight: 1.0
+    input_normalization: sample_zscore
+    freeze_encoder_batchnorm: true
+    anchor_weight: 1.0
+
+logging:
+  params:
+    run_name: vic_reg_resnet50_reliable_mild

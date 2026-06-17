@@ -11,3 +11,8 @@ val_dataset:
 train_dataloader:
   params:
     batch_size: 16
+    drop_last: true
+
+val_dataloader:
+  params:
+    drop_last: true

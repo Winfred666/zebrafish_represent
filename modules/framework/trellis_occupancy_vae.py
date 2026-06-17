@@ -75,14 +75,16 @@ class TRELLISOccupancyVAEModule(BaseTrainingFramework):
         """Use deterministic validation reconstructions for FID/MMD on this VAE path."""
         from utils.eval.sample_quality import empty_feature_bank, extract_patch_features
 
+        checkpoint_path = self._sample_quality_checkpoint_path()
+        input_normalization = self._sample_quality_input_normalization()
         val_dataset = self._validation_dataset()
         if val_dataset is None or total_samples <= 0:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         rank, world_size = self._validation_stat_rank_world()
         local_indices = list(range(rank, total_samples, world_size))
         if not local_indices:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         feature_batches: list[Tensor] = []
         batch_size = self._validation_batch_size()
@@ -118,10 +120,16 @@ class TRELLISOccupancyVAEModule(BaseTrainingFramework):
             for recon, spatial_shape in zip(reconstructions, spatial_shapes):
                 depth, height, width = (int(dim) for dim in spatial_shape.tolist())
                 cropped = recon[:, :depth, :height, :width].unsqueeze(0)
-                feature_batches.append(extract_patch_features(cropped).cpu())
+                feature_batches.append(
+                    extract_patch_features(
+                        cropped,
+                        checkpoint_path=checkpoint_path,
+                        input_normalization=input_normalization,
+                    ).cpu()
+                )
 
         if not feature_batches:
-            return empty_feature_bank()
+            return empty_feature_bank(checkpoint_path=checkpoint_path)
         return torch.cat(feature_batches, dim=0)
 
     def get_data_loss(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
