@@ -636,10 +636,14 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         return int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)
 
     def _sample_quality_checkpoint_path(self) -> str | None:
-        return getattr(self.config, "sample_quality_checkpoint_path", None)
+        return getattr(
+            self.config,
+            "sample_quality_checkpoint_path",
+            "result/checkpoints/medicalnet_resnet50_vicreg_reliable_mild.ckpt",
+        )
 
     def _sample_quality_input_normalization(self) -> str:
-        return str(getattr(self.config, "sample_quality_input_normalization", "raw"))
+        return str(getattr(self.config, "sample_quality_input_normalization", "sample_zscore"))
 
     def _should_run_validation_stat_metrics(self) -> bool:
         trainer = getattr(self, "trainer", None)

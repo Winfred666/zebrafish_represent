@@ -242,7 +242,7 @@ def run_postfit_testing(framework_module, trainer, logger,
         samples.detach().cpu(),
         combined_reference,
         checkpoint_path=getattr(framework_module.config, "sample_quality_checkpoint_path", None),
-        input_normalization=str(getattr(framework_module.config, "sample_quality_input_normalization", "raw")),
+        input_normalization=str(getattr(framework_module.config, "sample_quality_input_normalization", "sample_zscore")),
     )
     metrics_to_log.update({
         "sample_fid": float(quality_metrics["fid"]),
