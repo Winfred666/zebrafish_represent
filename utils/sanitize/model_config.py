@@ -227,7 +227,6 @@ class VolDiTParams(IngestibleParams):
     class_dropout_prob: float = Field(default=0.0, ge=0.0)
     num_classes: int = Field(default=0, ge=0)
     learn_sigma: bool = False
-    flash_attention: bool = False
     load_from_ckpt: str | None = None
     strict_load: bool = False
 

@@ -36,6 +36,5 @@ model:
     class_dropout_prob: 0.0
     num_classes: 0
     learn_sigma: false
-    flash_attention: false
     load_from_ckpt: result/checkpoints/voldit_xs_luna_hf.pth
     strict_load: false

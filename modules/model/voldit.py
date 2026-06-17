@@ -44,11 +44,9 @@ class VolDiT(BaseVolumeModel):
         class_dropout_prob: float = 0.0,
         num_classes: int = 0,
         learn_sigma: bool = False,
-        flash_attention: bool = False,
         load_from_ckpt: str | None = None,
         strict_load: bool = False,
     ):
-        del flash_attention
         super().__init__()
         self.learn_sigma = bool(learn_sigma)
         self.in_channels = int(in_channels)
