@@ -7,3 +7,4 @@ stage1_model:
 model:
   params:
     input_size: [8, 64, 8]
+    load_from_ckpt: /tmp/mlflow_checkpoints/voldit_whole_ds00625_ddp3_260617_094959_last.ckpt

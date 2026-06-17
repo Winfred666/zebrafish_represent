@@ -8,7 +8,6 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch import Tensor
 
 import pytorch_lightning as L
@@ -393,6 +392,26 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         batch_size = getattr(val_loader, "batch_size", None)
         return max(1, int(batch_size or 1))
 
+    @staticmethod
+    def _pad_rgb_panel_height(panel: np.ndarray, target_height: int) -> np.ndarray:
+        if panel.ndim != 3:
+            raise ValueError(f"Expected RGB panel shaped (H, W, C), got {panel.shape}")
+        height = int(panel.shape[0])
+        if height == target_height:
+            return panel
+        if height > target_height:
+            start = (height - target_height) // 2
+            end = start + target_height
+            return panel[start:end, :, :]
+        pad_before = (target_height - height) // 2
+        pad_after = target_height - height - pad_before
+        return np.pad(
+            panel,
+            ((pad_before, pad_after), (0, 0), (0, 0)),
+            mode="constant",
+            constant_values=255,
+        )
+
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
         """Denoise, fuse, log MSE + matrix panels."""
@@ -423,7 +442,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
             t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
-            fused_pairs_for_logging: list[tuple[Tensor, Tensor]] = []
+            fused_pairs_for_logging: list[tuple[int, Tensor, Tensor]] = []
             fusion_grid_rows: list[list[np.ndarray]] = []
             detail_panels: list[np.ndarray] = []
             detail_sig_key = sig_key.replace("sig0", "sig", 1)
@@ -478,35 +497,11 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 clean_fused = volume_fuse(clean_subset, fusion_id=fi)
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
 
-                if should_log:
-                    clean_center = center_crop_fusion_volume(
-                        clean_fused[0].detach().float().cpu().numpy(),
-                        (64, 64, 64),
-                    )
-                    denoised_center = center_crop_fusion_volume(
-                        denoised_fused[0].detach().float().cpu().numpy(),
-                        (64, 64, 64),
-                    )
-                    mid_w = clean_center.shape[2] // 2
-                    detail_panels.append(
-                        np.asarray(
-                            Image.fromarray(
-                                fix_2d_scalar(
-                                    clean_center[:, :, mid_w],
-                                    denoised_center[:, :, mid_w],
-                                    colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
-                                    show_residual=False,
-                                    show_colorbar=False,
-                                )
-                            ).resize((128, 128), resample=Image.BILINEAR),
-                            dtype=np.uint8,
-                        )
-                    )
-
                 mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
 
                 if should_log:
-                    fused_pairs_for_logging.append((clean_fused, denoised_fused))
+                    fusion_id = int(clean_subset[0]["fusion_id"])
+                    fused_pairs_for_logging.append((fusion_id, clean_fused, denoised_fused))
 
             if is_rank0:
                 self.log(
@@ -519,8 +514,9 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 )
 
             if fused_pairs_for_logging and should_log:
+                seen_detail_fusion_ids: set[int] = set()
                 scaling_rates: list[float] = []
-                for clean_fused, _ in fused_pairs_for_logging:
+                for _, clean_fused, _ in fused_pairs_for_logging:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     clean_unit = np.clip((c0 + 1.0) * 0.5, 0.0, None)
                     p995 = float(np.quantile(clean_unit, 0.995))
@@ -530,7 +526,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                 max_shape = tuple(
                     max(
                         int(clean_fused[0].shape[axis])
-                        for clean_fused, _ in fused_pairs_for_logging
+                        for _, clean_fused, _ in fused_pairs_for_logging
                     )
                     for axis in range(3)
                 )
@@ -541,7 +537,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     w_indices = np.linspace(0, max_w - 1, self.FUSION_SLICE_NUMBER, dtype=int)
                 fusion_grid_rows = [[] for _ in range(len(w_indices))]
 
-                for clean_fused, denoised_fused in fused_pairs_for_logging:
+                for fusion_id, clean_fused, denoised_fused in fused_pairs_for_logging:
                     c0 = clean_fused[0].detach().float().cpu().numpy()
                     d0 = denoised_fused[0].detach().float().cpu().numpy()
                     c0_vis = np.clip((c0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
@@ -557,6 +553,40 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                             )
                         )
 
+                    if fusion_id in seen_detail_fusion_ids:
+                        continue
+                    seen_detail_fusion_ids.add(fusion_id)
+
+                    clean_center = center_crop_fusion_volume(c0, (64, 64, 64))
+                    denoised_center = center_crop_fusion_volume(d0, (64, 64, 64))
+                    detail_w_count = min(4, int(clean_center.shape[2]))
+                    if detail_w_count > 1 and clean_center.shape[2] > detail_w_count + 1:
+                        detail_w_indices = np.linspace(
+                            0,
+                            clean_center.shape[2] - 1,
+                            detail_w_count + 2,
+                            dtype=int,
+                        )[1:-1]
+                    else:
+                        detail_w_indices = np.linspace(
+                            0,
+                            clean_center.shape[2] - 1,
+                            detail_w_count,
+                            dtype=int,
+                        )
+                    detail_rows = [
+                        fix_2d_scalar(
+                            clean_center[:, :, wi],
+                            denoised_center[:, :, wi],
+                            colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+                            show_residual=False,
+                            show_colorbar=False,
+                        )
+                        for wi in detail_w_indices
+                    ]
+                    if detail_rows:
+                        detail_panels.append(np.vstack(detail_rows))
+
             if should_log:
                 fusion_rows = [np.hstack(row) for row in fusion_grid_rows if row]
                 if fusion_rows:
@@ -568,7 +598,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
                     )
 
                 if detail_panels:
-                    detail_image = np.hstack(detail_panels)
+                    target_height = max(int(panel.shape[0]) for panel in detail_panels)
+                    detail_image = np.hstack(
+                        [self._pad_rgb_panel_height(panel, target_height) for panel in detail_panels]
+                    )
                     log_image_artifact(
                         self.logger,
                         detail_image,

@@ -7,7 +7,7 @@ framework:
     scale_factor: 1.0
     stat_metrics_every_n_epochs: 6
     optimization:
-      learning_rate: 0.0001
+      learning_rate: 0.00004
       weight_decay: 0.01
       adam_beta1: 0.9
       adam_beta2: 0.999
