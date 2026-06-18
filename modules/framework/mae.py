@@ -1,6 +1,6 @@
 """MAE (Masked Autoencoder) fine-tuning framework for 3D feature encoders.
 
-Extends ``BaseTrainingFramework``, replacing the diffusion timestep/noise/denoise
+Extends ``BaseValTrainingFramework``, replacing the diffusion timestep/noise/denoise
 loop with a one-step mask→encode→decode→reconstruct pattern:
 
 - ``_q_sample``: masks the clean volume (ignores *t* and *noise*).
@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from modules.model.perceptual_net import PERCEPTUALNET_FEATURE_DIM
 from utils.sanitize.framework_config import MAEFinetuneModuleParams
 
@@ -117,8 +117,8 @@ class MAEDecoder(nn.Module):
 # MAE Lightning module
 # ---------------------------------------------------------------------------
 
-class MAEFinetuneModule(BaseTrainingFramework):
-    """MAE fine-tuning module — extends BaseTrainingFramework.
+class MAEFinetuneModule(BaseValTrainingFramework):
+    """MAE fine-tuning module — extends BaseValTrainingFramework.
 
     Reuses the base-class ``training_step``, ``validation_step``, and
     ``configure_optimizers``.  Only ``get_data_loss``, ``_q_sample``, and

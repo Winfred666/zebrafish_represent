@@ -1,6 +1,6 @@
 """VQ-VAE Stage 1: full model training with reconstruction + GAN losses.
 
-The module inherits :class:`BaseTrainingFramework` for validation-time
+The module inherits :class:`BaseValTrainingFramework` for validation-time
 reconstruction/fusion logging, while keeping VQ-GAN's manual dual-optimizer
 training loop.
 """
@@ -15,7 +15,7 @@ from torch import Tensor
 from monai.losses import PatchAdversarialLoss
 from monai.networks.nets import PatchDiscriminator
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from modules.framework.vq_vae_common import (
     MONAIPerceptualLoss,
     feature_matching_loss,
@@ -23,14 +23,14 @@ from modules.framework.vq_vae_common import (
 from utils.sanitize.framework_config import VQVAES1ModuleParams
 
 
-class VQVAES1Module(BaseTrainingFramework):
+class VQVAES1Module(BaseValTrainingFramework):
     """Stage 1 VQ-VAE: train encoder + decoder + codebook end-to-end.
 
     Two optimizers: ``opt_ae`` (generator) and ``opt_disc`` (discriminator).
     Alternating updates: even batches train the generator, odd batches train
     the discriminator (after ``discriminator_iter_start`` global steps).
 
-    Reconstruction validation uses the shared BaseTrainingFramework matrix
+    Reconstruction validation uses the shared BaseValTrainingFramework matrix
     slice logger: ``_q_sample`` is identity and ``one_step_sample`` performs
     encode -> quantize -> decode.
     """
@@ -58,7 +58,7 @@ class VQVAES1Module(BaseTrainingFramework):
         self.adversarial_loss = PatchAdversarialLoss(criterion=config.disc_loss_type)
 
     # ------------------------------------------------------------------
-    # BaseTrainingFramework reconstruction hooks
+    # BaseValTrainingFramework reconstruction hooks
     # ------------------------------------------------------------------
 
     @property

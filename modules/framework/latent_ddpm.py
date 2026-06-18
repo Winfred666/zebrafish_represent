@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from utils.sanitize.framework_config import LatentDDPMModuleParams
 
 
@@ -34,8 +34,8 @@ def _build_beta_schedule(
     raise ValueError(f"Unsupported beta_schedule={beta_schedule!r}. Use one of: linear | cosine")
 
 
-class LatentDDPMModule(BaseTrainingFramework):
-    """DDPM objective over frozen stage-1 latents with shared BaseTrainingFramework flows."""
+class LatentDDPMModule(BaseValTrainingFramework):
+    """DDPM objective over frozen stage-1 latents with shared BaseValTrainingFramework flows."""
 
     config: LatentDDPMModuleParams
 

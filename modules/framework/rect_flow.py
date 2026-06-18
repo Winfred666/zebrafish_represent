@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from utils.sanitize.framework_config import RectifiedFlowModuleParams
 
 
@@ -61,7 +61,7 @@ def canonicalize_occupancy_tensor(volume: Tensor, target_size: tuple[int, int, i
     return F.pad(result, padding, mode="constant", value=0.0)
 
 
-class RectifiedFlowModule(BaseTrainingFramework):
+class RectifiedFlowModule(BaseValTrainingFramework):
     """Rectified-flow objective over a 3D volume backbone."""
 
     def __init__(self, config: RectifiedFlowModuleParams):
@@ -183,6 +183,9 @@ class RectifiedFlowModule(BaseTrainingFramework):
         if self._uses_stage1:
             return (1.0 - self.sigma_min) * noise - clean
         return noise - clean
+
+    def _should_log_train_reconstruction_loss(self) -> bool:
+        return not self._uses_stage1
 
     def _rectified_flow_loss(self, target_volume: Tensor) -> Dict[str, Tensor]:
         clean_volume = self._before_make_noisy(target_volume)

@@ -6,11 +6,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from utils.sanitize.framework_config import TRELLISOccupancyVAEModuleParams
 
 
-class TRELLISOccupancyVAEModule(BaseTrainingFramework):
+class TRELLISOccupancyVAEModule(BaseValTrainingFramework):
     """Train a TRELLIS-compatible occupancy VAE on dense binary volumes."""
 
     config: TRELLISOccupancyVAEModuleParams

@@ -7,7 +7,7 @@ import torch
 
 def normalize_feature_input(
     x: torch.Tensor,
-    input_normalization: str = "raw",
+    input_normalization: str = "sample_zscore",
     *,
     eps: float = 1.0e-5,
 ) -> torch.Tensor:

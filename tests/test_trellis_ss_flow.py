@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -200,6 +201,71 @@ class TRELLISSparseStructureFlowTest(unittest.TestCase):
         )
         losses = module.get_data_loss({"target": torch.randn(2, 1, 4, 4, 4)})
         self.assertIn("loss", losses)
+
+    def test_train_reconstruction_probe_skips_step_zero_and_runs_without_grad(self) -> None:
+        module = RectifiedFlowModule(
+            RectifiedFlowModuleParams(
+                model=TinyDenseModel(),
+                total_timesteps=1000,
+                optimization=OptimizationParams(
+                    learning_rate=1.0e-4,
+                    weight_decay=0.0,
+                    loss_type="mse",
+                    sample_steps=4,
+                ),
+                diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+                testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            )
+        )
+        module.log = lambda *args, **kwargs: None
+        observed_grad_flags: list[bool] = []
+
+        def _fake_recon(clean_volume: torch.Tensor, t_val: float) -> torch.Tensor:
+            del clean_volume, t_val
+            observed_grad_flags.append(torch.is_grad_enabled())
+            return torch.tensor(0.0)
+
+        module._compute_reconstruction_loss_at_t = _fake_recon
+        batch = {"target": torch.randn(2, 1, 4, 4, 4)}
+
+        module._trainer = SimpleNamespace(global_step=0)
+        module.training_step(batch, 0)
+        self.assertEqual(observed_grad_flags, [])
+
+        module._trainer = SimpleNamespace(global_step=500)
+        module.training_step(batch, 0)
+        self.assertEqual(observed_grad_flags, [False])
+
+    def test_latent_train_reconstruction_probe_is_disabled(self) -> None:
+        module = RectifiedFlowModule(
+            RectifiedFlowModuleParams(
+                model=TinyLatentFlowModel(),
+                stage1_model=TinyStage1(),
+                sigma_min=0.1,
+                t_schedule_name="uniform",
+                total_timesteps=1000,
+                null_cond_channels=16,
+                optimization=OptimizationParams(
+                    learning_rate=1.0e-4,
+                    weight_decay=0.0,
+                    loss_type="mse",
+                    sample_steps=4,
+                ),
+                diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+                testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            )
+        )
+        module.log = lambda *args, **kwargs: None
+        probe_calls: list[tuple[int, float]] = []
+
+        def _fake_recon(clean_volume: torch.Tensor, t_val: float) -> torch.Tensor:
+            probe_calls.append((clean_volume.shape[0], t_val))
+            return torch.tensor(0.0)
+
+        module._compute_reconstruction_loss_at_t = _fake_recon
+        module._trainer = SimpleNamespace(global_step=500)
+        module.training_step({"target": torch.randn(1, 1, 6, 4, 8)}, 0)
+        self.assertEqual(probe_calls, [])
 
     def test_latent_after_make_clean_returns_probabilities(self) -> None:
         stage1 = TinyStage1()

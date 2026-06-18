@@ -15,11 +15,11 @@ from typing import Dict
 import torch
 from torch import Tensor
 
-from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from utils.sanitize.framework_config import IaNFlowModuleParams
 
 
-class IaNFlowModule(BaseTrainingFramework):
+class IaNFlowModule(BaseValTrainingFramework):
     """IaN DDPM over a PRDiT backbone with joint noise + image prediction."""
 
     def __init__(self, config: IaNFlowModuleParams):
