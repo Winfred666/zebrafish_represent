@@ -23,6 +23,20 @@ def _fusion_crop_key(crop_dict: dict[str, Tensor]) -> tuple[int, tuple[int, int,
     )
 
 
+def _mip_l1_loss(pred: Tensor, gt: Tensor) -> Tensor:
+    if pred.ndim == 5:
+        pred = pred[:, 0]
+    if gt.ndim == 5:
+        gt = gt[:, 0]
+    if pred.ndim != 4 or gt.ndim != 4:
+        raise ValueError(f"Expected tensors shaped (B, D, H, W), got {tuple(pred.shape)} and {tuple(gt.shape)}")
+    return (
+        F.l1_loss(pred.float().max(1)[0], gt.float().max(1)[0])
+        + F.l1_loss(pred.float().max(2)[0], gt.float().max(2)[0])
+        + F.l1_loss(pred.float().max(3)[0], gt.float().max(3)[0])
+    ) / 3.0
+
+
 class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     """Base training framework with validation, fusion logging, and post-fit testing."""
 
@@ -40,8 +54,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         self._fusion_object_pg = None
         self._val_stat_generated_features: torch.Tensor | None = None
         self._val_stat_generated_previews: list[Tensor] | None = None
-        self._val_stat_generated_mse: float | None = None
-        self._val_stat_mse_dataset = None
+        self._val_stat_generated_mip_l1: float | None = None
+        self._val_stat_mip_l1_dataset = None
         self._val_stat_real_cache: dict[str, object] | None = None
 
     def _validation_extra(self, clean: Tensor) -> dict[str, float]:
@@ -527,18 +541,18 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
         checkpoint_path = self._sample_quality_checkpoint_path()
         input_normalization = self._sample_quality_input_normalization()
-        mse_dataset = self._val_stat_mse_dataset
-        mse_enabled = total_samples == 1 and mse_dataset is not None
+        mip_l1_dataset = self._val_stat_mip_l1_dataset
+        mip_l1_enabled = total_samples == 1 and mip_l1_dataset is not None
         if total_samples <= 0:
             self._val_stat_generated_previews = None
-            self._val_stat_generated_mse = None
+            self._val_stat_generated_mip_l1 = None
             return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         rank, world_size = self._validation_stat_rank_world()
         local_indices = list(range(rank, total_samples, world_size))
         if not local_indices:
             self._val_stat_generated_previews = None
-            self._val_stat_generated_mse = None
+            self._val_stat_generated_mip_l1 = None
             return empty_feature_bank(checkpoint_path=checkpoint_path)
 
         feature_batches: list[torch.Tensor] = []
@@ -557,12 +571,12 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             )
             samples = self._make_clean(initial_noise, t_start=1.0)
             self._store_validation_stat_preview(sample_indices, samples, total_samples)
-            if mse_enabled:
-                target = torch.as_tensor(mse_dataset[int(sample_indices[0])]["target"], dtype=torch.float32)
+            if mip_l1_enabled:
+                target = torch.as_tensor(mip_l1_dataset[int(sample_indices[0])]["target"], dtype=torch.float32)
                 if target.ndim == 3:
                     target = target.unsqueeze(0)
                 target = target.unsqueeze(0).to(device=self.device)
-                self._val_stat_generated_mse = float(F.mse_loss(samples.float(), target.float()).item())
+                self._val_stat_generated_mip_l1 = float(_mip_l1_loss(samples, target).item())
             feature_batches.append(
                 extract_standard_patch_features(
                     samples,
@@ -591,7 +605,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             return
 
         preview_payload = self._val_stat_generated_previews or []
-        local_mse = self._val_stat_generated_mse
+        local_mip_l1 = self._val_stat_generated_mip_l1
         try:
             local_features = self._val_stat_generated_features.to(device=self.device)
             generated_features = gather_tensor_rows_to_rank0(local_features)
@@ -599,8 +613,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         finally:
             self._val_stat_generated_features = None
             self._val_stat_generated_previews = None
-            self._val_stat_generated_mse = None
-            self._val_stat_mse_dataset = None
+            self._val_stat_generated_mip_l1 = None
+            self._val_stat_mip_l1_dataset = None
             release_cached_feature_extractor()
 
         rank, _ = self._validation_stat_rank_world()
@@ -624,15 +638,15 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         val_mmd = compute_mmd_from_features(self._val_stat_real_cache["features"], generated_features)
         self.log("val_fid", val_fid, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
         self.log("val_mmd", val_mmd, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
-        if local_mse is not None:
-            self.log("val_mse", local_mse, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
+        if local_mip_l1 is not None:
+            self.log("val_mip_l1", local_mip_l1, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
 
     def on_validation_epoch_start(self) -> None:
         self._apply_ema_shadow()
         self._val_stat_generated_features = None
         self._val_stat_generated_previews = None
-        self._val_stat_generated_mse = None
-        self._val_stat_mse_dataset = None
+        self._val_stat_generated_mip_l1 = None
+        self._val_stat_mip_l1_dataset = None
 
         if not self._should_run_validation_stat_metrics():
             return
@@ -642,7 +656,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             return
 
         self._ensure_real_feature_cache(val_dataset)
-        self._val_stat_mse_dataset = val_dataset if len(val_dataset) == 1 else None
+        self._val_stat_mip_l1_dataset = val_dataset if len(val_dataset) == 1 else None
         self._val_stat_generated_features = self._build_generated_feature_bank(len(val_dataset))
 
     def on_validation_epoch_end(self) -> None:
