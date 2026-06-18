@@ -129,6 +129,7 @@ Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start co
 ## Logging and Environment
 
 - MLflow tracking through Lightning `MLFlowLogger`. Metric and artifact keys use underscore-separated names (`val_loss`), never slash-separated (`val/loss`).
+- On the login node, always use `http://127.0.0.1:5000` for MLflow dashboard/API access. Do not query the MLflow dashboard/API through the remote service address from the login node.
 - `.env` is local-only and must not be committed.
 - Use `uv` (not conda) for dependency management. Run Python via the direct `.venv/bin/python` path (see Python Binary section above).
 - No external attention libraries needed — SDPA is built into PyTorch.

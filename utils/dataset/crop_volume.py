@@ -135,7 +135,7 @@ class CropTifVolumeHotDataset(Dataset):
         self._file_paths = self._select_runtime_files(self._all_file_paths) if discover_files else []
         self.file_count = len(self._file_paths)
         self._selected_file_keys_value = self._build_selected_file_keys()
-        self._cache_key_value = self._build_cache_key(all_files=self._all_file_paths)
+        self._cache_key_value = self._build_cache_key(files=self._file_paths)
 
     def _discover_all_files(self) -> list[Path]:
         files = sorted(
@@ -161,26 +161,24 @@ class CropTifVolumeHotDataset(Dataset):
 
     # ── cache identity ────────────────────────────────────────────
 
-    def _build_cache_key(self, all_files: list[Path] | None = None) -> str:
-        # The cache key intentionally uses the full deterministic file order,
-        # independent of max_files, so cache lookup matches the builder.
-        if all_files is None:
-            all_files = self._discover_all_files()
-        files = []
-        for path in all_files:
+    def _build_cache_key(self, files: list[Path] | None = None) -> str:
+        if files is None:
+            files = self._discover_files()
+        file_entries = []
+        for path in files:
             try:
                 stat = path.stat()
                 rel_path = path.relative_to(self.data_dir).as_posix()
-                files.append({
+                file_entries.append({
                     "path": rel_path,
                     "size": int(stat.st_size),
                     "mtime_ns": int(stat.st_mtime_ns),
                 })
             except OSError:
-                files.append({"path": str(path), "size": None, "mtime_ns": None})
+                file_entries.append({"path": str(path), "size": None, "mtime_ns": None})
         parts = {
             "cache_mode": self.CACHE_MODE,
-            "files": files,
+            "files": file_entries,
             "crop_size": self.crop_size,
             "overlap": self.overlap,
             "scale_factor": self.scale_factor,

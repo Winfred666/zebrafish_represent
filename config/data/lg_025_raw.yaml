@@ -1,9 +1,0 @@
-import_config: lg_025.yaml
-
-train_dataset:
-  params:
-    percentile_cmax: 100.0
-
-val_dataset:
-  params:
-    percentile_cmax: 100.0

@@ -2,7 +2,6 @@ import_config: base.yaml
 
 trainer:
   params:
-    max_epochs: 40
     accelerator: gpu
     devices: 4
     strategy: ddp_find_unused_parameters_false
@@ -38,6 +37,5 @@ logging:
     experiment_name: medical_resnet_ft
     run_name: perceptual_net_resnet50_vicreg_lg025_network_file_gpu04_ddp4_lr1e5_e40
     tags:
-      job_type: train
       stage: perceptual_resnet50_vicreg
       node: gpu04

@@ -211,6 +211,19 @@ class HotCropDatasetTest(unittest.TestCase):
             )
             self.assertEqual(ds_a._crop_cache_dir(), ds_b._crop_cache_dir())
 
+    def test_cache_directory_changes_when_max_files_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "a.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            tifffile.imwrite(data_dir / "b.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            ds_full = CropTifVolumeHotDataset.build_stub(
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir))
+            )
+            ds_subset = CropTifVolumeHotDataset.build_stub(
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, max_files=1))
+            )
+            self.assertNotEqual(ds_full._crop_cache_dir(), ds_subset._crop_cache_dir())
+
     def test_attach_computes_thresholds_per_fusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

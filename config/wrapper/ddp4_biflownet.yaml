@@ -4,5 +4,4 @@ import_config: base.yaml
 trainer:
   params:
     devices: 4
-    accumulate_grad_batches: 1
     precision: "bf16-mixed"

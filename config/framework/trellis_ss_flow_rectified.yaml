@@ -6,11 +6,11 @@ framework:
     stage1_model: runtime.stage1_model
     sigma_min: 1.0e-5
     t_schedule_name: logitNormal
-    t_schedule_mean: 1.0
+    t_schedule_mean: 0.0
     t_schedule_std: 1.0
     total_timesteps: 1000
     null_cond_channels: 1024
-    stat_metrics_every_n_epochs: 0
+    stat_metrics_every_n_epochs: 12
     optimization:
       learning_rate: 0.00002
       weight_decay: 0.0
