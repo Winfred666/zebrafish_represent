@@ -11,6 +11,6 @@ trainer:
 logging:
   params:
     tags:
-      init: voldit_whole_ds00625_last_260617_094959
+      init: voldit_best_epoch053_step004482
       data_geometry: whole_crop_ds0125_or_ds00625
       launch_profile: ddp4_gpu07

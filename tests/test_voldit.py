@@ -79,6 +79,23 @@ class TinySampleFramework(BaseTrainingFramework):
         return float(sigma)
 
 
+class TinyCheckpointVolDiT(VolDiT):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if kwargs.get("load_from_ckpt") is not None:
+            return
+        with torch.no_grad():
+            self.pos_embed.zero_()
+            self.x_embedder.proj.weight.zero_()
+            self.x_embedder.proj.bias.zero_()
+            self.t_embedder.mlp[0].weight.zero_()
+            self.t_embedder.mlp[0].bias.zero_()
+            self.t_embedder.mlp[2].weight.zero_()
+            self.t_embedder.mlp[2].bias.zero_()
+            self.final_layer.linear.weight.zero_()
+            self.final_layer.linear.bias.zero_()
+
+
 class VolDiTIntegrationTest(unittest.TestCase):
     def test_monai_vqgan_forward_and_checkpoint_load(self) -> None:
         model = MONAIVQGAN(
@@ -246,6 +263,50 @@ class VolDiTIntegrationTest(unittest.TestCase):
         y = model(x, t)
         self.assertEqual(tuple(y.shape), tuple(x.shape))
 
+    def test_voldit_load_ckpt_uses_raw_model_weights_by_default(self) -> None:
+        model = TinyCheckpointVolDiT(
+            input_size=(8, 8, 8),
+            patch_size=4,
+            in_channels=8,
+            hidden_size=48,
+            depth=1,
+            num_heads=4,
+        )
+        reference_state = model.state_dict()
+        raw_weight = torch.full_like(reference_state["final_layer.linear.weight"], 1.25)
+        ema_weight = torch.full_like(reference_state["final_layer.linear.weight"], 2.5)
+
+        checkpoint = {
+            "model": {"final_layer.linear.weight": raw_weight},
+            "ema": {"shadow": {"final_layer.linear.weight": ema_weight}},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".ckpt") as handle:
+            torch.save(checkpoint, handle.name)
+
+            raw_loaded = TinyCheckpointVolDiT(
+                input_size=(8, 8, 8),
+                patch_size=4,
+                in_channels=8,
+                hidden_size=48,
+                depth=1,
+                num_heads=4,
+                load_from_ckpt=handle.name,
+            )
+            ema_loaded = TinyCheckpointVolDiT(
+                input_size=(8, 8, 8),
+                patch_size=4,
+                in_channels=8,
+                hidden_size=48,
+                depth=1,
+                num_heads=4,
+                load_from_ckpt=handle.name,
+                load_ema_shadow=True,
+            )
+
+        self.assertTrue(torch.equal(raw_loaded.final_layer.linear.weight, raw_weight))
+        self.assertTrue(torch.equal(ema_loaded.final_layer.linear.weight, ema_weight))
+
     def test_latent_ddpm_loss(self) -> None:
         params = LatentDDPMModuleParams(
             model=TinyLatentModel(),
@@ -364,6 +425,25 @@ class VolDiTIntegrationTest(unittest.TestCase):
         self.assertTrue(torch.equal(sampled, predicted))
         self.assertEqual(tuple(predicted.shape), (2, 1, 8, 8, 8))
 
+    def test_latent_ddpm_default_training_schedule_matches_voldit_reference(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=300,
+            ),
+            diffusion=DDPMDiffusionParams(
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        self.assertEqual(module.num_train_timesteps, 300)
+        self.assertEqual(int(module.betas.shape[0]), 300)
+
     def test_latent_ddpm_get_t_from_sigma_uses_schedule_lookup(self) -> None:
         params = LatentDDPMModuleParams(
             model=TinyLatentModel(),
@@ -375,13 +455,62 @@ class VolDiTIntegrationTest(unittest.TestCase):
                 sample_steps=5,
             ),
             diffusion=DDPMDiffusionParams(
+                num_train_timesteps=5,
                 beta_schedule="linear",
                 prediction_type="epsilon",
             ),
         )
         module = LatentDDPMModule(params)
         sigma = float(module.sqrt_one_minus_alphas_cumprod[2].item())
-        self.assertAlmostEqual(module.get_t_from_sigma(sigma), 0.5, places=6)
+        self.assertAlmostEqual(module.get_t_from_sigma(sigma), 0.6, places=6)
+
+    def test_latent_ddpm_make_clean_runs_discrete_reverse_path_through_t0(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=5,
+            ),
+            diffusion=DDPMDiffusionParams(
+                num_train_timesteps=5,
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        timesteps: list[int] = []
+
+        def capture_step(noisy: torch.Tensor, timestep: int) -> torch.Tensor:
+            timesteps.append(int(timestep))
+            return noisy
+
+        with patch.object(module, "_ddpm_step", side_effect=capture_step):
+            with patch.object(module, "_after_make_clean", side_effect=lambda x: x):
+                module._make_clean(torch.zeros(1, 8, 4, 4, 4), t_start=0.5)
+
+        self.assertEqual(timesteps, [2, 1, 0])
+
+    def test_latent_ddpm_inference_steps_respace_training_schedule(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=4,
+            ),
+            diffusion=DDPMDiffusionParams(
+                num_train_timesteps=8,
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        self.assertTrue(torch.equal(module._inference_timesteps().cpu(), torch.tensor([6, 4, 2, 0])))
 
     def test_ian_get_t_from_sigma_inverts_cosine_sigma(self) -> None:
         params = IaNFlowModuleParams(

@@ -46,6 +46,7 @@ class VolDiT(BaseVolumeModel):
         learn_sigma: bool = False,
         load_from_ckpt: str | None = None,
         strict_load: bool = False,
+        load_ema_shadow: bool = False,
     ):
         super().__init__()
         self.learn_sigma = bool(learn_sigma)
@@ -54,6 +55,7 @@ class VolDiT(BaseVolumeModel):
         self.input_size = tuple(int(value) for value in input_size)
         self.patch_size = int(patch_size)
         self.hidden_size = int(hidden_size)
+        self.load_ema_shadow = bool(load_ema_shadow)
 
         if any(size % self.patch_size != 0 for size in self.input_size):
             raise ValueError(
@@ -79,7 +81,7 @@ class VolDiT(BaseVolumeModel):
 
         self.initialize_weights()
         if load_from_ckpt:
-            self.load_ckpt(load_from_ckpt, strict=strict_load)
+            self.load_ckpt(load_from_ckpt, strict=strict_load, load_ema_shadow=self.load_ema_shadow)
 
     def initialize_weights(self) -> None:
         def _init(module: nn.Module) -> None:
@@ -144,10 +146,17 @@ class VolDiT(BaseVolumeModel):
             tokens = block(tokens, condition, control=None)
         return self.unpatchify(self.final_layer(tokens, condition))
 
-    def load_ckpt(self, ckpt_path: str | Path, *, strict: bool = False) -> None:
+    def load_ckpt(
+        self,
+        ckpt_path: str | Path,
+        *,
+        strict: bool = False,
+        load_ema_shadow: bool = False,
+    ) -> None:
         raw = load_raw_checkpoint(ckpt_path)
         state_dict = extract_checkpoint_state_dict(raw)
-        state_dict = merge_ema_shadow_weights(state_dict, raw)
+        if load_ema_shadow:
+            state_dict = merge_ema_shadow_weights(state_dict, raw)
         normalized = strip_state_dict_prefixes(state_dict, prefixes=("module.", "model."))
 
         if not strict:

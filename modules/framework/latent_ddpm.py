@@ -43,14 +43,19 @@ class LatentDDPMModule(BaseValTrainingFramework):
         super().__init__(config)
         self.stage1_model = config.stage1_model
         self.scale_factor = float(config.scale_factor)
+        self.num_train_timesteps = int(config.diffusion.num_train_timesteps)
 
         if self.stage1_model is None:
             raise ValueError("LatentDDPMModule requires stage1_model.")
+        if bool(getattr(self.model, "learn_sigma", False)):
+            raise NotImplementedError(
+                "LatentDDPMModule currently requires model.learn_sigma=False."
+            )
         self.stage1_model.eval()
         self.stage1_model.requires_grad_(False)
 
         betas = _build_beta_schedule(
-            num_train_timesteps=self.optimization.sample_steps,
+            num_train_timesteps=self.num_train_timesteps,
             beta_schedule=config.diffusion.beta_schedule,
             beta_start=config.diffusion.beta_start,
             beta_end=config.diffusion.beta_end,
@@ -71,6 +76,20 @@ class LatentDDPMModule(BaseValTrainingFramework):
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
         self.register_buffer("sqrt_recip_alphas", torch.sqrt(1.0 / alphas))
         self.register_buffer("posterior_variance", posterior_variance.clamp(min=1e-20))
+
+    def _inference_timesteps(self, steps: int | None = None) -> Tensor:
+        n_steps = self._resolve_sample_steps(steps)
+        if n_steps >= self.num_train_timesteps:
+            return torch.arange(
+                self.num_train_timesteps - 1,
+                -1,
+                -1,
+                device=self.device,
+                dtype=torch.long,
+            )
+        step_ratio = max(1, self.num_train_timesteps // n_steps)
+        timesteps = torch.arange(0, n_steps, device=self.device, dtype=torch.long) * step_ratio
+        return timesteps.flip(0)
 
     def configure_gradient_clipping(
         self,
@@ -96,9 +115,11 @@ class LatentDDPMModule(BaseValTrainingFramework):
         return gathered
 
     def _normalized_t_to_timestep(self, t: float) -> int:
-        total_steps = self.optimization.sample_steps
-        scaled = math.ceil(float(min(max(t, 0.0), 1.0)) * float(total_steps)) - 1
-        return max(0, min(total_steps - 1, int(scaled)))
+        inference_timesteps = self._inference_timesteps()
+        total_steps = int(inference_timesteps.shape[0])
+        remaining = max(1, math.ceil(float(min(max(t, 0.0), 1.0)) * float(total_steps)))
+        idx = max(0, min(total_steps - 1, total_steps - int(remaining)))
+        return int(inference_timesteps[idx].item())
 
     def get_t_from_sigma(self, sigma: float) -> float:
         sigma_value = float(min(max(sigma, 0.0), 1.0))
@@ -118,7 +139,7 @@ class LatentDDPMModule(BaseValTrainingFramework):
                 timestep = lower_idx
             else:
                 timestep = upper_idx
-        return float(timestep + 1) / float(max(1, self.optimization.sample_steps))
+        return float(timestep + 1) / float(max(1, self.num_train_timesteps))
 
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
         self.stage1_model.eval()
@@ -145,7 +166,7 @@ class LatentDDPMModule(BaseValTrainingFramework):
         batch_size = clean_latents.shape[0]
         timesteps = torch.randint(
             0,
-            self.optimization.sample_steps,
+            self.num_train_timesteps,
             (batch_size,),
             device=clean_latents.device,
             dtype=torch.long,
@@ -159,7 +180,7 @@ class LatentDDPMModule(BaseValTrainingFramework):
 
     def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
         if t.dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
-            total_steps = self.optimization.sample_steps
+            total_steps = self.num_train_timesteps
             t = torch.ceil(t.clamp(0.0, 1.0) * total_steps).long().sub(1).clamp(0, total_steps - 1)
         alpha = self._extract(self.sqrt_alphas_cumprod, t, clean.ndim)
         sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, t, clean.ndim)
@@ -222,6 +243,21 @@ class LatentDDPMModule(BaseValTrainingFramework):
             posterior_variance = self._extract(self.posterior_variance, t_tensor, noisy.ndim)
             return model_mean + torch.sqrt(posterior_variance) * torch.randn_like(noisy)
         return model_mean
+
+    @torch.no_grad()
+    def _reverse_process(self, state: Tensor, *, t_start: float, steps: int | None = None) -> Tensor:
+        n_steps = self._resolve_sample_steps(steps)
+        if t_start <= 0.0:
+            return state
+
+        inference_timesteps = self._inference_timesteps(steps)
+        remaining = max(1, math.ceil(float(min(max(t_start, 0.0), 1.0)) * float(n_steps)))
+        start_idx = max(0, min(n_steps - 1, n_steps - int(remaining)))
+
+        current = state
+        for timestep in inference_timesteps[start_idx:]:
+            current = self._ddpm_step(current, int(timestep.item()))
+        return current
 
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         del step_size

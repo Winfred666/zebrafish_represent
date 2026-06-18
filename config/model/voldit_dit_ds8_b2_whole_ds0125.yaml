@@ -5,3 +5,4 @@ model:
     input_size: [16, 128, 16]
     load_from_ckpt: /tmp/mlflow_checkpoints/epoch053-step004482.ckpt
     strict_load: false
+    load_ema_shadow: false

@@ -49,8 +49,9 @@ class BaseFrameworkParams(IngestibleParams):
 
 
 class DDPMDiffusionParams(CommonDiffusionParams):
-    """DDPM diffusion schedule params (total steps from optimization.sample_steps)."""
+    """DDPM diffusion schedule params."""
 
+    num_train_timesteps: int = Field(default=300, ge=1)
     beta_schedule: Literal["linear", "cosine"] = "linear"
     beta_start: float = Field(default=1e-4, gt=0.0)
     beta_end: float = Field(default=2e-2, gt=0.0)
@@ -81,6 +82,8 @@ class LatentDDPMModuleParams(BaseFrameworkParams):
     stage1_model: object = None
     diffusion: DDPMDiffusionParams
     scale_factor: float = Field(default=1.0, gt=0.0)
+    use_ema: bool = True
+    ema_decay: float = Field(default=0.9999, gt=0.0, lt=1.0)
 
 
 class IaNDiffusionParams(CommonDiffusionParams):

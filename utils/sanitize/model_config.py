@@ -230,6 +230,7 @@ class VolDiTParams(IngestibleParams):
     learn_sigma: bool = False
     load_from_ckpt: str | None = None
     strict_load: bool = False
+    load_ema_shadow: bool = False
 
     @model_validator(mode="after")
     def _validate_patch_grid(self) -> "VolDiTParams":
