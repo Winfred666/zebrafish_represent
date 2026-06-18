@@ -26,7 +26,9 @@ _FEATURE_EXTRACTOR = None
 _FEATURE_EXTRACTOR_KEY = None
 _FEATURE_CODE_SHA1 = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
 PATCH_SIZE = 128
-_DEFAULT_MEDICALNET_RESNET50 = (
+STANDARD_FEATURE_BANK_ROWS = 1534
+DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION = "sample_zscore"
+DEFAULT_SAMPLE_QUALITY_CHECKPOINT_PATH = (
     Path(__file__).resolve().parents[2]
     / "result"
     / "checkpoints"
@@ -56,7 +58,7 @@ def _resolved_metric_backbone_spec(
         backbone_name = _infer_backbone_name_from_path(resolved)
         return resolved, backbone_name, _feature_dim_for_backbone(backbone_name)
 
-    resolved = _DEFAULT_MEDICALNET_RESNET50.resolve()
+    resolved = DEFAULT_SAMPLE_QUALITY_CHECKPOINT_PATH.resolve()
     if not resolved.exists():
         raise FileNotFoundError(f"FID/MMD MedicalNet checkpoint not found: {resolved}")
     return resolved, "resnet50", _feature_dim_for_backbone("resnet50")
@@ -66,7 +68,7 @@ def _prepare_feature_input(
     volumes: torch.Tensor,
     *,
     device: str,
-    input_normalization: str = "raw",
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> torch.Tensor:
     x = volumes.to(dtype=torch.float32, device=device)
     if x.ndim == 4:
@@ -85,7 +87,7 @@ class _FeatureExtractor:
         self,
         device: str = "cuda",
         checkpoint_path: str | None = None,
-        input_normalization: str = "raw",
+        input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
     ):
         resolved_checkpoint, backbone_name, feature_dim = _resolved_metric_backbone_spec(checkpoint_path)
         self.checkpoint_path = resolved_checkpoint
@@ -124,7 +126,7 @@ class _FeatureExtractor:
 
 def _get_feature_extractor(device: str = "cuda",
                            checkpoint_path: str | None = None,
-                           input_normalization: str = "raw") -> _FeatureExtractor:
+                           input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION) -> _FeatureExtractor:
     global _FEATURE_EXTRACTOR, _FEATURE_EXTRACTOR_KEY
     resolved_checkpoint, backbone_name, _ = _resolved_metric_backbone_spec(checkpoint_path)
     extractor_key = (str(device), str(resolved_checkpoint), backbone_name, input_normalization)
@@ -198,7 +200,7 @@ def extract_patch_features(
     volumes: torch.Tensor,
     *,
     checkpoint_path: str | None = None,
-    input_normalization: str = "raw",
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> torch.Tensor:
     """Return one MedicalNet feature vector per input volume."""
     return _get_feature_extractor(
@@ -206,6 +208,70 @@ def extract_patch_features(
         checkpoint_path=checkpoint_path,
         input_normalization=input_normalization,
     )(volumes)
+
+
+def _axis_starts(size: int, patch_size: int = PATCH_SIZE) -> list[int]:
+    if size <= patch_size:
+        return [0]
+    stride = max(1, patch_size // 8)
+    starts = list(range(0, size - patch_size + 1, stride))
+    last = size - patch_size
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def _iter_standard_feature_views(volumes: torch.Tensor) -> Iterable[torch.Tensor]:
+    x = volumes
+    if x.ndim == 4:
+        x = x.unsqueeze(1)
+    if x.ndim != 5:
+        raise ValueError(f"Expected volumes shaped (N, C, D, H, W), got {tuple(x.shape)}")
+
+    _, _, depth, height, width = x.shape
+    for d_start in _axis_starts(int(depth)):
+        d_end = min(d_start + PATCH_SIZE, int(depth))
+        for h_start in _axis_starts(int(height)):
+            h_end = min(h_start + PATCH_SIZE, int(height))
+            for w_start in _axis_starts(int(width)):
+                w_end = min(w_start + PATCH_SIZE, int(width))
+                yield x[:, :, d_start:d_end, h_start:h_end, w_start:w_end]
+
+
+def extract_standard_patch_features(
+    volumes: torch.Tensor,
+    *,
+    checkpoint_path: str | None = None,
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
+) -> torch.Tensor:
+    feature_batches = [
+        extract_patch_features(
+            view,
+            checkpoint_path=checkpoint_path,
+            input_normalization=input_normalization,
+        )
+        for view in _iter_standard_feature_views(volumes)
+    ]
+    if not feature_batches:
+        return empty_feature_bank(checkpoint_path=checkpoint_path)
+    return torch.cat(feature_batches, dim=0)
+
+
+def standardize_feature_bank_rows(
+    features: torch.Tensor,
+    *,
+    target_rows: int = STANDARD_FEATURE_BANK_ROWS,
+) -> torch.Tensor:
+    feature_bank = torch.as_tensor(features, dtype=torch.float64, device="cpu")
+    if feature_bank.ndim != 2:
+        raise ValueError(f"Expected feature bank shaped (N, D), got {tuple(feature_bank.shape)}")
+    if feature_bank.shape[0] == 0 or feature_bank.shape[0] == target_rows:
+        return feature_bank
+    if feature_bank.shape[0] > target_rows:
+        return feature_bank[:target_rows]
+
+    repeat_count = (target_rows + feature_bank.shape[0] - 1) // feature_bank.shape[0]
+    return feature_bank.repeat((repeat_count, 1))[:target_rows]
 
 
 def empty_feature_bank(
@@ -362,7 +428,7 @@ def build_feature_cache_key(
     reference_dataset: object,
     *,
     checkpoint_path: str | None = None,
-    input_normalization: str = "raw",
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> str:
     resolved_checkpoint = _resolved_checkpoint_path(checkpoint_path)
     checkpoint_signature: dict[str, object]
@@ -457,7 +523,7 @@ def extract_dataset_patch_features(
     batch_size: int,
     device: str | torch.device,
     checkpoint_path: str | None = None,
-    input_normalization: str = "raw",
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -477,7 +543,7 @@ def extract_dataset_patch_features(
         if len(target_batch) == batch_size:
             volumes = torch.stack(target_batch, dim=0).to(device=device)
             feature_batches.append(
-                extract_patch_features(
+                extract_standard_patch_features(
                     volumes,
                     checkpoint_path=checkpoint_path,
                     input_normalization=input_normalization,
@@ -488,7 +554,7 @@ def extract_dataset_patch_features(
     if target_batch:
         volumes = torch.stack(target_batch, dim=0).to(device=device)
         feature_batches.append(
-            extract_patch_features(
+            extract_standard_patch_features(
                 volumes,
                 checkpoint_path=checkpoint_path,
                 input_normalization=input_normalization,
@@ -671,7 +737,7 @@ def compute_sample_quality_metrics(
     reference: torch.Tensor | Sequence[float],
     *,
     checkpoint_path: str | None = None,
-    input_normalization: str = "raw",
+    input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> dict[str, float | int | list[int]]:
     """Compute 3D quality metrics between generated and reference volumes.
 
@@ -685,16 +751,18 @@ def compute_sample_quality_metrics(
     reference_batch = _as_volume_batch(reference)
 
     # ---- feature-space metrics (FID, MMD) via volume features ----
-    generated_features = extract_patch_features(
+    generated_features = extract_standard_patch_features(
         generated_batch,
         checkpoint_path=checkpoint_path,
         input_normalization=input_normalization,
     )
-    reference_features = extract_patch_features(
+    reference_features = extract_standard_patch_features(
         reference_batch,
         checkpoint_path=checkpoint_path,
         input_normalization=input_normalization,
     )
+    generated_features = standardize_feature_bank_rows(generated_features)
+    reference_features = standardize_feature_bank_rows(reference_features)
     feature_dim = int(generated_features.shape[1])
     gen_feature_count = int(generated_features.shape[0])
     ref_feature_count = int(reference_features.shape[0])

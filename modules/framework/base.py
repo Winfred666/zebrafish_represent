@@ -672,6 +672,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             gather_tensor_rows_to_rank0,
             load_feature_cache,
             save_feature_cache,
+            standardize_feature_bank_rows,
         )
 
         checkpoint_path = self._sample_quality_checkpoint_path()
@@ -720,11 +721,12 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if rank != 0 or gathered is None:
             return
 
+        gathered = standardize_feature_bank_rows(gathered)
         self._val_stat_real_cache = save_feature_cache(cache_file, cache_key, gathered)
 
     @torch.no_grad()
     def _build_generated_feature_bank(self, total_samples: int) -> torch.Tensor:
-        from utils.eval.sample_quality import empty_feature_bank, extract_patch_features
+        from utils.eval.sample_quality import empty_feature_bank, extract_standard_patch_features
 
         checkpoint_path = self._sample_quality_checkpoint_path()
         input_normalization = self._sample_quality_input_normalization()
@@ -752,7 +754,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             )
             samples = self._make_clean(initial_noise, t_start=1.0)
             feature_batches.append(
-                extract_patch_features(
+                extract_standard_patch_features(
                     samples,
                     checkpoint_path=checkpoint_path,
                     input_normalization=input_normalization,
@@ -771,6 +773,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             gather_tensor_rows_to_rank0,
             release_cached_feature_extractor,
             summarize_feature_bank,
+            standardize_feature_bank_rows,
         )
 
         if self._val_stat_generated_features is None:
@@ -787,6 +790,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         if rank != 0 or generated_features is None or self._val_stat_real_cache is None:
             return
 
+        generated_features = standardize_feature_bank_rows(generated_features)
         generated_stats = summarize_feature_bank(generated_features)
         val_fid = compute_fid_from_feature_stats(self._val_stat_real_cache["stats"], generated_stats)
         val_mmd = compute_mmd_from_features(self._val_stat_real_cache["features"], generated_features)
