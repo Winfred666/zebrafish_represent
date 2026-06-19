@@ -35,7 +35,7 @@ class BuildHotCacheTest(unittest.TestCase):
                 "crop_size": (2, 2, 2),
                 "scale_factor": (1.0, 1.0, 1.0),
                 "normalize": True,
-                "percentile_cmax": 99.9,
+                "percentile_clim": (0.0, 99.9),
                 "overlap": (0.0, 0.0, 0.0),
                 "in_channels": 1,
                 "cache_root": str(data_dir / "cache_root"),

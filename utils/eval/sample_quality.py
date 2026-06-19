@@ -537,7 +537,7 @@ def _dataset_signature(reference_dataset: object) -> dict[str, object]:
         "patch_grid_multiple",
         "pad_to_multiple",
         "normalize",
-        "percentile_cmax",
+        "percentile_clim",
         "file_count",
     ):
         if hasattr(reference_dataset, attr_name):

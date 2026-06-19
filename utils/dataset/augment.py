@@ -15,17 +15,17 @@ from torch import Tensor
 # individual transforms
 # ---------------------------------------------------------------------------
 
-def clip_to_percentile_cmax(x: Tensor, threshold_01: float | Tensor) -> Tensor:
-    """Scale a [-1, 1] tensor so the cached fusion percentile maps to 1.
-
-    The cached crop tensor is first converted to [0, 1], divided by the
-    precomputed fusion threshold, clipped to [0, 1], then rescaled to [-1, 1].
-    """
-    x_01 = torch.clamp((x + 1.0) * 0.5, 0.0, 1.0)
-    threshold = torch.as_tensor(threshold_01, dtype=x_01.dtype, device=x_01.device)
-    threshold = threshold.clamp(min=torch.finfo(x_01.dtype).eps, max=1.0)
-    clipped = torch.clamp(x_01 / threshold, 0.0, 1.0)
-    return clipped * 2.0 - 1.0
+def clip_to_percentile(
+    x: Tensor,
+    threshold_min: float | Tensor,
+    threshold_max: float | Tensor,
+) -> Tensor:
+    """Clamp a tensor to raw cached percentile limits and remap to [-1, 1]."""
+    cmin = torch.as_tensor(threshold_min, dtype=x.dtype, device=x.device)
+    cmax = torch.as_tensor(threshold_max, dtype=x.dtype, device=x.device)
+    span = (cmax - cmin).clamp_min(torch.finfo(x.dtype).eps)
+    clipped = torch.minimum(torch.maximum(x, cmin), cmax)
+    return (clipped - cmin) / span * 2.0 - 1.0
 
 def random_flip(x: Tensor, p: float = 0.5) -> Tensor:
     """Random flip along each spatial axis independently with probability *p*."""

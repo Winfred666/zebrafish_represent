@@ -22,7 +22,7 @@ from typing import Dict, Iterator
 import torch
 from torch.utils.data import Dataset
 
-from utils.dataset.augment import clip_to_percentile_cmax
+from utils.dataset.augment import clip_to_percentile
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
 _CROP_STORAGE_DTYPE = torch.float32
@@ -81,7 +81,7 @@ class CropTifVolumeHotDataset(Dataset):
     ) -> None:
         self.config = config
         self.normalize = bool(config.normalize)
-        self.percentile_cmax = float(config.percentile_cmax)
+        self.percentile_clim = tuple(float(v) for v in config.percentile_clim)
         self.in_channels = int(config.in_channels)
         self.crop_size = config.crop_size
         self.overlap = (
@@ -119,7 +119,7 @@ class CropTifVolumeHotDataset(Dataset):
         self._crop_storage = torch.empty(0, dtype=_CROP_STORAGE_DTYPE)
         self._starts_storage = torch.empty((0, 3), dtype=_INDEX_STORAGE_DTYPE)
         self._full_sizes_storage = torch.empty((0, 4), dtype=_INDEX_STORAGE_DTYPE)
-        self._fusion_thresholds_01: list[float] = []
+        self._fusion_thresholds: list[tuple[float, float]] = []
 
     @classmethod
     def build_stub(cls, config: CropTifVolumeHotDatasetParams) -> "CropTifVolumeHotDataset":
@@ -188,7 +188,7 @@ class CropTifVolumeHotDataset(Dataset):
             "normalize": self.normalize,
             # Intensity clipping happens lazily in __getitem__ and must not
             # affect the binary cache identity.
-            # "percentile_cmax": self.percentile_cmax,
+            # "percentile_clim": self.percentile_clim,
         }
         raw = json.dumps(parts, sort_keys=True, default=str)
         return hashlib.md5(raw.encode()).hexdigest()[:12]
@@ -366,27 +366,48 @@ class CropTifVolumeHotDataset(Dataset):
             size=self.file_count * 4,
             dtype=_INDEX_STORAGE_DTYPE,
         ).view(self.file_count, 4)
-        self._fusion_thresholds_01 = self._compute_fusion_thresholds()
+        self._fusion_thresholds = self._compute_fusion_thresholds()
 
         if enable_warmup:
             self._warm_cache_once()
 
-    def _compute_fusion_thresholds(self) -> list[float]:
+    def _compute_fusion_thresholds(self) -> list[tuple[float, float]]:
         if not self.normalize:
-            return [1.0 for _ in self._volume_entries]
-        if self.percentile_cmax >= 100.0:
-            return [1.0 for _ in self._volume_entries]
+            return [(0.0, 1.0) for _ in self._volume_entries]
 
-        q = self.percentile_cmax / 100.0
-        thresholds: list[float] = []
-        for entry in self._volume_entries:
-            block = self._crop_storage.narrow(
-                0,
-                entry.crop_offset,
-                entry.crop_count * entry.crop_numel,
+        q_min, q_max = (percentile / 100.0 for percentile in self.percentile_clim)
+        thresholds: list[tuple[float, float]] = []
+        for vol_idx, entry in enumerate(self._volume_entries):
+            _, full_d, full_h, full_w = (
+                int(dim) for dim in self._full_sizes_storage[vol_idx].tolist()
             )
-            block_01 = torch.clamp((block + 1.0) * 0.5, 0.0, 1.0)
-            thresholds.append(float(torch.quantile(block_01, q).item()))
+            valid_chunks: list[torch.Tensor] = []
+            for local_idx in range(entry.crop_count):
+                crop_start = entry.crop_offset + local_idx * entry.crop_numel
+                crop = self._crop_storage.narrow(
+                    0, crop_start, entry.crop_numel
+                ).view(entry.crop_shape)
+                start_d, start_h, start_w = (
+                    int(v) for v in self._starts_storage[entry.starts_offset + local_idx].tolist()
+                )
+                _, crop_d, crop_h, crop_w = entry.crop_shape
+                valid_d = min(start_d + crop_d, full_d) - start_d
+                valid_h = min(start_h + crop_h, full_h) - start_h
+                valid_w = min(start_w + crop_w, full_w) - start_w
+                if valid_d <= 0 or valid_h <= 0 or valid_w <= 0:
+                    continue
+                valid_chunks.append(
+                    crop[:, :valid_d, :valid_h, :valid_w].reshape(-1)
+                )
+            if not valid_chunks:
+                raise ValueError(
+                    f"No valid original voxels found for fusion_id={entry.fusion_id}"
+                )
+            block = torch.cat(valid_chunks)
+            thresholds.append((
+                float(torch.quantile(block, q_min).item()),
+                float(torch.quantile(block, q_max).item()),
+            ))
         return thresholds
 
     def _warm_cache_once(self, chunk_bytes: int = 64 * 1024 * 1024) -> None:
@@ -439,7 +460,8 @@ class CropTifVolumeHotDataset(Dataset):
         crop = self._crop_storage.narrow(0, crop_start, entry.crop_numel).view(entry.crop_shape)
         start = self._starts_storage[entry.starts_offset + local_idx]
         if self.normalize:
-            target = clip_to_percentile_cmax(crop, self._fusion_thresholds_01[vol_idx])
+            threshold_min, threshold_max = self._fusion_thresholds[vol_idx]
+            target = clip_to_percentile(crop, threshold_min, threshold_max)
         else:
             target = crop.clone()
 
@@ -466,6 +488,6 @@ class CropTifVolumeHotDataset(Dataset):
             self._crop_storage = torch.empty(0, dtype=_CROP_STORAGE_DTYPE)
             self._starts_storage = torch.empty((0, 3), dtype=_INDEX_STORAGE_DTYPE)
             self._full_sizes_storage = torch.empty((0, 4), dtype=_INDEX_STORAGE_DTYPE)
-            self._fusion_thresholds_01 = []
+            self._fusion_thresholds = []
             return
         self._attach_cache(enable_warmup=False)

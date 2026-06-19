@@ -17,7 +17,7 @@ class CropTifVolumeHotDatasetParams(IngestibleParams):
     max_files: int | None = None
     scale_factor: tuple[float, float, float] = (0.5, 0.5, 0.5)
     normalize: bool = True
-    percentile_cmax: float = 100.0
+    percentile_clim: tuple[float, float] = (0.0, 100.0)
     overlap: tuple[float, float, float] = (0.0, 0.0, 0.0)
     in_channels: int = Field(default=1, ge=1)
     pad_to_multiple: tuple[int, int, int] | None = None
@@ -48,13 +48,13 @@ class CropTifVolumeHotDatasetParams(IngestibleParams):
             raise ValueError("scale_factor values must be > 0")
         return tuple(float(c) for c in value)
 
-    @field_validator("percentile_cmax")
+    @field_validator("percentile_clim")
     @classmethod
-    def _validate_percentile_cmax(cls, value: float) -> float:
-        percentile = float(value)
-        if not (0.0 < percentile <= 100.0):
-            raise ValueError("percentile_cmax must satisfy 0 < percentile_cmax <= 100")
-        return percentile
+    def _validate_percentile_clim(cls, value: tuple[float, float]) -> tuple[float, float]:
+        cmin, cmax = float(value[0]), float(value[1])
+        if not (0.0 <= cmin < cmax <= 100.0):
+            raise ValueError("percentile_clim must satisfy 0 <= cmin < cmax <= 100")
+        return (cmin, cmax)
 
     @field_validator("overlap")
     @classmethod

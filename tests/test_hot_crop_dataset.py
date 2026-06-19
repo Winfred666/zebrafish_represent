@@ -11,7 +11,7 @@ import tifffile
 import torch
 from torch.utils.data import DataLoader
 
-from utils.dataset.augment import clip_to_percentile_cmax
+from utils.dataset.augment import clip_to_percentile
 from utils.dataset.crop_volume import CropTifVolumeHotDataset
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
@@ -93,7 +93,7 @@ class HotCropDatasetTest(unittest.TestCase):
             "crop_size": (2, 2, 2),
             "scale_factor": (1.0, 1.0, 1.0),
             "normalize": True,
-            "percentile_cmax": 100.0,
+            "percentile_clim": (0.0, 100.0),
             "overlap": (0.0, 0.0, 0.0),
             "in_channels": 1,
             "cache_root": str(data_dir / "cache_root"),
@@ -197,17 +197,17 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(dataset.overlap, (0.25, 0.25, 0.25))
             self.assertEqual(dataset.in_channels, 1)
             self.assertTrue(dataset.normalize)
-            self.assertEqual(dataset.percentile_cmax, 100.0)
+            self.assertEqual(dataset.percentile_clim, (0.0, 100.0))
 
     def test_cache_directory_unchanged_when_only_percentile_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
             ds_a = CropTifVolumeHotDataset.build_stub(
-                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_cmax=95.0))
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_clim=(0.0, 95.0)))
             )
             ds_b = CropTifVolumeHotDataset.build_stub(
-                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_cmax=99.9))
+                CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir, percentile_clim=(5.0, 99.9)))
             )
             self.assertEqual(ds_a._crop_cache_dir(), ds_b._crop_cache_dir())
 
@@ -239,16 +239,48 @@ class HotCropDatasetTest(unittest.TestCase):
                     "starts": [(0, 0, 0), (0, 2, 0)],
                 },
             ]
-            dataset = self._make_dataset(data_dir, volume_specs=volume_specs, percentile_cmax=75.0)
+            dataset = self._make_dataset(data_dir, volume_specs=volume_specs, percentile_clim=(25.0, 75.0))
 
             expected = []
             for spec in volume_specs:
                 crops = torch.from_numpy(np.asarray(spec["crops"], dtype=np.float32))
-                crop_block = torch.clamp((crops + 1.0) * 0.5, 0.0, 1.0).reshape(-1)
-                expected.append(float(torch.quantile(crop_block, 0.75).item()))
+                starts = np.asarray(spec["starts"], dtype=np.int64)
+                full_size = tuple(int(dim) for dim in spec.get("full_size", (1, *crops.shape[2:])))
+                valid_chunks = []
+                for crop, start in zip(crops, starts):
+                    valid_d = min(int(start[0]) + crop.shape[-3], full_size[-3]) - int(start[0])
+                    valid_h = min(int(start[1]) + crop.shape[-2], full_size[-2]) - int(start[1])
+                    valid_w = min(int(start[2]) + crop.shape[-1], full_size[-1]) - int(start[2])
+                    if valid_d <= 0 or valid_h <= 0 or valid_w <= 0:
+                        continue
+                    valid_chunks.append(crop[:, :valid_d, :valid_h, :valid_w].reshape(-1))
+                crop_block = torch.cat(valid_chunks)
+                expected.append((
+                    float(torch.quantile(crop_block, 0.25).item()),
+                    float(torch.quantile(crop_block, 0.75).item()),
+                ))
 
-            self.assertEqual(len(dataset._fusion_thresholds_01), 2)
-            self.assertTrue(np.allclose(dataset._fusion_thresholds_01, expected))
+            self.assertEqual(len(dataset._fusion_thresholds), 2)
+            self.assertTrue(np.allclose(dataset._fusion_thresholds, expected))
+
+    def test_thresholds_ignore_crop_padding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 2, 2), dtype=np.uint16))
+            crops = np.zeros((2, 1, 2, 2, 2), dtype=np.float32)
+            crops[1].fill(100.0)
+            crops[1, :, 0, 0, 0] = 1.0
+            dataset = self._make_dataset(
+                data_dir,
+                volume_specs=[{
+                    "crops": crops,
+                    "starts": [(0, 0, 0), (1, 1, 1)],
+                    "full_size": (1, 2, 2, 2),
+                }],
+                percentile_clim=(0.0, 100.0),
+            )
+
+            self.assertEqual(dataset._fusion_thresholds[0], (0.0, 1.0))
 
     def test_getitem_returns_lazily_clipped_crops(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,12 +296,13 @@ class HotCropDatasetTest(unittest.TestCase):
             dataset = self._make_dataset(
                 data_dir,
                 volume_specs=[{"crops": raw_crops, "starts": [(0, 0, 0), (0, 2, 0)]}],
-                percentile_cmax=75.0,
+                percentile_clim=(25.0, 75.0),
             )
 
             stored_before = dataset._crop_storage.narrow(0, 0, 8).view(1, 2, 2, 2).clone()
             item = dataset[0]
-            expected = clip_to_percentile_cmax(stored_before, dataset._fusion_thresholds_01[0])
+            threshold_min, threshold_max = dataset._fusion_thresholds[0]
+            expected = clip_to_percentile(stored_before, threshold_min, threshold_max)
 
             self.assertTrue(torch.allclose(item["target"], expected))
             self.assertTrue(torch.allclose(dataset._crop_storage.narrow(0, 0, 8).view(1, 2, 2, 2), stored_before))
