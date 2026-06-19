@@ -23,6 +23,7 @@ from utils.eval.sample_quality import (
     empty_feature_bank,
     extract_patch_features,
     extract_dataset_patch_features,
+    foreground_l1_for_one_sample,
     _frechet_distance,
     feature_cache_path,
     gather_tensor_rows_to_rank0,
@@ -481,6 +482,46 @@ class TestValidationFeatureCacheHelpers:
         monkeypatch.setattr("utils.eval.sample_quality.extract_patch_features", _fake_extract_patch_features)
         feats = extract_dataset_patch_features(DummyDataset(), range(3), batch_size=2, device="cpu")
         assert torch.equal(feats, torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64))
+
+    def test_foreground_l1_for_one_sample_uses_mask(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import utils.eval.sample_quality as sq
+
+        class DummyDataset:
+            def __len__(self) -> int:
+                return 1
+
+            def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+                assert index == 0
+                return {"target": torch.zeros(1, 2, 2, 2)}
+
+            def _selected_file_keys(self) -> list[str]:
+                return [f"{sq.ONE_OVERFIT_SAMPLE_STEM}.tif"]
+
+        pred = torch.zeros(1, 1, 2, 2, 2)
+        pred[..., 0, 0, 0] = 1.0
+        pred[..., 1, 1, 1] = 10.0
+        mask = torch.zeros(2, 2, 2, dtype=torch.bool)
+        mask[0, 0, 0] = True
+        monkeypatch.setattr(sq, "_load_one_overfit_foreground_mask", lambda: mask)
+
+        value = foreground_l1_for_one_sample(pred, DummyDataset())
+
+        assert value == pytest.approx(1.0)
+
+    def test_foreground_l1_ignores_non_overfit_dataset(self) -> None:
+        class DummyDataset:
+            def __len__(self) -> int:
+                return 1
+
+            def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+                return {"target": torch.zeros(1, 2, 2, 2)}
+
+            def _selected_file_keys(self) -> list[str]:
+                return ["other.tif"]
+
+        pred = torch.zeros(1, 1, 2, 2, 2)
+
+        assert foreground_l1_for_one_sample(pred, DummyDataset()) is None
 
 
 # ---------------------------------------------------------------------------

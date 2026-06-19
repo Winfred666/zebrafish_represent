@@ -34,6 +34,26 @@ DEFAULT_SAMPLE_QUALITY_CHECKPOINT_PATH = (
     / "checkpoints"
     / "medicalnet_resnet50_vicreg_reliable_mild.ckpt"
 )
+ONE_OVERFIT_SAMPLE_STEM = "LS-FIS__6dpf__Image_Shifted__Image_Shifted__6dpf_0601_FLUO1_12_ShiftCorrectionAuto"
+ONE_OVERFIT_FOREGROUND_MASK_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data"
+    / "raw"
+    / "sample_full"
+    / "train"
+    / ".mask_0125_one_overfit"
+    / f"{ONE_OVERFIT_SAMPLE_STEM}.pt"
+)
+ONE_OVERFIT_SOURCE_FOREGROUND_MASK_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "data"
+    / "raw"
+    / "sample_full"
+    / "train"
+    / ".mask_cache_fba7deb7a868"
+    / f"{ONE_OVERFIT_SAMPLE_STEM}.pt"
+)
+_ONE_OVERFIT_FOREGROUND_MASK = None
 
 
 def _feature_dim_for_backbone(backbone_name: str) -> int:
@@ -159,6 +179,115 @@ def release_cached_feature_extractor() -> None:
 # ---------------------------------------------------------------------------
 # Volume-space helpers (MS-SSIM, Wasserstein)
 # ---------------------------------------------------------------------------
+
+def _volume_batch_spatial(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = torch.as_tensor(tensor, dtype=torch.float32)
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0).unsqueeze(0)
+    elif tensor.ndim == 4:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim == 5:
+        tensor = tensor[:, 0]
+    if tensor.ndim == 4:
+        return tensor
+    raise ValueError(f"Expected tensor shaped (B, C, D, H, W) or (B, D, H, W), got {tuple(tensor.shape)}")
+
+
+def _is_one_overfit_dataset(val_dataset) -> bool:
+    if val_dataset is None or len(val_dataset) < 1:
+        return False
+    selected_file_keys = getattr(val_dataset, "_selected_file_keys", None)
+    if not callable(selected_file_keys):
+        return False
+    keys = selected_file_keys()
+    return len(keys) == 1 and Path(str(keys[0])).stem == ONE_OVERFIT_SAMPLE_STEM
+
+
+def _load_one_overfit_foreground_mask() -> torch.Tensor:
+    global _ONE_OVERFIT_FOREGROUND_MASK
+    if _ONE_OVERFIT_FOREGROUND_MASK is None:
+        mask_path = (
+            ONE_OVERFIT_SOURCE_FOREGROUND_MASK_PATH
+            if ONE_OVERFIT_SOURCE_FOREGROUND_MASK_PATH.exists()
+            else ONE_OVERFIT_FOREGROUND_MASK_PATH
+        )
+        if not mask_path.exists():
+            raise FileNotFoundError(f"One-overfit foreground mask not found: {mask_path}")
+        _ONE_OVERFIT_FOREGROUND_MASK = torch.load(
+            mask_path,
+            map_location="cpu",
+        ).to(dtype=torch.bool, device="cpu")
+    return _ONE_OVERFIT_FOREGROUND_MASK
+
+
+def _resize_mask_nearest(mask: torch.Tensor, spatial_shape: tuple[int, int, int]) -> torch.Tensor:
+    if tuple(int(v) for v in mask.shape) == tuple(int(v) for v in spatial_shape):
+        return mask.to(dtype=torch.bool)
+    resized = F.interpolate(
+        mask.to(dtype=torch.float32).unsqueeze(0).unsqueeze(0),
+        size=tuple(int(v) for v in spatial_shape),
+        mode="nearest",
+    )
+    return resized[0, 0].to(dtype=torch.bool)
+
+
+def _pad_or_crop_mask_to_spatial(mask: torch.Tensor, spatial_shape: tuple[int, int, int], device: torch.device) -> torch.Tensor:
+    output = torch.zeros(tuple(int(v) for v in spatial_shape), dtype=torch.bool, device=device)
+    mask = mask.to(dtype=torch.bool, device=device)
+    slices = tuple(slice(0, min(int(src), int(dst))) for src, dst in zip(mask.shape, output.shape))
+    output[slices] = mask[slices]
+    return output
+
+
+def one_overfit_foreground_mask_for_sample(
+    sample: dict,
+    spatial_shape: tuple[int, int, int],
+    device: torch.device,
+) -> torch.Tensor:
+    full_size = sample.get("full_size") if isinstance(sample, dict) else None
+    if full_size is not None:
+        full_size_values = [int(v) for v in torch.as_tensor(full_size).reshape(-1).tolist()]
+        full_spatial_shape = tuple(full_size_values[-3:])
+    else:
+        full_spatial_shape = tuple(int(v) for v in spatial_shape)
+    mask = _resize_mask_nearest(_load_one_overfit_foreground_mask(), full_spatial_shape)
+    return _pad_or_crop_mask_to_spatial(
+        mask,
+        tuple(int(v) for v in spatial_shape),
+        device,
+    )
+
+
+def foreground_l1_for_one_sample(
+    pred: torch.Tensor,
+    val_dataset,
+    *,
+    sample_index: int = 0,
+) -> float | None:
+    if not _is_one_overfit_dataset(val_dataset):
+        return None
+    if int(sample_index) != 0:
+        return None
+
+    sample = val_dataset[int(sample_index)]
+    gt = torch.as_tensor(sample["target"], dtype=torch.float32)
+    pred_spatial = _volume_batch_spatial(pred).float()
+    gt_spatial = _volume_batch_spatial(gt).to(device=pred_spatial.device, dtype=torch.float32)
+    if pred_spatial.shape[-3:] != gt_spatial.shape[-3:]:
+        spatial_shape = tuple(
+            min(int(pred_dim), int(gt_dim))
+            for pred_dim, gt_dim in zip(pred_spatial.shape[-3:], gt_spatial.shape[-3:])
+        )
+        pred_spatial = pred_spatial[..., :spatial_shape[0], :spatial_shape[1], :spatial_shape[2]]
+        gt_spatial = gt_spatial[..., :spatial_shape[0], :spatial_shape[1], :spatial_shape[2]]
+    if pred_spatial.shape != gt_spatial.shape:
+        raise ValueError(f"Foreground L1 shape mismatch: {tuple(pred_spatial.shape)} vs {tuple(gt_spatial.shape)}")
+
+    mask = one_overfit_foreground_mask_for_sample(sample, tuple(int(v) for v in pred_spatial.shape[-3:]), pred_spatial.device)
+    if not bool(mask.any()):
+        return None
+    return float(F.l1_loss(pred_spatial[:, mask].reshape(-1), gt_spatial[:, mask].reshape(-1)).item())
+
 
 def _as_volume_batch(values: torch.Tensor | Sequence[float]) -> torch.Tensor:
     tensor = torch.as_tensor(values, dtype=torch.float32)
@@ -630,7 +759,10 @@ def _frechet_distance(reference_features: torch.Tensor, generated_features: torc
 # MMD
 # ---------------------------------------------------------------------------
 
-def _mmd(reference_features: torch.Tensor, generated_features: torch.Tensor) -> float:
+def _mmd(
+    reference_features: torch.Tensor,
+    generated_features: torch.Tensor,
+) -> float:
     if reference_features.shape[0] <= 1:
         gamma = 1.0
     else:
