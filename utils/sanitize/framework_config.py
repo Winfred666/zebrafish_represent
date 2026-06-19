@@ -46,6 +46,14 @@ class BaseFrameworkParams(IngestibleParams):
     stat_metrics_every_n_epochs: int = Field(default=0, ge=0)
     sample_quality_checkpoint_path: str | None = "result/checkpoints/medicalnet_resnet50_vicreg_reliable_mild.ckpt"
     sample_quality_input_normalization: Literal["raw", "sample_zscore"] = "sample_zscore"
+    sample_quality_mmd_kernel: Literal["rbf"] = "rbf"
+    sample_quality_mmd_bandwidth: float | Literal["reference_median"] = "reference_median"
+
+    @model_validator(mode="after")
+    def _validate_sample_quality_mmd_bandwidth(self) -> "BaseFrameworkParams":
+        if not isinstance(self.sample_quality_mmd_bandwidth, str) and self.sample_quality_mmd_bandwidth <= 0.0:
+            raise ValueError("sample_quality_mmd_bandwidth must be positive")
+        return self
 
 
 class DDPMDiffusionParams(CommonDiffusionParams):
@@ -56,6 +64,7 @@ class DDPMDiffusionParams(CommonDiffusionParams):
     beta_start: float = Field(default=1e-4, gt=0.0)
     beta_end: float = Field(default=2e-2, gt=0.0)
     prediction_type: Literal["epsilon", "x0", "v", "v_prediction"] = "epsilon"
+    sampling_method: Literal["ddpm", "ddim"] = "ddpm"
 
     @model_validator(mode="after")
     def _validate_betas(self) -> "DDPMDiffusionParams":
@@ -84,6 +93,7 @@ class LatentDDPMModuleParams(BaseFrameworkParams):
     scale_factor: float = Field(default=1.0, gt=0.0)
     use_ema: bool = True
     ema_decay: float = Field(default=0.9999, gt=0.0, lt=1.0)
+    timestep_repeats: int = Field(default=1, ge=1)
 
 
 class IaNDiffusionParams(CommonDiffusionParams):

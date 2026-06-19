@@ -98,7 +98,9 @@ class LatentDDPMModule(BaseValTrainingFramework):
         gradient_clip_algorithm: str | None = None,
     ) -> None:
         clip_val = float(gradient_clip_val or 0.0)
-        if clip_val <= 0.0 or clip_val > 1.0:
+        if clip_val < 0.0:
+            clip_val = 0.0
+        elif clip_val > 1.0:
             clip_val = 1.0
         super().configure_gradient_clipping(
             optimizer,
@@ -115,11 +117,20 @@ class LatentDDPMModule(BaseValTrainingFramework):
         return gathered
 
     def _normalized_t_to_timestep(self, t: float) -> int:
-        inference_timesteps = self._inference_timesteps()
+        selected_timesteps = self._selected_inference_timesteps(t)
+        if selected_timesteps.numel() == 0:
+            return 0
+        return int(selected_timesteps[0].item())
+
+    def _selected_inference_timesteps(self, t_start: float, steps: int | None = None) -> Tensor:
+        clamped_t = float(min(max(t_start, 0.0), 1.0))
+        if clamped_t <= 0.0:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+        inference_timesteps = self._inference_timesteps(steps)
         total_steps = int(inference_timesteps.shape[0])
-        remaining = max(1, math.ceil(float(min(max(t, 0.0), 1.0)) * float(total_steps)))
-        idx = max(0, min(total_steps - 1, total_steps - int(remaining)))
-        return int(inference_timesteps[idx].item())
+        remaining = max(1, math.ceil(clamped_t * float(total_steps)))
+        start_idx = max(0, min(total_steps - 1, total_steps - int(remaining)))
+        return inference_timesteps[start_idx:]
 
     def get_t_from_sigma(self, sigma: float) -> float:
         sigma_value = float(min(max(sigma, 0.0), 1.0))
@@ -145,10 +156,14 @@ class LatentDDPMModule(BaseValTrainingFramework):
         self.stage1_model.eval()
         return self.stage1_model.encode_stage_2_inputs(clean).detach() * self.scale_factor
 
-    def _after_make_clean(self, clean: Tensor) -> Tensor:
+    def _after_make_clean(self, denoised: Tensor) -> Tensor:
         self.stage1_model.eval()
-        decoded = self.stage1_model.decode_stage_2_outputs(clean / self.scale_factor)
+        decoded = self._decode_latents(denoised)
         return decoded.detach()
+
+    def _decode_latents(self, clean: Tensor) -> Tensor:
+        self.stage1_model.eval()
+        return self.stage1_model.decode_stage_2_outputs(clean / self.scale_factor)
 
     def _make_initial_noise(self, batch_size: int, *, seed: int | None = None) -> Tensor:
         shape = (
@@ -163,11 +178,13 @@ class LatentDDPMModule(BaseValTrainingFramework):
 
     def get_data_loss(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
         clean_latents = self._before_make_noisy(batch["target"])
-        batch_size = clean_latents.shape[0]
+        timestep_repeats = int(getattr(self.config, "timestep_repeats", 1) or 1)
+        if timestep_repeats > 1:
+            clean_latents = clean_latents.repeat_interleave(timestep_repeats, dim=0)
         timesteps = torch.randint(
             0,
             self.num_train_timesteps,
-            (batch_size,),
+            (clean_latents.shape[0],),
             device=clean_latents.device,
             dtype=torch.long,
         )
@@ -175,8 +192,7 @@ class LatentDDPMModule(BaseValTrainingFramework):
         noisy_latents = self._q_sample(clean_latents, timesteps, noise)
         prediction = self(noisy_latents, timesteps)
         target = self._target_from_prediction_type(clean_latents, noise, timesteps)
-        loss = self._ddpm_loss(prediction, target)
-        return {"loss": loss}
+        return {"loss": self._ddpm_loss(prediction, target)}
 
     def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
         if t.dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
@@ -244,21 +260,64 @@ class LatentDDPMModule(BaseValTrainingFramework):
             return model_mean + torch.sqrt(posterior_variance) * torch.randn_like(noisy)
         return model_mean
 
+    def _ddim_step(self, noisy: Tensor, timestep: int, prev_timestep: int) -> Tensor:
+        batch_size = noisy.shape[0]
+        t_tensor = torch.full((batch_size,), timestep, device=noisy.device, dtype=torch.long)
+        prediction = self(noisy, t_tensor)
+        pred_x0 = self._x0_from_prediction(prediction, noisy, t_tensor)
+        epsilon = self._epsilon_from_prediction(prediction, noisy, t_tensor)
+
+        if prev_timestep < 0:
+            alpha_prev = torch.ones_like(self._extract(self.alphas_cumprod, t_tensor, noisy.ndim))
+        else:
+            prev_tensor = torch.full((batch_size,), prev_timestep, device=noisy.device, dtype=torch.long)
+            alpha_prev = self._extract(self.alphas_cumprod, prev_tensor, noisy.ndim)
+        return torch.sqrt(alpha_prev) * pred_x0 + torch.sqrt(1.0 - alpha_prev) * epsilon
+
+    def _x0_from_prediction(
+        self,
+        prediction: Tensor,
+        noisy_latents: Tensor,
+        timesteps: Tensor,
+    ) -> Tensor:
+        prediction_type = self.config.diffusion.prediction_type
+        if prediction_type == "x0":
+            return prediction
+        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy_latents.ndim)
+        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy_latents.ndim)
+        if prediction_type == "epsilon":
+            return (noisy_latents - sigma * prediction) / alpha
+        return alpha * noisy_latents - sigma * prediction
+
     @torch.no_grad()
-    def _reverse_process(self, state: Tensor, *, t_start: float, steps: int | None = None) -> Tensor:
-        n_steps = self._resolve_sample_steps(steps)
+    def _reverse_process(
+        self,
+        state: Tensor,
+        *,
+        t_start: float,
+        steps: int | None = None,
+        seed: int | None = None,
+    ) -> Tensor:
         if t_start <= 0.0:
             return state
 
-        inference_timesteps = self._inference_timesteps(steps)
-        remaining = max(1, math.ceil(float(min(max(t_start, 0.0), 1.0)) * float(n_steps)))
-        start_idx = max(0, min(n_steps - 1, n_steps - int(remaining)))
+        selected_timesteps = self._selected_inference_timesteps(t_start, steps)
 
-        current = state
-        for timestep in inference_timesteps[start_idx:]:
-            current = self._ddpm_step(current, int(timestep.item()))
-        return current
+        with self._fixed_seed_context(seed):
+            current = state
+            sampling_method = str(getattr(self.config.diffusion, "sampling_method", "ddpm")).lower()
+            if sampling_method == "ddim":
+                for idx, timestep in enumerate(selected_timesteps):
+                    prev_timestep = int(selected_timesteps[idx + 1].item()) if idx + 1 < len(selected_timesteps) else -1
+                    current = self._ddim_step(current, int(timestep.item()), prev_timestep)
+            else:
+                for timestep in selected_timesteps:
+                    current = self._ddpm_step(current, int(timestep.item()))
+            return current
 
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         del step_size
-        return self._ddpm_step(noisy, self._normalized_t_to_timestep(t))
+        timestep = self._normalized_t_to_timestep(t)
+        if str(getattr(self.config.diffusion, "sampling_method", "ddpm")).lower() == "ddim":
+            return self._ddim_step(noisy, timestep, timestep - 1)
+        return self._ddpm_step(noisy, timestep)

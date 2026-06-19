@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.framework.base import BaseTrainingFramework
+from modules.framework.base_val import BaseValTrainingFramework
 from modules.framework.IaN_flow import IaNFlowModule
 from modules.framework.latent_ddpm import LatentDDPMModule
 from modules.framework.vq_vae_s1 import VQVAES1Module
@@ -64,6 +65,22 @@ class TinySampleModel(nn.Module):
 
 
 class TinySampleFramework(BaseTrainingFramework):
+    def get_data_loss(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {"loss": batch["target"].sum() * 0.0}
+
+    def _q_sample(self, clean: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+        del t, noise
+        return clean
+
+    def one_step_sample(self, noisy: torch.Tensor, t: float, step_size: float) -> torch.Tensor:
+        del t, step_size
+        return noisy + 1.0
+
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(sigma)
+
+
+class TinyValSampleFramework(BaseValTrainingFramework):
     def get_data_loss(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return {"loss": batch["target"].sum() * 0.0}
 
@@ -501,6 +518,35 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
         self.assertEqual(timesteps, [2, 1, 0])
 
+    def test_latent_ddpm_make_clean_from_t1_uses_full_inference_schedule(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=5,
+            ),
+            diffusion=DDPMDiffusionParams(
+                num_train_timesteps=5,
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        timesteps: list[int] = []
+
+        def capture_step(noisy: torch.Tensor, timestep: int) -> torch.Tensor:
+            timesteps.append(int(timestep))
+            return noisy
+
+        with patch.object(module, "_ddpm_step", side_effect=capture_step):
+            with patch.object(module, "_after_make_clean", side_effect=lambda x: x):
+                module._make_clean(torch.zeros(1, 8, 4, 4, 4), t_start=1.0)
+
+        self.assertEqual(timesteps, [4, 3, 2, 1, 0])
+
     def test_latent_ddpm_inference_steps_respace_training_schedule(self) -> None:
         params = LatentDDPMModuleParams(
             model=TinyLatentModel(),
@@ -534,6 +580,36 @@ class VolDiTIntegrationTest(unittest.TestCase):
         )
         module = IaNFlowModule(params)
         self.assertAlmostEqual(module.get_t_from_sigma(0.5), 1.0 / 3.0, places=6)
+
+    def test_validation_preview_store_keeps_first_five_global_samples(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyValSampleFramework(params)
+        first_batch = torch.tensor([6.0, 1.0, 4.0], dtype=torch.float32).view(3, 1, 1, 1, 1)
+        second_batch = torch.tensor([0.0, 5.0], dtype=torch.float32).view(2, 1, 1, 1, 1)
+        third_batch = torch.tensor([2.0, 3.0], dtype=torch.float32).view(2, 1, 1, 1, 1)
+
+        module._store_validation_stat_preview([6, 1, 4], first_batch, total_samples=7)
+        module._store_validation_stat_preview([0, 5], second_batch, total_samples=7)
+        module._store_validation_stat_preview([2, 3], third_batch, total_samples=7)
+
+        self.assertIsNotNone(module._val_stat_generated_previews)
+        preview_map = module._val_stat_generated_previews or {}
+        self.assertEqual(sorted(preview_map), [0, 1, 2, 3, 4])
+        self.assertEqual(float(preview_map[0].item()), 0.0)
+        self.assertEqual(float(preview_map[1].item()), 1.0)
+        self.assertEqual(float(preview_map[2].item()), 2.0)
+        self.assertEqual(float(preview_map[3].item()), 3.0)
+        self.assertEqual(float(preview_map[4].item()), 4.0)
 
     def test_predict_step_uses_same_reverse_sampling_core(self) -> None:
         params = BaseFrameworkParams(

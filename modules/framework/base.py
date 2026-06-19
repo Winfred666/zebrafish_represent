@@ -132,8 +132,8 @@ class BaseTrainingFramework(L.LightningModule, ABC):
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
         return clean
 
-    def _after_make_clean(self, clean: Tensor) -> Tensor:
-        return clean
+    def _after_make_clean(self, denoised: Tensor) -> Tensor:
+        return denoised
 
     def _make_noisy(self, clean: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
         """Corrupt *clean* at level *t*: generate noise → mix via ``_q_sample``."""
@@ -196,18 +196,26 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         return int(self.optimization.sample_steps if steps is None else steps)
 
     @torch.no_grad()
-    def _reverse_process(self, state: Tensor, *, t_start: float, steps: int | None = None) -> Tensor:
+    def _reverse_process(
+        self,
+        state: Tensor,
+        *,
+        t_start: float,
+        steps: int | None = None,
+        seed: int | None = None,
+    ) -> Tensor:
         """Run the shared reverse trajectory from ``t_start`` down to clean."""
-        steps = self._resolve_sample_steps(steps)
-        if t_start <= 0.0:
-            return state
-        step_size = 1.0 / steps
-        n_remaining = int(t_start * steps)
-        current = state
-        for i in range(n_remaining):
-            t = t_start - i * step_size
-            current = self.one_step_sample(current, t, step_size)
-        return current
+        with self._fixed_seed_context(seed):
+            steps = self._resolve_sample_steps(steps)
+            if t_start <= 0.0:
+                return state
+            step_size = 1.0 / steps
+            n_remaining = int(t_start * steps)
+            current = state
+            for i in range(n_remaining):
+                t = t_start - i * step_size
+                current = self.one_step_sample(current, t, step_size)
+            return current
 
     @torch.no_grad()
     def sample(
@@ -221,9 +229,9 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         self.eval()
         initial_noise = self._make_initial_noise(batch_size, seed=seed)
         if steps is None:
-            return self._make_clean(initial_noise, t_start=1.0)
-        clean = self._reverse_process(initial_noise, t_start=1.0, steps=steps)
-        return self._after_make_clean(clean)
+            return self._make_clean(initial_noise, t_start=1.0, seed=seed)
+        denoised = self._reverse_process(initial_noise, t_start=1.0, steps=steps, seed=seed)
+        return self._after_make_clean(denoised)
 
     @staticmethod
     def _predict_scalar_int(value) -> int:
@@ -250,10 +258,10 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         return self.sample(batch_size=batch_size, steps=steps, seed=seed)
 
     @torch.no_grad()
-    def _make_clean(self, noisy: Tensor, t_start: float) -> Tensor:
+    def _make_clean(self, noisy: Tensor, t_start: float, *, seed: int | None = None) -> Tensor:
         """Reverse trajectory from noise level *t_start* down to clean (t=0)."""
-        clean = self._reverse_process(noisy, t_start=t_start)
-        return self._after_make_clean(clean)
+        denoised = self._reverse_process(noisy, t_start=t_start, seed=seed)
+        return self._after_make_clean(denoised)
 
     # ── shared infrastructure ──────────────────────────────────
 

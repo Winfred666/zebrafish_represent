@@ -39,7 +39,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         self._fusion_collecting: bool = False
         self._fusion_object_pg = None
         self._val_stat_generated_features: torch.Tensor | None = None
-        self._val_stat_generated_previews: list[Tensor] | None = None
+        self._val_stat_generated_previews: dict[int, Tensor] | None = None
         self._val_stat_generated_foreground_l1: float | None = None
         self._val_stat_foreground_l1_dataset = None
         self._val_stat_real_cache: dict[str, object] | None = None
@@ -395,25 +395,19 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             log_image_artifact(self.logger, np.vstack(panels), tag, self.global_step)
 
     def _store_validation_stat_preview(self, sample_indices: list[int], samples: Tensor, total_samples: int) -> None:
-        rank, world_size = self._validation_stat_rank_world()
         preview_cap = min(5, max(0, int(total_samples)))
         if preview_cap == 0:
             self._val_stat_generated_previews = None
             return
 
-        local_preview_indices = set(range(rank, preview_cap, world_size))
-        if not local_preview_indices:
-            self._val_stat_generated_previews = None
-            return
-
-        preview_samples = list(self._val_stat_generated_previews or [])
-        if len(preview_samples) >= len(local_preview_indices):
+        preview_samples = dict(self._val_stat_generated_previews or {})
+        if len(preview_samples) >= preview_cap:
             self._val_stat_generated_previews = preview_samples
             return
         for sample_idx, sample in zip(sample_indices, samples):
-            if sample_idx in local_preview_indices:
-                preview_samples.append(sample.detach().cpu())
-            if len(preview_samples) == len(local_preview_indices):
+            if sample_idx < preview_cap and sample_idx not in preview_samples:
+                preview_samples[int(sample_idx)] = sample.detach().cpu()
+            if len(preview_samples) == preview_cap:
                 break
         self._val_stat_generated_previews = preview_samples or None
 
@@ -591,7 +585,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         if self._val_stat_generated_features is None:
             return
 
-        preview_payload = self._val_stat_generated_previews or []
+        preview_payload = sorted((self._val_stat_generated_previews or {}).items())
         local_foreground_l1 = self._val_stat_generated_foreground_l1
         try:
             local_features = self._val_stat_generated_features.to(device=self.device)
@@ -608,14 +602,15 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         if rank != 0 or generated_features is None or self._val_stat_real_cache is None:
             return
 
-        preview_samples: list[Tensor] = []
+        preview_by_index: dict[int, Tensor] = {}
         for rank_samples in gathered_previews or []:
-            for sample in rank_samples or []:
-                preview_samples.append(sample)
-                if len(preview_samples) == 5:
-                    break
-            if len(preview_samples) == 5:
-                break
+            for sample_idx, sample in rank_samples or []:
+                if sample_idx not in preview_by_index:
+                    preview_by_index[int(sample_idx)] = sample
+        preview_samples = [
+            preview_by_index[sample_idx]
+            for sample_idx in sorted(preview_by_index)[:5]
+        ]
         if preview_samples:
             self.log_sample_slices(torch.stack(preview_samples, dim=0), tag="val_sample_midw")
 
