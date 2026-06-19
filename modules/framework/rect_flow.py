@@ -136,11 +136,11 @@ class RectifiedFlowModule(BaseValTrainingFramework):
             latent = latent[0]
         return latent.detach()
 
-    def _after_make_clean(self, clean: Tensor) -> Tensor:
+    def _after_make_clean(self, denoised: Tensor) -> Tensor:
         if not self._uses_stage1:
-            return clean
+            return denoised
         self.stage1_model.eval()
-        decoded = self.stage1_model.decode(clean)
+        decoded = self.stage1_model.decode(denoised)
         return torch.sigmoid(decoded).detach()
 
     def _make_clean_latent(self, noisy: Tensor, t_start: float) -> Tensor:

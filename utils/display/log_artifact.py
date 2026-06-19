@@ -188,7 +188,7 @@ def run_postfit_testing(framework_module, trainer, logger,
 
     Called from ``on_train_end`` while the logger is still alive.
     """
-    from utils.eval.sample_quality import compute_sample_quality_metrics
+    from utils.eval.sample_quality import compute_sample_quality_metrics, sample_quality_metric_spec
 
     devices = max(1, trainer.num_devices)
     batch_sizes: list[int] = []
@@ -243,6 +243,8 @@ def run_postfit_testing(framework_module, trainer, logger,
         combined_reference,
         checkpoint_path=getattr(framework_module.config, "sample_quality_checkpoint_path", None),
         input_normalization=str(getattr(framework_module.config, "sample_quality_input_normalization", "sample_zscore")),
+        mmd_kernel=str(getattr(framework_module.config, "sample_quality_mmd_kernel", "rbf")),
+        mmd_bandwidth=getattr(framework_module.config, "sample_quality_mmd_bandwidth", "reference_median"),
     )
     metrics_to_log.update({
         "sample_fid": float(quality_metrics["fid"]),
@@ -251,6 +253,12 @@ def run_postfit_testing(framework_module, trainer, logger,
     })
     summary_artifact["reference_splits"] = {"val": int(combined_reference.shape[0])}
     summary_artifact["sample_quality"] = quality_metrics
+    summary_artifact["sample_quality_metric_spec"] = sample_quality_metric_spec(
+        checkpoint_path=getattr(framework_module.config, "sample_quality_checkpoint_path", None),
+        input_normalization=str(getattr(framework_module.config, "sample_quality_input_normalization", "sample_zscore")),
+        mmd_kernel=str(getattr(framework_module.config, "sample_quality_mmd_kernel", "rbf")),
+        mmd_bandwidth=getattr(framework_module.config, "sample_quality_mmd_bandwidth", "reference_median"),
+    )
 
     artifact_manager.write_yaml_artifact(summary_artifact, "samples/sample_quality_metrics.yaml")
     logger.log_metrics(metrics_to_log, step=0)

@@ -404,7 +404,8 @@ def build_training_runtime(
     """Mechanically compile a merged config dict into runtime objects.
     1. Extract building items to know what to build and their dependencies
     2. Blind-iterate: build objects whose deps are ready, repeat until done
-    3. Seed, align CUDA, return TrainingRuntime
+    3. Seed before build for constructor determinism, reseed after build for runtime determinism
+    4. Align CUDA, return TrainingRuntime
     """
     from utils.mlflow_setup import apply_docker_env
     from utils.sanitize.wrapper_config import align_torch_cuda_runtime, resolve_accelerator, trainer_uses_cuda
@@ -414,6 +415,11 @@ def build_training_runtime(
     accelerator = trainer_section.get("params", {}).get("accelerator", "auto")
     accelerator = resolve_accelerator(accelerator)
     apply_docker_env(on_remote_node=trainer_uses_cuda(accelerator))
+
+    seed = int(merged_config.get("seed", 42))
+    # Seed before building runtime objects so scratch model initialization
+    # and any constructor-time randomness obey the config seed.
+    set_global_seed(seed)
 
     items: list[_BuildItem] = []
     for key, section in merged_config.items():
@@ -428,9 +434,10 @@ def build_training_runtime(
 
     objects = _blind_iterate_build(items)
 
-    # Seed
-    seed = merged_config.get("seed", 42)
+    # Reset again after constructors so later stochastic runtime behavior
+    # starts from the configured seed instead of a constructor-dependent offset.
     set_global_seed(seed)
+
     framework = objects.get("framework")
     if framework is not None:
         setattr(framework, "_runtime_seed", int(seed))

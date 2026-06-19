@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -10,7 +12,9 @@ from utils.runtime_factory import (
     _ensure_heavy_imports,
     _extract_ref_path,
     _is_runtime_ref,
+    ConfigPaths,
     build_any_runtime_object,
+    build_training_runtime,
     load_split_configs,
     load_yaml_config,
 )
@@ -107,6 +111,31 @@ class RuntimeEntryTest(unittest.TestCase):
         deps = _collect_runtime_deps(section)
         self.assertIn("model", deps)
         self.assertIn("artifact_manager.checkpoint_dir", deps)
+
+    def test_build_training_runtime_reseeds_after_object_build(self) -> None:
+        paths = ConfigPaths(
+            data=Path("config/data/base_0125.yaml"),
+            model=Path("config/model/dit.yaml"),
+            framework=Path("config/framework/base.yaml"),
+            wrapper=Path("config/wrapper/base.yaml"),
+        )
+        merged_config = {
+            "seed": 123,
+            "trainer": {
+                "class_name": "Trainer",
+                "params": {"accelerator": "cpu"},
+            },
+        }
+
+        with mock.patch("utils.mlflow_setup.apply_docker_env"):
+            with mock.patch("utils.sanitize.wrapper_config.resolve_accelerator", return_value="cpu"):
+                with mock.patch("utils.sanitize.wrapper_config.trainer_uses_cuda", return_value=False):
+                    with mock.patch("utils.sanitize.wrapper_config.align_torch_cuda_runtime"):
+                        with mock.patch("utils.runtime_factory._blind_iterate_build", return_value={}):
+                            with mock.patch("utils.runtime_factory.set_global_seed") as mock_seed:
+                                build_training_runtime(merged_config=merged_config, paths=paths)
+
+        self.assertEqual(mock_seed.call_args_list, [mock.call(123), mock.call(123)])
 
     # ── Param validation ──
 
