@@ -120,7 +120,7 @@ def _render_panel_rgb(
 
 def fix_2d_scalar(
     gt,
-    pred,
+    pred=None,
     close_fig: bool = True,
     cmap: str = "plasma",
     residual_cmap: str = "bwr",
@@ -130,11 +130,11 @@ def fix_2d_scalar(
     show_residual: bool = False,
     show_colorbar: bool = False,
 ) -> np.ndarray:
-    """Render gt and pred side-by-side in a single tight RGB row.
+    """Render one or two scalar fields in a single tight RGB row.
 
     Args:
-        gt: 2D ground-truth slice, shape (X, Y).
-        pred: 2D prediction slice, same shape as gt.
+        gt: 2D reference slice, shape (X, Y).
+        pred: Optional 2D prediction slice, same shape as gt.
         close_fig: Whether to close the matplotlib figure after rendering
             when ``show_colorbar=True``.
         cmap: Colormap for gt and pred scalar panels.
@@ -148,16 +148,10 @@ def fix_2d_scalar(
             colorbars. The default renders direct RGB arrays with no padding.
 
     Returns:
-        np.ndarray: RGB image array with gt and pred in one row, optionally
-        followed by the residual panel.
+        np.ndarray: RGB image array with gt alone, or gt and pred in one row,
+        optionally followed by the residual panel.
     """
     gt_np = _coerce_field(gt)
-    pred_np = _coerce_field(pred)
-    if gt_np.shape != pred_np.shape:
-        raise ValueError(
-            f"gt and pred must have matching shapes, got {gt_np.shape} and {pred_np.shape}"
-        )
-
     gt_rgb = _render_panel_rgb(
         field=gt_np,
         cmap=cmap,
@@ -166,6 +160,18 @@ def fix_2d_scalar(
         dpi=int(dpi),
         show_colorbar=show_colorbar,
     )
+
+    if pred is None:
+        if show_residual:
+            raise ValueError("show_residual=True requires pred to be provided")
+        return gt_rgb
+
+    pred_np = _coerce_field(pred)
+    if gt_np.shape != pred_np.shape:
+        raise ValueError(
+            f"gt and pred must have matching shapes, got {gt_np.shape} and {pred_np.shape}"
+        )
+
     pred_rgb = _render_panel_rgb(
         field=pred_np,
         cmap=cmap,

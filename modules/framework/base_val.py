@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from modules.framework.base import BaseTrainingFramework
-from utils.dataset.fusion import center_crop_fusion_volume, center_pad_fusion_volume, volume_fuse
+from utils.dataset.fusion import center_pad_fusion_volume, volume_fuse
 from utils.display import fix_2d_scalar, log_image_artifact
 
 
@@ -151,24 +151,73 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         return max(1, int(batch_size or 1))
 
     @staticmethod
-    def _pad_rgb_panel_height(panel: np.ndarray, target_height: int) -> np.ndarray:
-        if panel.ndim != 3:
-            raise ValueError(f"Expected RGB panel shaped (H, W, C), got {panel.shape}")
-        height = int(panel.shape[0])
-        if height == target_height:
-            return panel
-        if height > target_height:
-            start = (height - target_height) // 2
-            end = start + target_height
-            return panel[start:end, :, :]
-        pad_before = (target_height - height) // 2
-        pad_after = target_height - height - pad_before
-        return np.pad(
-            panel,
-            ((pad_before, pad_after), (0, 0), (0, 0)),
-            mode="constant",
-            constant_values=255,
+    def _channel0_volume_np(volume: Tensor) -> np.ndarray:
+        return volume[0].detach().float().cpu().numpy()
+
+    @staticmethod
+    def _midw_indices(max_w: int, slice_count: int) -> np.ndarray:
+        if slice_count <= 0:
+            raise ValueError(f"slice_count must be positive, got {slice_count}")
+        if max_w <= 0:
+            raise ValueError(f"max_w must be positive, got {max_w}")
+        if max_w > slice_count + 1:
+            return np.linspace(0, max_w - 1, slice_count + 2, dtype=int)[1:-1]
+        return np.linspace(0, max_w - 1, slice_count, dtype=int)
+
+    def _build_clipped_midw_grid(
+        self,
+        pred_volumes: list[Tensor],
+        *,
+        clean_volumes: list[Tensor] | None = None,
+        slice_count: int,
+    ) -> np.ndarray | None:
+        if not pred_volumes:
+            return None
+        if clean_volumes is not None and len(clean_volumes) != len(pred_volumes):
+            raise ValueError(
+                f"clean/pred volume count mismatch: {len(clean_volumes)} vs {len(pred_volumes)}"
+            )
+
+        clean_np = [self._channel0_volume_np(volume) for volume in clean_volumes] if clean_volumes else None
+        pred_np = [self._channel0_volume_np(volume) for volume in pred_volumes]
+        scaling_source = clean_np if clean_np is not None else pred_np
+        scaling_rates = []
+        for volume_np in scaling_source:
+            volume_unit = np.clip((volume_np + 1.0) * 0.5, 0.0, None)
+            p995 = float(np.quantile(volume_unit, 0.995))
+            scaling_rates.append(1.0 / max(p995, 1.0e-8))
+
+        mean_scaling_rate = float(np.mean(scaling_rates))
+        max_shape = tuple(
+            max(int(volume_np.shape[axis]) for volume_np in scaling_source)
+            for axis in range(3)
         )
+        w_indices = self._midw_indices(max_shape[2], slice_count)
+        fusion_grid_rows: list[list[np.ndarray]] = [[] for _ in range(len(w_indices))]
+
+        for idx, pred_volume_np in enumerate(pred_np):
+            pred_vis = np.clip((pred_volume_np + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
+            pred_padded = center_pad_fusion_volume(pred_vis, max_shape, fill_value=-1.0)
+            clean_padded = None
+            if clean_np is not None:
+                clean_vis = np.clip((clean_np[idx] + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
+                clean_padded = center_pad_fusion_volume(clean_vis, max_shape, fill_value=-1.0)
+
+            for row_idx, wi in enumerate(w_indices):
+                gt_slice = clean_padded[:, :, wi] if clean_padded is not None else pred_padded[:, :, wi]
+                pred_slice = pred_padded[:, :, wi] if clean_padded is not None else None
+                fusion_grid_rows[row_idx].append(
+                    fix_2d_scalar(
+                        gt_slice,
+                        pred_slice,
+                        colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+                    )
+                )
+
+        fusion_rows = [np.hstack(row) for row in fusion_grid_rows if row]
+        if not fusion_rows:
+            return None
+        return np.vstack(fusion_rows)
 
     @torch.no_grad()
     def _log_fusion_validation(self) -> None:
@@ -267,106 +316,28 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 )
 
             if fused_pairs_for_logging and should_log:
-                seen_detail_fusion_ids: set[int] = set()
-                fusion_grid_rows: list[list[np.ndarray]] = []
-                detail_panels: list[np.ndarray] = []
-                scaling_rates: list[float] = []
-                for _, clean_fused, _ in fused_pairs_for_logging:
-                    c0 = clean_fused[0].detach().float().cpu().numpy()
-                    clean_unit = np.clip((c0 + 1.0) * 0.5, 0.0, None)
-                    p995 = float(np.quantile(clean_unit, 0.995))
-                    scaling_rates.append(1.0 / max(p995, 1.0e-8))
-
-                mean_scaling_rate = float(np.mean(scaling_rates))
-                max_shape = tuple(
-                    max(
-                        int(clean_fused[0].shape[axis])
-                        for _, clean_fused, _ in fused_pairs_for_logging
-                    )
-                    for axis in range(3)
+                clean_fused_volumes = [clean_fused for _, clean_fused, _ in fused_pairs_for_logging]
+                denoised_fused_volumes = [denoised_fused for _, _, denoised_fused in fused_pairs_for_logging]
+                fusion_image = self._build_clipped_midw_grid(
+                    denoised_fused_volumes,
+                    clean_volumes=clean_fused_volumes,
+                    slice_count=self.FUSION_SLICE_NUMBER,
                 )
-                max_w = max_shape[2]
-                if max_w > self.FUSION_SLICE_NUMBER + 1:
-                    w_indices = np.linspace(0, max_w - 1, self.FUSION_SLICE_NUMBER + 2, dtype=int)[1:-1]
-                else:
-                    w_indices = np.linspace(0, max_w - 1, self.FUSION_SLICE_NUMBER, dtype=int)
-                fusion_grid_rows = [[] for _ in range(len(w_indices))]
-
-                for fusion_id, clean_fused, denoised_fused in fused_pairs_for_logging:
-                    c0 = clean_fused[0].detach().float().cpu().numpy()
-                    d0 = denoised_fused[0].detach().float().cpu().numpy()
-                    c0_vis = np.clip((c0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
-                    d0_vis = np.clip((d0 + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
-                    c0_padded = center_pad_fusion_volume(c0_vis, max_shape, fill_value=-1.0)
-                    d0_padded = center_pad_fusion_volume(d0_vis, max_shape, fill_value=-1.0)
-                    for row_idx, wi in enumerate(w_indices):
-                        fusion_grid_rows[row_idx].append(
-                            fix_2d_scalar(
-                                c0_padded[:, :, wi],
-                                d0_padded[:, :, wi],
-                                colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
-                            )
-                        )
-
-                    if fusion_id in seen_detail_fusion_ids:
-                        continue
-                    seen_detail_fusion_ids.add(fusion_id)
-
-                    clean_center = center_crop_fusion_volume(c0, (64, 64, 64))
-                    denoised_center = center_crop_fusion_volume(d0, (64, 64, 64))
-                    detail_w_count = min(4, int(clean_center.shape[2]))
-                    if detail_w_count > 1 and clean_center.shape[2] > detail_w_count + 1:
-                        detail_w_indices = np.linspace(
-                            0,
-                            clean_center.shape[2] - 1,
-                            detail_w_count + 2,
-                            dtype=int,
-                        )[1:-1]
-                    else:
-                        detail_w_indices = np.linspace(
-                            0,
-                            clean_center.shape[2] - 1,
-                            detail_w_count,
-                            dtype=int,
-                        )
-                    detail_rows = [
-                        fix_2d_scalar(
-                            clean_center[:, :, wi],
-                            denoised_center[:, :, wi],
-                            colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
-                            show_residual=False,
-                            show_colorbar=False,
-                        )
-                        for wi in detail_w_indices
-                    ]
-                    if detail_rows:
-                        detail_panel = np.vstack(detail_rows)
-                        if detail_panels:
-                            target_height = max(
-                                int(detail_panel.shape[0]),
-                                *(int(panel.shape[0]) for panel in detail_panels),
-                            )
-                            detail_panels = [
-                                self._pad_rgb_panel_height(panel, target_height) for panel in detail_panels
-                            ]
-                            detail_panel = self._pad_rgb_panel_height(detail_panel, target_height)
-                        detail_panels.append(detail_panel)
+                detail_image = self._build_clipped_midw_grid(
+                    denoised_fused_volumes,
+                    clean_volumes=clean_fused_volumes,
+                    slice_count=min(4, self.FUSION_SLICE_NUMBER),
+                )
 
             if should_log and fused_pairs_for_logging:
-                fusion_rows = [np.hstack(row) for row in fusion_grid_rows if row]
-                if fusion_rows:
-                    image = np.vstack(fusion_rows)
+                if fusion_image is not None:
                     log_image_artifact(
-                        self.logger, image,
+                        self.logger, fusion_image,
                         f"val_fusion_{sig_key}",
                         self.global_step,
                     )
 
-                if detail_panels:
-                    target_height = max(int(panel.shape[0]) for panel in detail_panels)
-                    detail_image = np.hstack(
-                        [self._pad_rgb_panel_height(panel, target_height) for panel in detail_panels]
-                    )
+                if detail_image is not None:
                     log_image_artifact(
                         self.logger,
                         detail_image,
@@ -381,18 +352,13 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
         if not is_rank0 or self.logger is None:
             return
-
-        from utils.display import render_slice
-
         n_show = min(samples.shape[0], 5)
-        panels: list[np.ndarray] = []
-        for i in range(n_show):
-            vol = samples[i, 0].detach().float().cpu().numpy()
-            mid_w = vol.shape[2] // 2
-            panels.append(render_slice(vol[:, :, mid_w]))
-
-        if panels:
-            log_image_artifact(self.logger, np.vstack(panels), tag, self.global_step)
+        image = self._build_clipped_midw_grid(
+            [samples[i].detach().cpu() for i in range(n_show)],
+            slice_count=1,
+        )
+        if image is not None:
+            log_image_artifact(self.logger, image, tag, self.global_step)
 
     def _store_validation_stat_preview(self, sample_indices: list[int], samples: Tensor, total_samples: int) -> None:
         preview_cap = min(5, max(0, int(total_samples)))
