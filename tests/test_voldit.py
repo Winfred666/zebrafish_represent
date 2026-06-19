@@ -144,7 +144,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
                 learning_rate=1e-4,
                 weight_decay=0.0,
                 loss_type="l1",
-                sample_steps=1,
+                sample_steps=3,
             ),
             diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
@@ -155,12 +155,20 @@ class VolDiTIntegrationTest(unittest.TestCase):
         )
         with patch("modules.framework.vq_vae_s1.MONAIPerceptualLoss", return_value=nn.L1Loss()):
             module = VQVAES1Module(params)
+        module.eval()
 
         x = torch.randn(1, 1, 16, 16, 16)
-        noisy = module._q_sample(x, torch.ones(1), torch.randn_like(x))
-        self.assertTrue(torch.equal(noisy, x))
+        latent = module._before_make_noisy(x)
+        noisy, noise = module._make_noisy(x, torch.ones(1))
+        self.assertEqual(tuple(noisy.shape), tuple(latent.shape))
+        self.assertEqual(tuple(noise.shape), tuple(latent.shape))
         recon = module.one_step_sample(noisy, t=1.0, step_size=1.0)
-        self.assertEqual(tuple(recon.shape), tuple(x.shape))
+        self.assertTrue(torch.equal(recon, noisy))
+        decoded = module._after_make_clean(noisy)
+        clean = module._make_clean(noisy, t_start=1.0)
+        torch.testing.assert_close(clean, decoded, rtol=1e-2, atol=1e-2)
+        self.assertEqual(tuple(recon.shape), tuple(latent.shape))
+        self.assertEqual(tuple(clean.shape), tuple(x.shape))
 
         losses = module.get_data_loss({"target": x})
         self.assertIn("loss", losses)

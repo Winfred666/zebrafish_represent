@@ -31,8 +31,9 @@ class VQVAES1Module(BaseValTrainingFramework):
     the discriminator (after ``discriminator_iter_start`` global steps).
 
     Reconstruction validation uses the shared BaseValTrainingFramework matrix
-    slice logger: ``_q_sample`` is identity and ``one_step_sample`` performs
-    encode -> quantize -> decode.
+    slice logger in latent space: ``_before_make_noisy`` encodes, ``_q_sample``
+    is identity, ``one_step_sample`` is a no-op, and ``_after_make_clean``
+    decodes.
     """
 
     config: VQVAES1ModuleParams
@@ -69,12 +70,18 @@ class VQVAES1Module(BaseValTrainingFramework):
         del t, noise
         return clean
 
+    def _before_make_noisy(self, clean: Tensor) -> Tensor:
+        return self.vqvae.encode_stage_2_inputs(clean)
+
+    def _after_make_clean(self, denoised: Tensor) -> Tensor:
+        return self.vqvae.decode_stage_2_outputs(denoised)
+
     def get_t_from_sigma(self, sigma: float) -> float:
         return float(min(max(sigma, 0.0), 1.0))
 
     def one_step_sample(self, noisy: Tensor, t: float, step_size: float) -> Tensor:
         del t, step_size
-        return self.vqvae.one_step_reconstruct(noisy)
+        return noisy
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
         return self.vqvae(x)

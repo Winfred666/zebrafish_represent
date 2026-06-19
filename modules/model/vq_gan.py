@@ -149,10 +149,6 @@ class MONAIVQGAN(nn.Module):
         with _allow_nondeterministic_quantizer_ops():
             return self.network.decode_stage_2_outputs(z)
 
-    @torch.no_grad()
-    def one_step_reconstruct(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decode_stage_2_outputs(self.encode_stage_2_inputs(x))
-
     def load_ckpt(self, ckpt_path: str | Path, *, strict: bool = True) -> None:
         raw = load_raw_checkpoint(ckpt_path)
         state_dict = extract_checkpoint_state_dict(raw)

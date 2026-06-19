@@ -154,12 +154,6 @@ class VQVAES1ModuleParams(BaseFrameworkParams):
     disc_channels: int = Field(default=64, ge=1)
     disc_layers: int = Field(default=3, ge=1)
 
-    @model_validator(mode="after")
-    def _validate_single_step_reconstruction(self) -> "VQVAES1ModuleParams":
-        if self.optimization.sample_steps != 1:
-            raise ValueError("VQ-VAE stage 1 requires optimization.sample_steps=1")
-        return self
-
 
 class VQVAES2ModuleParams(IngestibleParams):
     """Params for VQVAES2Module (stage 2 decoder fine-tuning)."""
