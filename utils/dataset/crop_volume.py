@@ -52,6 +52,8 @@ class CropTifVolumeHotDataset(Dataset):
     MANIFEST_FILE_NAME = "manifest.json"
     WARMED_FILE_NAME = "WARMED"
     WARM_LOCK_NAME = ".warm.lock"
+    THRESHOLDS_FILE_NAME = "fusion_thresholds.json"
+    THRESHOLD_LOCK_NAME = ".thresholds.lock"
 
     def __init__(self, config: CropTifVolumeHotDatasetParams):
         self._configure_from_config(config, discover_files=True)
@@ -113,6 +115,8 @@ class CropTifVolumeHotDataset(Dataset):
         self._full_sizes_path_value = self._crop_cache_dir_value / self.FULL_SIZES_FILE_NAME
         self._warmed_path_value = self._crop_cache_dir_value / self.WARMED_FILE_NAME
         self._warm_lock_path_value = self._crop_cache_dir_value / self.WARM_LOCK_NAME
+        self._thresholds_path_value = self._crop_cache_dir_value / self.THRESHOLDS_FILE_NAME
+        self._threshold_lock_path_value = self._crop_cache_dir_value / self.THRESHOLD_LOCK_NAME
 
         self._volume_entries: list[_VolumeIndexEntry] = []
         self._cumulative_crop_counts: list[int] = []
@@ -229,6 +233,12 @@ class CropTifVolumeHotDataset(Dataset):
 
     def _warm_lock_path(self) -> Path:
         return self._warm_lock_path_value
+
+    def _thresholds_path(self) -> Path:
+        return self._thresholds_path_value
+
+    def _threshold_lock_path(self) -> Path:
+        return self._threshold_lock_path_value
 
     def cache_complete(self) -> bool:
         if not self._file_paths:
@@ -367,7 +377,7 @@ class CropTifVolumeHotDataset(Dataset):
             size=self.file_count * 4,
             dtype=_INDEX_STORAGE_DTYPE,
         ).view(self.file_count, 4)
-        self._fusion_thresholds = self._compute_fusion_thresholds()
+        self._fusion_thresholds = self._load_or_compute_fusion_thresholds()
 
         if enable_warmup:
             self._warm_cache_once()
@@ -378,11 +388,14 @@ class CropTifVolumeHotDataset(Dataset):
 
         q_min, q_max = (percentile / 100.0 for percentile in self.percentile_clim)
         thresholds: list[tuple[float, float]] = []
+        use_endpoint_extrema = q_min <= 0.0 and q_max >= 1.0
         for vol_idx, entry in enumerate(self._volume_entries):
             _, full_d, full_h, full_w = (
                 int(dim) for dim in self._full_sizes_storage[vol_idx].tolist()
             )
             valid_chunks: list[torch.Tensor] = []
+            running_min: torch.Tensor | None = None
+            running_max: torch.Tensor | None = None
             for local_idx in range(entry.crop_count):
                 crop_start = entry.crop_offset + local_idx * entry.crop_numel
                 crop = self._crop_storage.narrow(
@@ -397,19 +410,70 @@ class CropTifVolumeHotDataset(Dataset):
                 valid_w = min(start_w + crop_w, full_w) - start_w
                 if valid_d <= 0 or valid_h <= 0 or valid_w <= 0:
                     continue
-                valid_chunks.append(
-                    crop[:, :valid_d, :valid_h, :valid_w].reshape(-1)
-                )
+                valid = crop[:, :valid_d, :valid_h, :valid_w].reshape(-1)
+                if use_endpoint_extrema:
+                    local_min = valid.min()
+                    local_max = valid.max()
+                    running_min = local_min if running_min is None else torch.minimum(running_min, local_min)
+                    running_max = local_max if running_max is None else torch.maximum(running_max, local_max)
+                    continue
+                valid_chunks.append(valid)
+            if use_endpoint_extrema:
+                if running_min is None or running_max is None:
+                    raise ValueError(
+                        f"No valid original voxels found for fusion_id={entry.fusion_id}"
+                    )
+                thresholds.append((float(running_min.item()), float(running_max.item())))
+                continue
             if not valid_chunks:
                 raise ValueError(
                     f"No valid original voxels found for fusion_id={entry.fusion_id}"
                 )
             block = torch.cat(valid_chunks)
+            lower = block.min() if q_min <= 0.0 else torch.quantile(block, q_min)
+            upper = block.max() if q_max >= 1.0 else torch.quantile(block, q_max)
             thresholds.append((
-                float(torch.quantile(block, q_min).item()),
-                float(torch.quantile(block, q_max).item()),
+                float(lower.item()),
+                float(upper.item()),
             ))
         return thresholds
+
+    def _threshold_cache_token(self) -> str:
+        manifest_token = hashlib.md5(
+            self._manifest_path().read_bytes()
+        ).hexdigest()
+        raw = json.dumps({
+            "manifest_token": manifest_token,
+            "normalize": self.normalize,
+            "percentile_clim": self.percentile_clim,
+        }, sort_keys=True)
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    def _load_or_compute_fusion_thresholds(self) -> list[tuple[float, float]]:
+        if not self.normalize:
+            return [(0.0, 1.0) for _ in self._volume_entries]
+
+        cache_token = self._threshold_cache_token()
+        with self._exclusive_lock(self._threshold_lock_path()):
+            if self._thresholds_path().exists():
+                payload = json.loads(self._thresholds_path().read_text(encoding="utf-8"))
+                if payload.get("token") == cache_token:
+                    raw_thresholds = payload.get("thresholds", [])
+                    if len(raw_thresholds) == len(self._volume_entries):
+                        return [
+                            (float(bounds[0]), float(bounds[1]))
+                            for bounds in raw_thresholds
+                        ]
+            thresholds = self._compute_fusion_thresholds()
+            payload = {
+                "token": cache_token,
+                "thresholds": [[low, high] for low, high in thresholds],
+            }
+            self._thresholds_path().write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            return thresholds
 
     def _warm_cache_once(self, chunk_bytes: int = 64 * 1024 * 1024) -> None:
         manifest_token = hashlib.md5(
