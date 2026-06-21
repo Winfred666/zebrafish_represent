@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from utils.dataset.augment import clip_to_percentile
+from utils.dataset.augment import augment_training_crop, clip_to_percentile, random_90_rotate
 
 
 class PercentileClipTest(unittest.TestCase):
@@ -32,6 +32,17 @@ class PercentileClipTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(clipped).all())
         self.assertGreaterEqual(clipped.min().item(), -1.0)
         self.assertLessEqual(clipped.max().item(), 1.0)
+
+    def test_random_90_rotate_skips_non_square_hw(self) -> None:
+        x = torch.randn(2, 1, 4, 8, 2)
+        rotated = random_90_rotate(x, p=1.0)
+        self.assertEqual(rotated.shape, x.shape)
+        self.assertTrue(torch.equal(rotated, x))
+
+    def test_augment_training_crop_preserves_crop_shape(self) -> None:
+        x = torch.randn(1, 4, 8, 2)
+        augmented = augment_training_crop(x)
+        self.assertEqual(augmented.shape, x.shape)
 
 
 if __name__ == "__main__":

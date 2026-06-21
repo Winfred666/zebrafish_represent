@@ -37,6 +37,8 @@ def random_flip(x: Tensor, p: float = 0.5) -> Tensor:
 
 def random_90_rotate(x: Tensor, p: float = 0.5) -> Tensor:
     """Random 90-degree rotation on the (H, W) plane with probability *p*."""
+    if x.shape[3] != x.shape[4]:
+        return x
     if torch.rand(1, device=x.device) < p:
         k = int(torch.randint(1, 4, (1,), device=x.device).item())
         x = torch.rot90(x, k, dims=[3, 4])
@@ -97,6 +99,14 @@ def gamma_perturbation(x: Tensor, gamma_range: float = 0.2,
     log_factor = (torch.rand(B, device=device) * 2.0 - 1.0) * gamma_range
     factor = torch.exp(log_factor).view(-1, 1, 1, 1, 1)
     return torch.clamp(x * factor, -1.0, 1.0)
+
+
+def augment_training_crop(x: Tensor) -> Tensor:
+    """Apply shape-preserving spatial augmentation to one training crop."""
+    batched = x if x.ndim == 5 else x.unsqueeze(0)
+    batched = random_flip(batched)
+    batched = random_90_rotate(batched)
+    return batched if x.ndim == 5 else batched.squeeze(0)
 
 
 # ---------------------------------------------------------------------------

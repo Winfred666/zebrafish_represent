@@ -23,6 +23,7 @@ class CropTifVolumeHotDatasetParams(IngestibleParams):
     pad_to_multiple: tuple[int, int, int] | None = None
     patch_grid_multiple: tuple[int, int, int] | None = None
     cache_root: str | None = None
+    augment: bool = False
 
     @field_validator("data_dir")
     @classmethod

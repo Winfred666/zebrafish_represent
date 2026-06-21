@@ -1,0 +1,26 @@
+import_config: lg_0125_whole_voldit.yaml
+
+train_dataset:
+  params:
+    max_files: 1
+    crop_size: [64, 512, 128] # ideally fix the crop size to the overfit fish
+    percentile_clim: [0.0, 100.0]
+    augment: false
+
+val_dataset:
+  params:
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full/train
+    cache_root: /tmp/zebrafish_represent_hot_cache/voldit_ds0125/train
+    max_files: 1
+    crop_size: [64, 512, 128]
+    percentile_clim: [0.0, 100.0]
+
+train_dataloader:
+  params:
+    num_workers: 0
+    prefetch_factor: null
+
+val_dataloader:
+  params:
+    num_workers: 0
+    prefetch_factor: null

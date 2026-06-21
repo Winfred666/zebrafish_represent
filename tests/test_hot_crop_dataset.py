@@ -5,6 +5,7 @@ import pickle
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import tifffile
@@ -197,7 +198,26 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(dataset.overlap, (0.25, 0.25, 0.25))
             self.assertEqual(dataset.in_channels, 1)
             self.assertTrue(dataset.normalize)
+            self.assertFalse(dataset.augment)
             self.assertEqual(dataset.percentile_clim, (0.0, 100.0))
+
+    def test_getitem_applies_augmentation_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            raw_crops = np.arange(8, dtype=np.float32).reshape(1, 1, 2, 2, 2)
+            dataset = self._make_dataset(
+                data_dir,
+                volume_specs=[{"crops": raw_crops, "starts": [(0, 0, 0)]}],
+                normalize=False,
+                augment=True,
+            )
+
+            with mock.patch("utils.dataset.crop_volume.augment_training_crop", side_effect=lambda x: x + 3.0):
+                item = dataset[0]
+
+            expected = torch.from_numpy(raw_crops[0]) + 3.0
+            self.assertTrue(torch.equal(item["target"], expected))
 
     def test_cache_directory_unchanged_when_only_percentile_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

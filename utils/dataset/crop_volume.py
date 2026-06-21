@@ -22,7 +22,7 @@ from typing import Dict, Iterator
 import torch
 from torch.utils.data import Dataset
 
-from utils.dataset.augment import clip_to_percentile
+from utils.dataset.augment import augment_training_crop, clip_to_percentile
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 
 _CROP_STORAGE_DTYPE = torch.float32
@@ -81,6 +81,7 @@ class CropTifVolumeHotDataset(Dataset):
     ) -> None:
         self.config = config
         self.normalize = bool(config.normalize)
+        self.augment = bool(config.augment)
         self.percentile_clim = tuple(float(v) for v in config.percentile_clim)
         self.in_channels = int(config.in_channels)
         self.crop_size = config.crop_size
@@ -464,6 +465,8 @@ class CropTifVolumeHotDataset(Dataset):
             target = clip_to_percentile(crop, threshold_min, threshold_max)
         else:
             target = crop.clone()
+        if self.augment:
+            target = augment_training_crop(target)
 
         return {
             "target": target,
