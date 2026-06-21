@@ -15,6 +15,12 @@ import yaml
 from torch.utils.data import DataLoader
 
 
+def _is_global_rank_zero() -> bool:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return True
+    return int(torch.distributed.get_rank()) == 0
+
+
 def _tracking_uri_from_logger(logger: Any) -> str | None:
     tracking_uri = getattr(logger, "_tracking_uri", None)
     if tracking_uri is None:
@@ -51,20 +57,28 @@ class ArtifactManager:
     logger: Any = field(default=None, repr=False)
     tracking_uri: str = field(default="", repr=False)
 
-    def __init__(self, logger: Any = None) -> "ArtifactManager":
+    def __init__(
+        self,
+        logger: Any = None,
+        checkpoint_dir: str | Path | None = None,
+    ) -> "ArtifactManager":
         tracking_uri = _require_tracking_uri_from_logger(logger)
         staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
 
         artifact_root = staging_root.resolve()
 
-        checkpoint_dir = artifact_root / "checkpoints"
+        checkpoint_dir_path = (
+            Path(checkpoint_dir).resolve()
+            if checkpoint_dir is not None
+            else artifact_root / "checkpoints"
+        )
         config_dir = artifact_root / "configs"
         sample_dir = artifact_root / "samples"
-        for directory in (artifact_root, checkpoint_dir, config_dir, sample_dir):
+        for directory in (artifact_root, checkpoint_dir_path, config_dir, sample_dir):
             directory.mkdir(parents=True, exist_ok=True)
         
         self.root_dir = artifact_root
-        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_dir = checkpoint_dir_path
         self.config_dir = config_dir
         self.sample_dir = sample_dir
         self.logger = logger
@@ -150,6 +164,9 @@ def upload_checkpoints(trainer, logger) -> None:
     """Upload the current run's best/last checkpoint files into MLflow artifacts/checkpoints."""
     import mlflow
 
+    if not _is_global_rank_zero():
+        return
+
     ckpt_callback = getattr(trainer, "checkpoint_callback", None)
     if ckpt_callback is None:
         return
@@ -159,6 +176,19 @@ def upload_checkpoints(trainer, logger) -> None:
 
     checkpoint_paths: list[Path] = []
     seen: set[Path] = set()
+    artifact_manager = None
+    for callback in getattr(trainer, "callbacks", []):
+        if isinstance(callback, ArtifactManager):
+            artifact_manager = callback
+            break
+
+    if artifact_manager is not None:
+        final_last_path = artifact_manager.checkpoint_dir / "last.ckpt"
+        if final_last_path.is_file():
+            resolved = final_last_path.resolve()
+            seen.add(resolved)
+            checkpoint_paths.append(final_last_path)
+
     for attr_name in ("best_model_path", "last_model_path"):
         raw_path = getattr(ckpt_callback, attr_name, None)
         if not raw_path:

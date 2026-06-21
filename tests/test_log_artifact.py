@@ -16,6 +16,18 @@ class ArtifactManagerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ArtifactManager(logger=type("Logger", (), {"_tracking_uri": ""})())
 
+    def test_supports_external_checkpoint_dir(self) -> None:
+        logger = type("Logger", (), {"_tracking_uri": "http://127.0.0.1:5000"})()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_dir = Path(tmp) / "checkpoints"
+            manager = ArtifactManager(logger=logger, checkpoint_dir=checkpoint_dir)
+            self.assertEqual(manager.checkpoint_dir, checkpoint_dir.resolve())
+            self.assertTrue(manager.checkpoint_dir.is_dir())
+            self.assertTrue(manager.root_dir.is_dir())
+            manager.cleanup_temp_folder()
+            self.assertFalse(manager.root_dir.exists())
+            self.assertTrue(manager.checkpoint_dir.exists())
+
 
 class UploadCheckpointsTest(unittest.TestCase):
     def test_uploads_only_best_and_last_checkpoint_paths(self) -> None:

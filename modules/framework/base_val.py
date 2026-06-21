@@ -650,6 +650,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         logger = self.logger
         if logger is None:
             return
+        if int(getattr(trainer, "global_rank", 0)) != 0:
+            return
 
         if hasattr(trainer, "checkpoint_callback"):
             upload_checkpoints(trainer, logger)
