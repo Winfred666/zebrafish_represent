@@ -12,7 +12,7 @@ from modules.framework.base import BaseTrainingFramework
 from utils.dataset.fusion import volume_fuse
 from utils.display import (
     build_clipped_midw_grid,
-    build_clipped_w_mip_grid,
+    build_w_mip_grid,
     log_image_artifact,
 )
 
@@ -306,9 +306,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         if not is_rank0 or self.logger is None:
             return
         n_show = min(samples.shape[0], 5)
-        image = build_clipped_w_mip_grid(
+        image = build_w_mip_grid(
             [samples[i].detach().cpu() for i in range(n_show)],
-            colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
         )
         if image is not None:
             log_image_artifact(self.logger, image, tag, self.global_step)

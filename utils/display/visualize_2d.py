@@ -290,30 +290,24 @@ def build_clipped_midw_grid(
     return np.vstack(fusion_rows)
 
 
-def build_clipped_w_mip_grid(
+def build_w_mip_grid(
     pred_volumes: list[torch.Tensor],
     *,
-    colorbar_limits: tuple[float, float] = (-1.0, 1.0),
+    colorbar_limits: tuple[float, float] | None = None,
 ) -> np.ndarray | None:
     if not pred_volumes:
         return None
 
     pred_np = [_channel0_volume_np(volume) for volume in pred_volumes]
-    scaling_rates = []
-    for volume_np in pred_np:
-        volume_unit = np.clip((volume_np + 1.0) * 0.5, 0.0, None)
-        p995 = float(np.quantile(volume_unit, 0.995))
-        scaling_rates.append(1.0 / max(p995, 1.0e-8))
+    pad_value = float(min(float(volume_np.min()) for volume_np in pred_np))
 
-    mean_scaling_rate = float(np.mean(scaling_rates))
     max_shape = tuple(
         max(int(volume_np.shape[axis]) for volume_np in pred_np)
         for axis in range(3)
     )
     projection_row = []
     for pred_volume_np in pred_np:
-        pred_vis = np.clip((pred_volume_np + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
-        pred_padded = center_pad_fusion_volume(pred_vis, max_shape, fill_value=-1.0)
+        pred_padded = center_pad_fusion_volume(pred_volume_np, max_shape, fill_value=pad_value)
         projection_row.append(
             fix_2d_scalar(
                 np.max(pred_padded, axis=2),
