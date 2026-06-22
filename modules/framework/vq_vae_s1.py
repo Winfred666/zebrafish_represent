@@ -7,6 +7,8 @@ training loop.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +23,8 @@ from modules.framework.vq_vae_common import (
     feature_matching_loss,
 )
 from utils.sanitize.framework_config import VQVAES1ModuleParams
+
+logger = logging.getLogger(__name__)
 
 
 class VQVAES1Module(BaseValTrainingFramework):
@@ -40,7 +44,6 @@ class VQVAES1Module(BaseValTrainingFramework):
 
     def __init__(self, config: VQVAES1ModuleParams):
         super().__init__(config)
-        self.lr = float(config.lr)
         self.l1_weight = float(config.l1_weight)
         self.perceptual_weight = float(config.perceptual_weight)
         self.volume_gan_weight = float(config.volume_gan_weight)
@@ -57,6 +60,8 @@ class VQVAES1Module(BaseValTrainingFramework):
         )
         self.perceptual_loss_fn: MONAIPerceptualLoss | None = None
         self.adversarial_loss = PatchAdversarialLoss(criterion=config.disc_loss_type)
+        if config.load_from_ckpt:
+            self._load_module_ckpt(config.load_from_ckpt, strict=bool(config.strict_load))
 
     # ------------------------------------------------------------------
     # BaseValTrainingFramework reconstruction hooks
@@ -76,6 +81,15 @@ class VQVAES1Module(BaseValTrainingFramework):
     def _after_make_clean(self, denoised: Tensor) -> Tensor:
         return self.vqvae.decode_stage_2_outputs(denoised)
 
+    def _make_initial_noise(self, batch_size: int, *, seed: int | None = None) -> Tensor:
+        del seed
+        latent_dtype = next(self.vqvae.parameters()).dtype
+        return torch.zeros(
+            (batch_size, int(self.model.embedding_dim), 16, 128, 16),
+            device=self.device,
+            dtype=latent_dtype,
+        )
+
     def get_t_from_sigma(self, sigma: float) -> float:
         return float(min(max(sigma, 0.0), 1.0))
 
@@ -85,6 +99,36 @@ class VQVAES1Module(BaseValTrainingFramework):
 
     def forward(self, x: Tensor) -> tuple[Tensor, dict]:
         return self.vqvae(x)
+
+    def _load_module_ckpt(self, ckpt_path: str, *, strict: bool) -> None:
+        raw = torch.load(ckpt_path, map_location="cpu")
+        state_dict = raw["state_dict"] if isinstance(raw, dict) and "state_dict" in raw else raw
+        missing, unexpected = self.load_state_dict(state_dict, strict=strict)
+        logger.info(
+            "Loaded VQVAES1Module checkpoint from %s (missing=%d, unexpected=%d)",
+            ckpt_path,
+            len(missing),
+            len(unexpected),
+        )
+
+    def _lr_schedulers(self) -> list:
+        schedulers = self.lr_schedulers()
+        if schedulers is None:
+            return []
+        if isinstance(schedulers, (list, tuple)):
+            return list(schedulers)
+        return [schedulers]
+
+    def _step_lr_scheduler(self, *, interval: str, optimizer_idx: int | None = None) -> None:
+        scheduler_name = str(self.optimization.lr_scheduler)
+        schedulers = self._lr_schedulers()
+        if not schedulers:
+            return
+        if interval == "step" and scheduler_name == "linear_warmup" and optimizer_idx is not None:
+            schedulers[optimizer_idx].step()
+        if interval == "epoch" and scheduler_name == "exponential":
+            for scheduler in schedulers:
+                scheduler.step()
 
     # ------------------------------------------------------------------
     # forward + loss computation
@@ -177,6 +221,7 @@ class VQVAES1Module(BaseValTrainingFramework):
             loss = losses["loss"]
             self.manual_backward(loss)
             opt.step()
+            self._step_lr_scheduler(interval="step", optimizer_idx=optimizer_idx)
 
             self.log("train_recon_loss", losses["recon_loss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             self.log("train_commitment_loss", losses["commitment_loss"], prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
@@ -191,6 +236,7 @@ class VQVAES1Module(BaseValTrainingFramework):
             discloss = self._forward_disc(x, x_recon)
             self.manual_backward(discloss)
             opt.step()
+            self._step_lr_scheduler(interval="step", optimizer_idx=optimizer_idx)
             self.log("train_disc_loss", discloss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
             return discloss
 
@@ -199,17 +245,47 @@ class VQVAES1Module(BaseValTrainingFramework):
     # ------------------------------------------------------------------
 
     def configure_optimizers(self):
+        lr = float(self.optimization.learning_rate)
         opt_ae = torch.optim.Adam(
             [p for p in self.vqvae.parameters() if p.requires_grad],
-            lr=self.lr, betas=(0.5, 0.9),
+            lr=lr, betas=(0.5, 0.9),
         )
         opt_disc = torch.optim.Adam(
             list(self.volume_discriminator.parameters()),
-            lr=self.lr, betas=(0.5, 0.9),
+            lr=lr, betas=(0.5, 0.9),
         )
-        return [opt_ae, opt_disc]
+        scheduler_name = str(self.optimization.lr_scheduler)
+        if scheduler_name == "none":
+            return [opt_ae, opt_disc]
+
+        if scheduler_name == "linear_warmup":
+            sched_ae = torch.optim.lr_scheduler.LinearLR(
+                opt_ae,
+                start_factor=1e-6,
+                end_factor=1.0,
+                total_iters=self.optimization.lr_warmup_steps,
+            )
+            sched_disc = torch.optim.lr_scheduler.LinearLR(
+                opt_disc,
+                start_factor=1e-6,
+                end_factor=1.0,
+                total_iters=self.optimization.lr_warmup_steps,
+            )
+        elif scheduler_name == "exponential":
+            sched_ae = torch.optim.lr_scheduler.ExponentialLR(
+                opt_ae,
+                gamma=self.optimization.lr_decay_gamma,
+            )
+            sched_disc = torch.optim.lr_scheduler.ExponentialLR(
+                opt_disc,
+                gamma=self.optimization.lr_decay_gamma,
+            )
+        else:
+            raise ValueError(f"Unsupported lr_scheduler={scheduler_name!r}")
+        return [opt_ae, opt_disc], [sched_ae, sched_disc]
 
     def on_train_epoch_end(self) -> None:
+        self._step_lr_scheduler(interval="epoch")
         opts = self.optimizers()
         opt = opts[0] if isinstance(opts, (list, tuple)) else opts
         if opt is not None:

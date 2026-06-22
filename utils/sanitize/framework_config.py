@@ -163,6 +163,8 @@ class VQVAES1ModuleParams(BaseFrameworkParams):
     disc_loss_type: str = "least_squares"
     disc_channels: int = Field(default=64, ge=1)
     disc_layers: int = Field(default=3, ge=1)
+    load_from_ckpt: str | None = None
+    strict_load: bool = True
 
 
 class VQVAES2ModuleParams(IngestibleParams):
