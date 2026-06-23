@@ -11,15 +11,18 @@ import torch.nn.functional as F
 from modules.framework.base import BaseTrainingFramework
 from modules.framework.base_val import BaseValTrainingFramework
 from modules.framework.IaN_flow import IaNFlowModule
-from modules.framework.latent_ddpm import LatentDDPMModule
+from modules.framework.ddpm import DDPMModule
+from modules.framework.ddpm_latent import LatentDDPMModule
 from modules.framework.vq_vae_s1 import VQVAES1Module
 from modules.framework.vq_vae_s2 import VQVAES2Module
+from modules.model.dit3d import DiT3D
 from modules.model.voldit import VolDiT
 from modules.model.vq_gan import MONAIVQGAN
 from utils.sanitize.framework_config import (
     BaseFrameworkParams,
     CommonDiffusionParams,
     DDPMDiffusionParams,
+    DDPMModuleParams,
     IaNDiffusionParams,
     IaNFlowModuleParams,
     LatentDDPMModuleParams,
@@ -350,6 +353,42 @@ class VolDiTIntegrationTest(unittest.TestCase):
         module = LatentDDPMModule(params)
         loss = module.training_step({"target": torch.randn(2, 1, 8, 8, 8)}, 0)
         self.assertEqual(loss.ndim, 0)
+
+    def test_raw_dit3d_ddpm_loss_and_sample_without_stage1(self) -> None:
+        model = DiT3D(
+            in_channels=1,
+            out_channels=1,
+            input_size=(4, 4, 4),
+            patch_size=(2, 2, 2),
+            hidden_size=32,
+            depth=1,
+            num_heads=4,
+            mlp_ratio=2.0,
+            pos_encoding_type="sinusoidal",
+        )
+        params = DDPMModuleParams(
+            model=model,
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="smooth_l1",
+                sample_steps=2,
+            ),
+            diffusion=DDPMDiffusionParams(
+                num_train_timesteps=4,
+                beta_schedule="linear",
+                prediction_type="epsilon",
+            ),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = DDPMModule(params)
+
+        loss = module.training_step({"target": torch.randn(2, 1, 4, 4, 4)}, 0)
+        sampled = module.sample(batch_size=2, steps=1, seed=123)
+
+        self.assertEqual(loss.ndim, 0)
+        self.assertEqual(tuple(sampled.shape), (2, 1, 4, 4, 4))
+        self.assertFalse(hasattr(module, "stage1_model"))
 
     def test_base_framework_defaults_keep_linear_warmup(self) -> None:
         params = BaseFrameworkParams(

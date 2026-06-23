@@ -29,7 +29,7 @@ class RuntimeEntryTest(unittest.TestCase):
         expected_classes = {
             "DiT3D", "MONAIVQGAN", "PerceptualNetEncoder", "PRDiT",
             "TRELLISSparseStructureVAE", "VolDiT",
-            "RectifiedFlowModule", "LatentDDPMModule", "TRELLISOccupancyVAEModule",
+            "DDPMModule", "RectifiedFlowModule", "LatentDDPMModule", "TRELLISOccupancyVAEModule",
             "MLFlowLogger", "Trainer",
             "ModelCheckpoint", "EarlyStopping", "LearningRateMonitor",
             "IntegratedGPUMemoryMonitor", "ArtifactManager",
@@ -282,7 +282,7 @@ class RuntimeEntryTest(unittest.TestCase):
     def test_yaml_import_config_chain(self) -> None:
         config = load_yaml_config("config/model/dit.yaml")
         self.assertEqual(config["model"]["class_name"], "DiT3D")
-        self.assertEqual(config["model"]["params"]["patch_size"], [2, 2, 2])
+        self.assertEqual(config["model"]["params"]["patch_size"], [16, 16, 16])
 
     def test_framework_config_defaults(self) -> None:
         config = load_yaml_config("config/framework/base.yaml")
@@ -370,6 +370,22 @@ class RuntimeEntryTest(unittest.TestCase):
 
         framework_config = load_yaml_config("config/framework/voldit_ddpm.yaml")
         self.assertEqual(framework_config["framework"]["class_name"], "LatentDDPMModule")
+        self.assertEqual(
+            framework_config["framework"]["params"]["diffusion"]["prediction_type"],
+            "v_prediction",
+        )
+
+    def test_raw_dit_ddpm_configs_load(self) -> None:
+        model_config = load_yaml_config("config/model/dit.yaml")
+        self.assertNotIn("stage1_model", model_config)
+        self.assertEqual(model_config["model"]["class_name"], "DiT3D")
+        self.assertEqual(model_config["model"]["params"]["input_size"], [64, 512, 128])
+        self.assertEqual(model_config["model"]["params"]["patch_size"], [16, 16, 16])
+
+        framework_config = load_yaml_config("config/framework/ddpm.yaml")
+        self.assertEqual(framework_config["framework"]["class_name"], "DDPMModule")
+        self.assertNotIn("stage1_model", framework_config["framework"]["params"])
+        self.assertEqual(framework_config["framework"]["params"]["model"], "runtime.model")
         self.assertEqual(
             framework_config["framework"]["params"]["diffusion"]["prediction_type"],
             "v_prediction",

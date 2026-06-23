@@ -1,4 +1,4 @@
-"""Latent DDPM training module."""
+"""DDPM training module."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from modules.framework.base_val import BaseValTrainingFramework
-from utils.sanitize.framework_config import LatentDDPMModuleParams
+from utils.sanitize.framework_config import DDPMModuleParams
 
 
 def _build_beta_schedule(
@@ -34,25 +34,19 @@ def _build_beta_schedule(
     raise ValueError(f"Unsupported beta_schedule={beta_schedule!r}. Use one of: linear | cosine")
 
 
-class LatentDDPMModule(BaseValTrainingFramework):
-    """DDPM objective over frozen stage-1 latents with shared BaseValTrainingFramework flows."""
+class DDPMModule(BaseValTrainingFramework):
+    """DDPM objective over model input space with shared BaseValTrainingFramework flows."""
 
-    config: LatentDDPMModuleParams
+    config: DDPMModuleParams
 
-    def __init__(self, config: LatentDDPMModuleParams):
+    def __init__(self, config: DDPMModuleParams):
         super().__init__(config)
-        self.stage1_model = config.stage1_model
-        self.scale_factor = float(config.scale_factor)
         self.num_train_timesteps = int(config.diffusion.num_train_timesteps)
 
-        if self.stage1_model is None:
-            raise ValueError("LatentDDPMModule requires stage1_model.")
         if bool(getattr(self.model, "learn_sigma", False)):
             raise NotImplementedError(
-                "LatentDDPMModule currently requires model.learn_sigma=False."
+                "DDPMModule currently requires model.learn_sigma=False."
             )
-        self.stage1_model.eval()
-        self.stage1_model.requires_grad_(False)
 
         betas = _build_beta_schedule(
             num_train_timesteps=self.num_train_timesteps,
@@ -61,8 +55,8 @@ class LatentDDPMModule(BaseValTrainingFramework):
             beta_end=config.diffusion.beta_end,
         )
         alphas = 1.0 - betas
-        # alpha_t = 1 - beta_t, and alpha_cumprod[t] = \prod_{i=0}^t alpha_i.
-        # These are the standard DDPM schedule terms used to mix clean latents
+        # alpha_t = 1 - beta_t, and alpha_cumprod[t] = prod_{i=0}^t alpha_i.
+        # These are the standard DDPM schedule terms used to mix clean inputs
         # with noise and to compute the reverse-process coefficients.
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_prev = torch.cat([torch.ones(1, dtype=torch.float32), alphas_cumprod[:-1]], dim=0)
@@ -152,46 +146,22 @@ class LatentDDPMModule(BaseValTrainingFramework):
                 timestep = upper_idx
         return float(timestep + 1) / float(max(1, self.num_train_timesteps))
 
-    def _before_make_noisy(self, clean: Tensor) -> Tensor:
-        self.stage1_model.eval()
-        return self.stage1_model.encode_stage_2_inputs(clean).detach() * self.scale_factor
-
-    def _after_make_clean(self, denoised: Tensor) -> Tensor:
-        self.stage1_model.eval()
-        decoded = self._decode_latents(denoised)
-        return decoded.detach()
-
-    def _decode_latents(self, clean: Tensor) -> Tensor:
-        self.stage1_model.eval()
-        return self.stage1_model.decode_stage_2_outputs(clean / self.scale_factor)
-
-    def _make_initial_noise(self, batch_size: int, *, seed: int | None = None) -> Tensor:
-        shape = (
-            batch_size,
-            self.model.in_channels,
-            self.model.input_size[0],
-            self.model.input_size[1],
-            self.model.input_size[2],
-        )
-        with self._fixed_seed_context(seed):
-            return torch.randn(shape, device=self.device) * self._noise_w
-
     def get_data_loss(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        clean_latents = self._before_make_noisy(batch["target"])
+        clean = self._before_make_noisy(batch["target"])
         timestep_repeats = int(getattr(self.config, "timestep_repeats", 1) or 1)
         if timestep_repeats > 1:
-            clean_latents = clean_latents.repeat_interleave(timestep_repeats, dim=0)
+            clean = clean.repeat_interleave(timestep_repeats, dim=0)
         timesteps = torch.randint(
             0,
             self.num_train_timesteps,
-            (clean_latents.shape[0],),
-            device=clean_latents.device,
+            (clean.shape[0],),
+            device=clean.device,
             dtype=torch.long,
         )
-        noise = torch.randn_like(clean_latents)
-        noisy_latents = self._q_sample(clean_latents, timesteps, noise)
-        prediction = self(noisy_latents, timesteps)
-        target = self._target_from_prediction_type(clean_latents, noise, timesteps)
+        noise = torch.randn_like(clean)
+        noisy = self._q_sample(clean, timesteps, noise)
+        prediction = self(noisy, timesteps)
+        target = self._target_from_prediction_type(clean, noise, timesteps)
         return {"loss": self._ddpm_loss(prediction, target)}
 
     def _q_sample(self, clean: Tensor, t: Tensor, noise: Tensor) -> Tensor:
@@ -204,7 +174,7 @@ class LatentDDPMModule(BaseValTrainingFramework):
 
     def _target_from_prediction_type(
         self,
-        clean_latents: Tensor,
+        clean: Tensor,
         noise: Tensor,
         timesteps: Tensor,
     ) -> Tensor:
@@ -212,25 +182,25 @@ class LatentDDPMModule(BaseValTrainingFramework):
         if prediction_type == "epsilon":
             return noise
         if prediction_type == "x0":
-            return clean_latents
-        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, clean_latents.ndim)
-        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, clean_latents.ndim)
-        return alpha * noise - sigma * clean_latents
+            return clean
+        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, clean.ndim)
+        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, clean.ndim)
+        return alpha * noise - sigma * clean
 
     def _epsilon_from_prediction(
         self,
         prediction: Tensor,
-        noisy_latents: Tensor,
+        noisy: Tensor,
         timesteps: Tensor,
     ) -> Tensor:
         prediction_type = self.config.diffusion.prediction_type
         if prediction_type == "epsilon":
             return prediction
-        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy_latents.ndim)
-        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy_latents.ndim)
+        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy.ndim)
+        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy.ndim)
         if prediction_type == "x0":
-            return (noisy_latents - alpha * prediction) / sigma
-        return sigma * noisy_latents + alpha * prediction
+            return (noisy - alpha * prediction) / sigma
+        return sigma * noisy + alpha * prediction
 
     def _ddpm_loss(self, prediction: Tensor, target: Tensor) -> Tensor:
         loss_type = self.optimization.loss_type
@@ -277,17 +247,17 @@ class LatentDDPMModule(BaseValTrainingFramework):
     def _x0_from_prediction(
         self,
         prediction: Tensor,
-        noisy_latents: Tensor,
+        noisy: Tensor,
         timesteps: Tensor,
     ) -> Tensor:
         prediction_type = self.config.diffusion.prediction_type
         if prediction_type == "x0":
             return prediction
-        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy_latents.ndim)
-        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy_latents.ndim)
+        alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, noisy.ndim)
+        sigma = self._extract(self.sqrt_one_minus_alphas_cumprod, timesteps, noisy.ndim)
         if prediction_type == "epsilon":
-            return (noisy_latents - sigma * prediction) / alpha
-        return alpha * noisy_latents - sigma * prediction
+            return (noisy - sigma * prediction) / alpha
+        return alpha * noisy - sigma * prediction
 
     @torch.no_grad()
     def _reverse_process(

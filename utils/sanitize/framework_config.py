@@ -85,15 +85,20 @@ class RectifiedFlowModuleParams(BaseFrameworkParams):
     null_cond_channels: int = Field(default=1024, ge=1)
 
 
-class LatentDDPMModuleParams(BaseFrameworkParams):
-    """Params for latent DDPM training with a frozen stage-1 encoder."""
+class DDPMModuleParams(BaseFrameworkParams):
+    """Params for DDPM training directly in model input space."""
 
-    stage1_model: object = None
     diffusion: DDPMDiffusionParams
-    scale_factor: float = Field(default=1.0, gt=0.0)
     use_ema: bool = True
     ema_decay: float = Field(default=0.9999, gt=0.0, lt=1.0)
     timestep_repeats: int = Field(default=1, ge=1)
+
+
+class LatentDDPMModuleParams(DDPMModuleParams):
+    """Params for latent DDPM training with a frozen stage-1 encoder."""
+
+    stage1_model: object = None
+    scale_factor: float = Field(default=1.0, gt=0.0)
 
 
 class IaNDiffusionParams(CommonDiffusionParams):

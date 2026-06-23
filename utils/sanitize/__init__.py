@@ -7,6 +7,7 @@ from utils.sanitize.data_config import (
 )
 from utils.sanitize.framework_config import (
     DDPMDiffusionParams,
+    DDPMModuleParams,
     IaNFlowModuleParams,
     IaNDiffusionParams,
     LatentDDPMModuleParams,
@@ -59,6 +60,7 @@ __all__ = [
     "VolDiTParams",
     "OptimizationParams",
     "DDPMDiffusionParams",
+    "DDPMModuleParams",
     "IaNFlowModuleParams",
     "IaNDiffusionParams",
     "LatentDDPMModuleParams",

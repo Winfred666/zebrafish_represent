@@ -1,0 +1,25 @@
+# Raw-volume DDPM training without a frozen stage-1 encoder/decoder.
+framework:
+  class_name: DDPMModule
+  params:
+    model: runtime.model
+    stat_metrics_every_n_epochs: 500
+    use_ema: false
+    ema_decay: 0.9999
+    optimization:
+      learning_rate: 0.00004
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      lr_scheduler: exponential
+      lr_decay_gamma: 0.99999
+      loss_type: smooth_l1
+      sample_steps: 300
+    diffusion:
+      num_train_timesteps: 300
+      beta_schedule: cosine
+      beta_start: 0.0001
+      beta_end: 0.02
+      prediction_type: v_prediction
+      timestep_respacing: null
+      gen_noise_weight: 1.0
