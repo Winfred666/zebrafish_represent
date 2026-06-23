@@ -10,6 +10,7 @@ framework:
     diffusion:
       timestep_respacing: null
       gen_noise_weight: 0.001
+    stat_metrics_every_n_epochs: 200
     mae:
       mask_ratio: 0.3
       foreground_weight: 10.0

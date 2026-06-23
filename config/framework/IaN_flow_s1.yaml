@@ -3,7 +3,7 @@ framework:
   params:
     model: runtime.model
     stage: 1
-    stat_metrics_every_n_epochs: 6
+    stat_metrics_every_n_epochs: 200
     optimization:
       learning_rate: 0.00002
       weight_decay: 0.000001

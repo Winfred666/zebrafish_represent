@@ -13,7 +13,7 @@ framework:
       gen_noise_weight: 1.0 # for later stage only
     testing:
       run_sampling_after_fit: false
-    stat_metrics_every_n_epochs: 1
+    stat_metrics_every_n_epochs: 200
     loss_type: dice
     lambda_kl: 0.001
     occupancy_threshold: 0.5

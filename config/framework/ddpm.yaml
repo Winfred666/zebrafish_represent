@@ -3,7 +3,7 @@ framework:
   class_name: DDPMModule
   params:
     model: runtime.model
-    stat_metrics_every_n_epochs: 500
+    stat_metrics_every_n_epochs: 200
     use_ema: false
     ema_decay: 0.9999
     optimization:

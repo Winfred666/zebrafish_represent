@@ -5,7 +5,7 @@ framework:
     model: runtime.model
     stage1_model: runtime.stage1_model
     scale_factor: 2.89
-    stat_metrics_every_n_epochs: 6
+    stat_metrics_every_n_epochs: 200
     use_ema: false
     ema_decay: 0.9999
     optimization:

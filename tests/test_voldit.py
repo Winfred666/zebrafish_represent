@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -620,7 +621,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
         module = IaNFlowModule(params)
         self.assertAlmostEqual(module.get_t_from_sigma(0.5), 1.0 / 3.0, places=6)
 
-    def test_validation_preview_store_keeps_first_five_global_samples(self) -> None:
+    def test_validation_preview_store_keeps_first_preview_global_samples(self) -> None:
         params = BaseFrameworkParams(
             model=TinySampleModel(),
             optimization=OptimizationParams(
@@ -633,22 +634,74 @@ class VolDiTIntegrationTest(unittest.TestCase):
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
         )
         module = TinyValSampleFramework(params)
-        first_batch = torch.tensor([6.0, 1.0, 4.0], dtype=torch.float32).view(3, 1, 1, 1, 1)
-        second_batch = torch.tensor([0.0, 5.0], dtype=torch.float32).view(2, 1, 1, 1, 1)
-        third_batch = torch.tensor([2.0, 3.0], dtype=torch.float32).view(2, 1, 1, 1, 1)
+        first_batch = torch.tensor([16.0, 1.0, 4.0, 9.0, 12.0], dtype=torch.float32).view(5, 1, 1, 1, 1)
+        second_batch = torch.tensor([0.0, 5.0, 10.0, 15.0, 17.0], dtype=torch.float32).view(5, 1, 1, 1, 1)
+        third_batch = torch.tensor([2.0, 3.0, 6.0, 7.0, 8.0, 11.0, 13.0, 14.0], dtype=torch.float32).view(8, 1, 1, 1, 1)
 
-        module._store_validation_stat_preview([6, 1, 4], first_batch, total_samples=7)
-        module._store_validation_stat_preview([0, 5], second_batch, total_samples=7)
-        module._store_validation_stat_preview([2, 3], third_batch, total_samples=7)
+        module._store_validation_stat_preview([16, 1, 4, 9, 12], first_batch, total_samples=18)
+        module._store_validation_stat_preview([0, 5, 10, 15, 17], second_batch, total_samples=18)
+        module._store_validation_stat_preview([2, 3, 6, 7, 8, 11, 13, 14], third_batch, total_samples=18)
 
         self.assertIsNotNone(module._val_stat_generated_previews)
         preview_map = module._val_stat_generated_previews or {}
-        self.assertEqual(sorted(preview_map), [0, 1, 2, 3, 4])
-        self.assertEqual(float(preview_map[0].item()), 0.0)
-        self.assertEqual(float(preview_map[1].item()), 1.0)
-        self.assertEqual(float(preview_map[2].item()), 2.0)
-        self.assertEqual(float(preview_map[3].item()), 3.0)
-        self.assertEqual(float(preview_map[4].item()), 4.0)
+        self.assertEqual(sorted(preview_map), list(range(16)))
+        for idx in range(16):
+            self.assertEqual(float(preview_map[idx].item()), float(idx))
+
+    def test_validation_stat_metrics_run_during_sanity_check_and_interval(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            stat_metrics_every_n_epochs=200,
+        )
+        module = TinyValSampleFramework(params)
+        trainer = type("TrainerStub", (), {"sanity_checking": False, "current_epoch": 0})()
+        module.trainer = trainer
+
+        self.assertFalse(module._should_run_validation_stat_metrics())
+        trainer.current_epoch = 198
+        self.assertFalse(module._should_run_validation_stat_metrics())
+        trainer.current_epoch = 199
+        self.assertTrue(module._should_run_validation_stat_metrics())
+        trainer.sanity_checking = True
+        trainer.current_epoch = 0
+        self.assertTrue(module._should_run_validation_stat_metrics())
+        trainer.sanity_checking = False
+        disabled_module = TinyValSampleFramework(params.model_copy(update={"stat_metrics_every_n_epochs": 0}))
+        disabled_module.trainer = trainer
+        self.assertFalse(disabled_module._should_run_validation_stat_metrics())
+
+    def test_validation_sample_mip_preview_stacks_sixteen_rows(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyValSampleFramework(params)
+        samples = torch.zeros(1, 18, 2, 2, 2)
+        rendered_rows = [np.full((2, 3, 3), fill_value=i, dtype=np.uint8) for i in range(16)]
+
+        with patch("modules.framework.base_val.build_w_mip_grid", side_effect=rendered_rows) as mock_build:
+            image = module._build_sample_mip_column(samples, sample_dim=1)
+
+        self.assertIsNotNone(image)
+        self.assertEqual(mock_build.call_count, 16)
+        self.assertEqual(tuple(image.shape), (32, 3, 3))
+        self.assertTrue(np.all(image[:2] == 0))
+        self.assertTrue(np.all(image[-2:] == 15))
 
     def test_predict_step_uses_same_reverse_sampling_core(self) -> None:
         params = BaseFrameworkParams(

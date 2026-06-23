@@ -10,7 +10,7 @@ framework:
     t_schedule_std: 1.0
     total_timesteps: 1000
     null_cond_channels: 1024
-    stat_metrics_every_n_epochs: 12
+    stat_metrics_every_n_epochs: 200
     optimization:
       learning_rate: 0.00002
       weight_decay: 0.0

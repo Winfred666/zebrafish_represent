@@ -13,6 +13,7 @@ framework:
       gen_noise_weight: 1.0
     testing:
       run_sampling_after_fit: false
+    stat_metrics_every_n_epochs: 200
     lr: 0.00002
     l1_weight: 1.0
     perceptual_weight: 0.005

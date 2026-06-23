@@ -19,7 +19,7 @@ trainer:
     devices: 1
     precision: "bf16"
     deterministic: true
-    check_val_every_n_epoch: 3
+    check_val_every_n_epoch: 200
     enable_checkpointing: true
     gradient_clip_val: 1.0
     num_sanity_val_steps: 10 # WARNING: make sure first fusion is logs during validation before training

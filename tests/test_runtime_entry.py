@@ -160,6 +160,7 @@ class RuntimeEntryTest(unittest.TestCase):
     def test_base_wrapper_uses_explicit_postfit_checkpoint_upload(self) -> None:
         config = load_yaml_config("config/wrapper/base.yaml")
         self.assertFalse(config["logging"]["params"]["log_model"])
+        self.assertGreater(config["trainer"]["params"]["check_val_every_n_epoch"], 50)
         callbacks = config["trainer"]["params"]["callbacks"]
         checkpoint_params = callbacks[0]["params"]
         self.assertEqual(
@@ -288,7 +289,7 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/framework/base.yaml")
         self.assertEqual(config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
-        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 6)
+        self.assertGreater(config["framework"]["params"]["stat_metrics_every_n_epochs"], 50)
 
     def test_rectified_flow_total_timesteps_validation(self) -> None:
         from utils.sanitize.framework_config import RectifiedFlowModuleParams
@@ -345,7 +346,7 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(config["framework"]["class_name"], "TRELLISOccupancyVAEModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
         self.assertEqual(config["framework"]["params"]["loss_type"], "dice")
-        self.assertEqual(config["framework"]["params"]["stat_metrics_every_n_epochs"], 1)
+        self.assertGreater(config["framework"]["params"]["stat_metrics_every_n_epochs"], 50)
 
     def test_occupancy_pt_data_config_defaults(self) -> None:
         config = load_yaml_config("config/data/trellis_ss_occupancy_pt.yaml")

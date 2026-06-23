@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -32,8 +33,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     FUSION_SIG_KEYS = ("sig050",)
     FUSION_SIG_VALS = (0.5,)
     DATA_DEFAULT_COLORBAR_LIMIT = (-1.0, 1.0)
-    FUSION_NUMBER = 4
+    FUSION_NUMBER = 8
     FUSION_SLICE_NUMBER = 8
+    PREVIEW_SAMPLE_NUMBER = 16
 
     def __init__(self, config):
         super().__init__(config)
@@ -299,21 +301,38 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             log_image_artifact(self.logger, image, tag, self.global_step)
 
     @torch.no_grad()
-    def log_sample_mip(self, samples: Tensor, tag: str) -> None:
+    def log_sample_mip(self, samples: Tensor, tag: str, *, sample_dim: int = 0) -> None:
         import torch.distributed as dist
 
         is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
         if not is_rank0 or self.logger is None:
             return
-        n_show = min(samples.shape[0], 5)
-        image = build_w_mip_grid(
-            [samples[i].detach().cpu() for i in range(n_show)],
-        )
+        image = self._build_sample_mip_column(samples, sample_dim=sample_dim)
         if image is not None:
             log_image_artifact(self.logger, image, tag, self.global_step)
 
+    def _build_sample_mip_column(self, samples: Tensor, *, sample_dim: int = 0) -> np.ndarray | None:
+        if samples.ndim != 5:
+            raise ValueError(f"Expected samples as 5D tensor, got shape={tuple(samples.shape)}")
+
+        if sample_dim == 1:
+            sample_count = min(int(samples.shape[1]), self.PREVIEW_SAMPLE_NUMBER)
+            sample_volumes = [samples[:, idx].detach().cpu() for idx in range(sample_count)]
+        elif sample_dim == 0:
+            sample_count = min(int(samples.shape[0]), self.PREVIEW_SAMPLE_NUMBER)
+            sample_volumes = [samples[idx].detach().cpu() for idx in range(sample_count)]
+        else:
+            raise ValueError(f"sample_dim must be 0 or 1, got {sample_dim}")
+
+        rows = []
+        for volume in sample_volumes:
+            row = build_w_mip_grid([volume])
+            if row is not None:
+                rows.append(row)
+        return np.vstack(rows) if rows else None
+
     def _store_validation_stat_preview(self, sample_indices: list[int], samples: Tensor, total_samples: int) -> None:
-        preview_cap = min(5, max(0, int(total_samples)))
+        preview_cap = min(self.PREVIEW_SAMPLE_NUMBER, max(0, int(total_samples)))
         if preview_cap == 0:
             self._val_stat_generated_previews = None
             return
@@ -328,9 +347,6 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             if len(preview_samples) == preview_cap:
                 break
         self._val_stat_generated_previews = preview_samples or None
-
-    def _validation_stat_interval(self) -> int:
-        return int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)
 
     def _sample_quality_checkpoint_path(self) -> str | None:
         from utils.eval.sample_quality import DEFAULT_SAMPLE_QUALITY_CHECKPOINT_PATH
@@ -354,12 +370,13 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
     def _should_run_validation_stat_metrics(self) -> bool:
         trainer = getattr(self, "trainer", None)
-        if trainer is None or getattr(trainer, "sanity_checking", False):
+        if trainer is None:
             return False
-        every_n_epochs = self._validation_stat_interval()
+        every_n_epochs = int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)
         if every_n_epochs <= 0:
             return False
-        return ((int(self.current_epoch) + 1) % every_n_epochs) == 0
+        current_epoch = int(self.current_epoch)
+        return getattr(trainer, "sanity_checking", False) or ((current_epoch + 1) % every_n_epochs) == 0
 
     def _validation_stat_rank_world(self) -> tuple[int, int]:
         import torch.distributed as dist
@@ -527,10 +544,10 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     preview_by_index[int(sample_idx)] = sample
         preview_samples = [
             preview_by_index[sample_idx]
-            for sample_idx in sorted(preview_by_index)[:5]
+            for sample_idx in sorted(preview_by_index)[:self.PREVIEW_SAMPLE_NUMBER]
         ]
         if preview_samples:
-            self.log_sample_mip(torch.stack(preview_samples, dim=0), tag="val_sample_mip")
+            self.log_sample_mip(torch.stack(preview_samples, dim=1), tag="val_sample_mip", sample_dim=1)
 
         generated_features = standardize_feature_bank_rows(generated_features)
         generated_stats = summarize_feature_bank(generated_features)
