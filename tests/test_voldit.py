@@ -678,6 +678,69 @@ class VolDiTIntegrationTest(unittest.TestCase):
         disabled_module.trainer = trainer
         self.assertFalse(disabled_module._should_run_validation_stat_metrics())
 
+    def test_validation_stat_metrics_log_ms_ssim(self) -> None:
+        from utils.eval.sample_quality import summarize_feature_bank
+
+        class TinyDataset:
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+                return {"target": torch.full((1, 2, 2, 2), float(index))}
+
+        dataset = TinyDataset()
+        loader = type("LoaderStub", (), {"dataset": dataset, "batch_size": 2})()
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            stat_metrics_every_n_epochs=200,
+        )
+        module = TinyValSampleFramework(params)
+        module.trainer = type("TrainerStub", (), {"val_dataloaders": loader})()
+
+        with (
+            patch(
+                "utils.eval.sample_quality.extract_standard_patch_features",
+                side_effect=lambda samples, **_: torch.ones((int(samples.shape[0]), 2), dtype=torch.float64),
+            ),
+            patch(
+                "utils.eval.sample_quality._ms_ssim",
+                side_effect=[0.25, 0.75],
+            ) as mock_ms_ssim,
+        ):
+            feature_bank = module._build_generated_feature_bank(len(dataset))
+
+        self.assertEqual(tuple(feature_bank.shape), (3, 2))
+        self.assertEqual(mock_ms_ssim.call_count, 2)
+        self.assertAlmostEqual(float(module._val_stat_generated_ms_ssim_sum or 0.0), 1.25)
+        self.assertEqual(module._val_stat_generated_ms_ssim_count, 3)
+
+        module._val_stat_generated_features = feature_bank
+        module._val_stat_real_cache = {
+            "features": feature_bank.clone(),
+            "stats": summarize_feature_bank(feature_bank.clone()),
+        }
+
+        with (
+            patch("utils.eval.sample_quality.standardize_feature_bank_rows", side_effect=lambda features: features),
+            patch("utils.eval.sample_quality.release_cached_feature_extractor"),
+            patch.object(module, "log_sample_mip"),
+            patch.object(module, "log") as mock_log,
+        ):
+            module._log_validation_stat_metrics()
+
+        logged = {call.args[0]: call.args[1] for call in mock_log.call_args_list}
+        self.assertIn("val_fid", logged)
+        self.assertIn("val_mmd", logged)
+        self.assertAlmostEqual(float(logged["val_ms_ssim"]), 1.25 / 3.0)
+
     def test_validation_sample_mip_preview_stacks_sixteen_rows(self) -> None:
         params = BaseFrameworkParams(
             model=TinySampleModel(),

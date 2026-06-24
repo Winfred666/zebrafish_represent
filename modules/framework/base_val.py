@@ -46,6 +46,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         self._val_stat_generated_features: torch.Tensor | None = None
         self._val_stat_generated_previews: dict[int, Tensor] | None = None
         self._val_stat_generated_foreground_l1: float | None = None
+        self._val_stat_generated_ms_ssim_sum: float | None = None
+        self._val_stat_generated_ms_ssim_count: int = 0
         self._val_stat_foreground_l1_dataset = None
         self._val_stat_real_cache: dict[str, object] | None = None
 
@@ -454,11 +456,17 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             empty_feature_bank,
             extract_standard_patch_features,
             foreground_l1_for_one_sample,
+            _ms_ssim,
+            _normalize_pair,
+            _resize_to_common_spatial,
         )
 
+        val_dataset = self._validation_dataset()
         checkpoint_path = self._sample_quality_checkpoint_path()
         input_normalization = self._sample_quality_input_normalization()
         foreground_l1_dataset = self._val_stat_foreground_l1_dataset
+        self._val_stat_generated_ms_ssim_sum = 0.0
+        self._val_stat_generated_ms_ssim_count = 0
         if total_samples <= 0:
             self._val_stat_generated_previews = None
             self._val_stat_generated_foreground_l1 = None
@@ -487,6 +495,20 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             )
             samples = self._make_clean(initial_noise, t_start=1.0)
             self._store_validation_stat_preview(sample_indices, samples, total_samples)
+            if val_dataset is not None:
+                reference_batch = [
+                    torch.as_tensor(val_dataset[int(sample_idx)]["target"], dtype=torch.float32)
+                    for sample_idx in sample_indices
+                ]
+                references = torch.stack(reference_batch, dim=0).to(device=samples.device)
+                samples_norm, references_norm = _normalize_pair(samples, references)
+                samples_norm, references_norm = _resize_to_common_spatial(samples_norm, references_norm)
+                batch_ms_ssim = _ms_ssim(references_norm, samples_norm)
+                self._val_stat_generated_ms_ssim_sum = (
+                    float(self._val_stat_generated_ms_ssim_sum or 0.0)
+                    + (float(batch_ms_ssim) * len(sample_indices))
+                )
+                self._val_stat_generated_ms_ssim_count += len(sample_indices)
             if foreground_l1_dataset is not None:
                 self._val_stat_generated_foreground_l1 = foreground_l1_for_one_sample(
                     samples,
@@ -508,6 +530,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
     @torch.no_grad()
     def _log_validation_stat_metrics(self) -> None:
+        import torch.distributed as dist
+
         from utils.eval.sample_quality import (
             compute_fid_from_feature_stats,
             compute_mmd_from_features,
@@ -522,6 +546,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
         preview_payload = sorted((self._val_stat_generated_previews or {}).items())
         local_foreground_l1 = self._val_stat_generated_foreground_l1
+        local_ms_ssim_sum = self._val_stat_generated_ms_ssim_sum
+        local_ms_ssim_count = self._val_stat_generated_ms_ssim_count
         try:
             local_features = self._val_stat_generated_features.to(device=self.device)
             generated_features = gather_tensor_rows_to_rank0(local_features)
@@ -530,8 +556,18 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             self._val_stat_generated_features = None
             self._val_stat_generated_previews = None
             self._val_stat_generated_foreground_l1 = None
+            self._val_stat_generated_ms_ssim_sum = None
+            self._val_stat_generated_ms_ssim_count = 0
             self._val_stat_foreground_l1_dataset = None
             release_cached_feature_extractor()
+
+        ms_ssim_totals = torch.tensor(
+            [float(local_ms_ssim_sum or 0.0), float(local_ms_ssim_count or 0)],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if dist.is_available() and dist.is_initialized():
+            dist.reduce(ms_ssim_totals, dst=0, op=dist.ReduceOp.SUM)
 
         rank, _ = self._validation_stat_rank_world()
         if rank != 0 or generated_features is None or self._val_stat_real_cache is None:
@@ -555,6 +591,15 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         val_mmd = compute_mmd_from_features(self._val_stat_real_cache["features"], generated_features)
         self.log("val_fid", val_fid, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
         self.log("val_mmd", val_mmd, on_step=False, on_epoch=True, sync_dist=False, rank_zero_only=True)
+        if int(ms_ssim_totals[1].item()) > 0:
+            self.log(
+                "val_ms_ssim",
+                float((ms_ssim_totals[0] / ms_ssim_totals[1]).item()),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=False,
+                rank_zero_only=True,
+            )
         if local_foreground_l1 is not None:
             self.log(
                 "val_foreground_l1",
@@ -570,6 +615,8 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         self._val_stat_generated_features = None
         self._val_stat_generated_previews = None
         self._val_stat_generated_foreground_l1 = None
+        self._val_stat_generated_ms_ssim_sum = None
+        self._val_stat_generated_ms_ssim_count = 0
         self._val_stat_foreground_l1_dataset = None
 
         if not self._should_run_validation_stat_metrics():
