@@ -100,6 +100,27 @@ class TinyValSampleFramework(BaseValTrainingFramework):
         return float(sigma)
 
 
+class TinyRandomValFramework(BaseValTrainingFramework):
+    def get_data_loss(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        target = batch["target"]
+        timesteps = torch.rand(target.shape[0], device=target.device)
+        noise = torch.randn_like(target)
+        self.last_timesteps = timesteps.detach().clone()
+        self.last_noise = noise.detach().clone()
+        return {"loss": timesteps.mean() + noise.mean()}
+
+    def _q_sample(self, clean: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+        del t, noise
+        return clean
+
+    def one_step_sample(self, noisy: torch.Tensor, t: float, step_size: float) -> torch.Tensor:
+        del t, step_size
+        return noisy
+
+    def get_t_from_sigma(self, sigma: float) -> float:
+        return float(sigma)
+
+
 class TinyCheckpointVolDiT(VolDiT):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -648,6 +669,39 @@ class VolDiTIntegrationTest(unittest.TestCase):
         for idx in range(16):
             self.assertEqual(float(preview_map[idx].item()), float(idx))
 
+    def test_validation_step_uses_fixed_rng_without_advancing_global_rng(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyRandomValFramework(params)
+        module._runtime_seed = 123
+        batch = {"target": torch.zeros(2, 1, 2, 2, 2)}
+
+        torch.manual_seed(999)
+        rng_before = torch.random.get_rng_state()
+        with patch.object(module, "log"):
+            loss1 = module.validation_step(batch, 0)
+        rng_after = torch.random.get_rng_state()
+        timesteps1 = module.last_timesteps.clone()
+        noise1 = module.last_noise.clone()
+
+        torch.rand(11)
+        with patch.object(module, "log"):
+            loss2 = module.validation_step(batch, 0)
+
+        self.assertTrue(torch.equal(rng_before, rng_after))
+        self.assertTrue(torch.equal(timesteps1, module.last_timesteps))
+        self.assertTrue(torch.equal(noise1, module.last_noise))
+        self.assertTrue(torch.equal(loss1, loss2))
+
     def test_validation_stat_metrics_run_during_sanity_check_and_interval(self) -> None:
         params = BaseFrameworkParams(
             model=TinySampleModel(),
@@ -740,6 +794,55 @@ class VolDiTIntegrationTest(unittest.TestCase):
         self.assertIn("val_fid", logged)
         self.assertIn("val_mmd", logged)
         self.assertAlmostEqual(float(logged["val_ms_ssim"]), 1.25 / 3.0)
+
+    def test_validation_generated_feature_bank_seeds_reverse_sampling(self) -> None:
+        class TinyDataset:
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+                return {"target": torch.full((1, 2, 2, 2), float(index))}
+
+        dataset = TinyDataset()
+        loader = type("LoaderStub", (), {"dataset": dataset, "batch_size": 2})()
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyValSampleFramework(params)
+        module._runtime_seed = 123
+        module.trainer = type("TrainerStub", (), {"val_dataloaders": loader})()
+        reverse_seeds = []
+
+        def fake_make_clean(initial_noise: torch.Tensor, t_start: float, seed: int | None = None) -> torch.Tensor:
+            del t_start
+            reverse_seeds.append(seed)
+            return initial_noise
+
+        with (
+            patch.object(module, "_make_clean", side_effect=fake_make_clean),
+            patch(
+                "utils.eval.sample_quality.extract_standard_patch_features",
+                side_effect=lambda samples, **_: torch.ones((int(samples.shape[0]), 2), dtype=torch.float64),
+            ),
+            patch("utils.eval.sample_quality._ms_ssim", return_value=0.0),
+        ):
+            module._build_generated_feature_bank(len(dataset))
+
+        self.assertEqual(
+            reverse_seeds,
+            [
+                module._seed_from_parts("val_stat_reverse", 0, 1),
+                module._seed_from_parts("val_stat_reverse", 2),
+            ],
+        )
 
     def test_validation_sample_mip_preview_stacks_sixteen_rows(self) -> None:
         params = BaseFrameworkParams(

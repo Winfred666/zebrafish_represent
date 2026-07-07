@@ -56,6 +56,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         del clean
         return {}
 
+    def _validation_step_seed(self, batch_idx: int) -> int:
+        return self._seed_from_parts("validation_step", int(batch_idx))
+
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
         """Build the noisy-crop bank for all fusions during validation."""
         if "fusion_id" not in batch or "pos_idx" not in batch:
@@ -495,7 +498,11 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 ],
                 dim=0,
             )
-            samples = self._make_clean(initial_noise, t_start=1.0)
+            samples = self._make_clean(
+                initial_noise,
+                t_start=1.0,
+                seed=self._seed_from_parts("val_stat_reverse", *sample_indices),
+            )
             self._store_validation_stat_preview(sample_indices, samples, total_samples)
             if val_dataset is not None:
                 reference_batch = [
@@ -701,22 +708,23 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def validation_step(
         self, batch: dict[str, Tensor], batch_idx: int
     ) -> Tensor:
-        losses = self.get_data_loss(batch)
-        for key, value in losses.items():
-            self.log(
-                f"val_{key}",
-                value,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=(key == "loss"),
-                sync_dist=True,
-            )
+        with self._fixed_seed_context(self._validation_step_seed(batch_idx)):
+            losses = self.get_data_loss(batch)
+            for key, value in losses.items():
+                self.log(
+                    f"val_{key}",
+                    value,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=(key == "loss"),
+                    sync_dist=True,
+                )
 
-        clean = batch["target"]
+            clean = batch["target"]
 
-        extra = self._validation_extra(clean)
-        for key, val in extra.items():
-            self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
+            extra = self._validation_extra(clean)
+            for key, val in extra.items():
+                self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
 
-        self._maybe_collect_fusion_crops(batch)
+            self._maybe_collect_fusion_crops(batch)
         return losses["loss"]

@@ -224,7 +224,7 @@ class RectifiedFlowModule(BaseValTrainingFramework):
         noisy_latent, _ = self._make_noisy_with_seed(
             probe_clean,
             t_tensor,
-            seed=self._seed_from_parts("latent_probe", int(self.current_epoch)),
+            seed=self._seed_from_parts("latent_probe"),
         )
         denoised_latent = self._make_clean_latent(noisy_latent, t_val)
         return {
