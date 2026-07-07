@@ -276,6 +276,7 @@ def _add_midw_grid_labels(
     row_labels: list[str],
     pair_count: int,
     has_pred: bool,
+    clean_label: str = "GT",
 ) -> np.ndarray:
     if not row_labels or pair_count <= 0:
         return image
@@ -284,10 +285,10 @@ def _add_midw_grid_labels(
     panel_count = 2 if has_pred else 1
     pair_width = int(image.shape[1]) // pair_count
     panel_width = pair_width // panel_count
-    header_labels = ("GT", "pred") if has_pred else ("pred",)
+    header_labels = (clean_label, "pred") if has_pred else ("pred",)
     font = _label_font(source_row_height, panel_width, tuple(header_labels) + tuple(row_labels))
     draw_probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    font_bbox = draw_probe.textbbox((0, 0), "GT", font=font)
+    font_bbox = draw_probe.textbbox((0, 0), clean_label, font=font)
     row_label_width = max(
         56,
         max(draw_probe.textbbox((0, 0), label, font=font)[2] for label in row_labels) + 16,
@@ -336,6 +337,7 @@ def build_clipped_midw_grid(
     colorbar_limits: tuple[float, float] = (-1.0, 1.0),
     pixel_scale: int = 1,
     show_labels: bool = False,
+    clean_label: str = "GT",
 ) -> np.ndarray | None:
     if not pred_volumes:
         return None
@@ -400,6 +402,7 @@ def build_clipped_midw_grid(
             row_labels=[f"z_{int(wi):02d}" for wi in w_indices],
             pair_count=len(pred_np),
             has_pred=clean_np is not None,
+            clean_label=clean_label,
         )
     return fusion_grid
 

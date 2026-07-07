@@ -59,12 +59,21 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def _validation_step_seed(self, batch_idx: int) -> int:
         return self._seed_from_parts("validation_step", int(batch_idx))
 
+    def _fusion_display_clean_targets(self, clean: Tensor) -> Tensor | None:
+        del clean
+        return None
+
+    def _fusion_display_clean_label(self) -> str:
+        return "GT"
+
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
         """Build the noisy-crop bank for all fusions during validation."""
         if "fusion_id" not in batch or "pos_idx" not in batch:
             return
         if not self._fusion_collecting and self.val_fusions_noised:
             return
+
+        display_clean = self._fusion_display_clean_targets(batch["target"])
 
         if not self.val_fusions_noised:
             self.val_fusions_noised = [
@@ -80,12 +89,15 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
             for idx in fusion_mask.nonzero(as_tuple=True)[0]:
                 clean_4d = batch["target"][idx]
-                self.val_fusions_clean[fusion_idx].append({
+                clean_crop = {
                     "target": clean_4d.detach().cpu(),
                     "fusion_id": batch["fusion_id"][idx].detach().cpu(),
                     "pos_idx": batch["pos_idx"][idx].detach().cpu(),
                     "full_size": batch["full_size"][idx].detach().cpu(),
-                })
+                }
+                if display_clean is not None:
+                    clean_crop["display_target"] = display_clean[idx].detach().cpu()
+                self.val_fusions_clean[fusion_idx].append(clean_crop)
 
                 for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
                     t_val = self.get_t_from_sigma(float(sig_val))
@@ -190,6 +202,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
             fused_pairs_for_logging: list[tuple[int, Tensor, Tensor]] = []
+            uses_display_clean = False
             detail_sig_key = sig_key.replace("sig0", "sig", 1)
 
             for fi in range(n_fusions):
@@ -244,7 +257,20 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
                 if should_log:
                     fusion_id = int(clean_subset[0]["fusion_id"])
-                    fused_pairs_for_logging.append((fusion_id, clean_fused, denoised_fused))
+                    display_clean_fused = clean_fused
+                    if all("display_target" in clean_crop for clean_crop in clean_subset):
+                        display_clean_subset = [
+                            {
+                                "target": clean_crop["display_target"],
+                                "fusion_id": clean_crop["fusion_id"],
+                                "pos_idx": clean_crop["pos_idx"],
+                                "full_size": clean_crop["full_size"],
+                            }
+                            for clean_crop in clean_subset
+                        ]
+                        display_clean_fused = volume_fuse(display_clean_subset, fusion_id=fi)
+                        uses_display_clean = True
+                    fused_pairs_for_logging.append((fusion_id, display_clean_fused, denoised_fused))
 
             if is_rank0:
                 self.log(
@@ -259,12 +285,16 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             if fused_pairs_for_logging and should_log:
                 clean_fused_volumes = [clean_fused for _, clean_fused, _ in fused_pairs_for_logging]
                 denoised_fused_volumes = [denoised_fused for _, _, denoised_fused in fused_pairs_for_logging]
+                display_clean_label = (
+                    self._fusion_display_clean_label() if uses_display_clean else "GT"
+                )
                 fusion_image = build_clipped_midw_grid(
                     denoised_fused_volumes,
                     clean_volumes=clean_fused_volumes,
                     slice_count=self.FUSION_SLICE_NUMBER,
                     colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
                     show_labels=True,
+                    clean_label=display_clean_label,
                 )
                 detail_image = build_clipped_midw_grid(
                     denoised_fused_volumes,
@@ -274,6 +304,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
                     pixel_scale=4,
                     show_labels=True,
+                    clean_label=display_clean_label,
                 )
 
             if should_log and fused_pairs_for_logging:

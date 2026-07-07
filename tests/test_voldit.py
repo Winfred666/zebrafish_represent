@@ -376,6 +376,46 @@ class VolDiTIntegrationTest(unittest.TestCase):
         loss = module.training_step({"target": torch.randn(2, 1, 8, 8, 8)}, 0)
         self.assertEqual(loss.ndim, 0)
 
+    def test_latent_ddpm_collects_vqgan_recon_for_fusion_display_only(self) -> None:
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=TinyStage1(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="smooth_l1",
+                sample_steps=4,
+            ),
+            diffusion=DDPMDiffusionParams(
+                beta_schedule="cosine",
+                prediction_type="v_prediction",
+            ),
+        )
+        module = LatentDDPMModule(params)
+        module.FUSION_NUMBER = 1
+        target = torch.arange(1 * 1 * 8 * 8 * 8, dtype=torch.float32).reshape(1, 1, 8, 8, 8)
+        batch = {
+            "target": target,
+            "fusion_id": torch.tensor([0]),
+            "pos_idx": torch.tensor([[0, 0, 0]]),
+            "full_size": torch.tensor([[1, 8, 8, 8]]),
+        }
+
+        module._maybe_collect_fusion_crops(batch)
+
+        stored_clean = module.val_fusions_clean[0][0]["target"]
+        stored_display_clean = module.val_fusions_clean[0][0]["display_target"]
+        stored_noisy = module.val_fusions_noised[0]["sig050"][0]["target"]
+        expected_recon = module.stage1_model.decode_stage_2_outputs(
+            module.stage1_model.encode_stage_2_inputs(target)
+        )[0]
+
+        self.assertTrue(torch.equal(stored_clean, target[0]))
+        self.assertTrue(torch.equal(stored_display_clean, expected_recon))
+        self.assertFalse(torch.equal(stored_display_clean, stored_clean))
+        self.assertEqual(tuple(stored_noisy.shape), (8, 4, 4, 4))
+        self.assertEqual(module._fusion_display_clean_label(), "Rec.")
+
     def test_raw_dit3d_ddpm_loss_and_sample_without_stage1(self) -> None:
         model = DiT3D(
             in_channels=1,
