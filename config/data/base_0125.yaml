@@ -10,12 +10,11 @@ train_dataset: # purely raw dataset
     # Downsample volumes to 1/8 of original resolution to control grid-crop count.
     scale_factor: [0.125, 0.125, 0.125]
     normalize: true
-    augment: true
-    # Upper percentile used for lazy dataset-side rescaling after cache attach.
-    # The cached fusion intensity at this percentile maps to 1.0 in [0, 1].
-    percentile_cmax: 100.0
+    augment: false
+    # Percentile limits used for lazy dataset-side clipping after cache attach.
+    percentile_clim: [0.0, 100.0]
     pad_to_multiple: null
-    cache_root: /tmp/zebrafish_hot_mmap
+    cache_root: /tmp/zebrafish_represent_hot_cache/0125/
 
 train_dataloader:
   class_name: DataLoader
@@ -38,7 +37,7 @@ val_dataset:
     # Downsample volumes to 1/8 of original resolution to control grid-crop count.
     scale_factor: [0.125, 0.125, 0.125]
     normalize: true
-    percentile_cmax: 100.0
+    percentile_clim: [0.0, 100.0]
     pad_to_multiple: null
     cache_root: /tmp/zebrafish_hot_mmap
 

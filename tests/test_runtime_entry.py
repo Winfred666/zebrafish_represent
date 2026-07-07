@@ -82,14 +82,14 @@ class RuntimeEntryTest(unittest.TestCase):
             self.assertIn("class_name", cb)
             self.assertIn("params", cb)
 
-    def test_base_crop_train_dataset_enables_augment(self) -> None:
+    def test_base_crop_train_dataset_disables_augment(self) -> None:
         config = load_yaml_config("config/data/base_0125.yaml")
-        self.assertTrue(config["train_dataset"]["params"]["augment"])
+        self.assertFalse(config["train_dataset"]["params"]["augment"])
         self.assertNotIn("augment", config["val_dataset"]["params"])
 
-    def test_inherited_non_overfit_crop_train_dataset_enables_augment(self) -> None:
+    def test_inherited_non_overfit_crop_train_dataset_disables_augment(self) -> None:
         config = load_yaml_config("config/data/lg_0125_whole_voldit.yaml")
-        self.assertTrue(config["train_dataset"]["params"]["augment"])
+        self.assertFalse(config["train_dataset"]["params"]["augment"])
 
     def test_overfit1_crop_train_dataset_disables_augment(self) -> None:
         config = load_yaml_config("config/data/lg_0125_whole_voldit_overfit1.yaml")
