@@ -302,6 +302,29 @@ class HotCropDatasetTest(unittest.TestCase):
 
             self.assertEqual(dataset._fusion_thresholds[0], (0.0, 1.0))
 
+    def test_thresholds_count_overlapping_voxels_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((1, 1, 3), dtype=np.uint16))
+            crops = np.asarray(
+                [
+                    [[[[0.0, 100.0]]]],
+                    [[[[100.0, 200.0]]]],
+                ],
+                dtype=np.float32,
+            )
+            dataset = self._make_dataset(
+                data_dir,
+                volume_specs=[{
+                    "crops": crops,
+                    "starts": [(0, 0, 0), (0, 0, 1)],
+                    "full_size": (1, 1, 1, 3),
+                }],
+                percentile_clim=(25.0, 75.0),
+            )
+
+            self.assertEqual(dataset._fusion_thresholds[0], (50.0, 150.0))
+
     def test_getitem_returns_lazily_clipped_crops(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

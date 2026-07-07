@@ -388,14 +388,13 @@ class CropTifVolumeHotDataset(Dataset):
 
         q_min, q_max = (percentile / 100.0 for percentile in self.percentile_clim)
         thresholds: list[tuple[float, float]] = []
-        use_endpoint_extrema = q_min <= 0.0 and q_max >= 1.0
         for vol_idx, entry in enumerate(self._volume_entries):
-            _, full_d, full_h, full_w = (
+            full_shape = tuple(
                 int(dim) for dim in self._full_sizes_storage[vol_idx].tolist()
             )
-            valid_chunks: list[torch.Tensor] = []
-            running_min: torch.Tensor | None = None
-            running_max: torch.Tensor | None = None
+            full_c, full_d, full_h, full_w = full_shape
+            fusion = torch.empty(full_shape, dtype=self._crop_storage.dtype)
+            covered = torch.zeros(full_shape, dtype=torch.bool)
             for local_idx in range(entry.crop_count):
                 crop_start = entry.crop_offset + local_idx * entry.crop_numel
                 crop = self._crop_storage.narrow(
@@ -410,26 +409,24 @@ class CropTifVolumeHotDataset(Dataset):
                 valid_w = min(start_w + crop_w, full_w) - start_w
                 if valid_d <= 0 or valid_h <= 0 or valid_w <= 0:
                     continue
-                valid = crop[:, :valid_d, :valid_h, :valid_w].reshape(-1)
-                if use_endpoint_extrema:
-                    local_min = valid.min()
-                    local_max = valid.max()
-                    running_min = local_min if running_min is None else torch.minimum(running_min, local_min)
-                    running_max = local_max if running_max is None else torch.maximum(running_max, local_max)
-                    continue
-                valid_chunks.append(valid)
-            if use_endpoint_extrema:
-                if running_min is None or running_max is None:
-                    raise ValueError(
-                        f"No valid original voxels found for fusion_id={entry.fusion_id}"
-                    )
-                thresholds.append((float(running_min.item()), float(running_max.item())))
-                continue
-            if not valid_chunks:
+                valid_c = min(crop.shape[0], full_c)
+                fusion[
+                    :valid_c,
+                    start_d:start_d + valid_d,
+                    start_h:start_h + valid_h,
+                    start_w:start_w + valid_w,
+                ] = crop[:valid_c, :valid_d, :valid_h, :valid_w]
+                covered[
+                    :valid_c,
+                    start_d:start_d + valid_d,
+                    start_h:start_h + valid_h,
+                    start_w:start_w + valid_w,
+                ] = True
+            if not bool(covered.any()):
                 raise ValueError(
                     f"No valid original voxels found for fusion_id={entry.fusion_id}"
                 )
-            block = torch.cat(valid_chunks)
+            block = fusion[covered]
             lower = block.min() if q_min <= 0.0 else torch.quantile(block, q_min)
             upper = block.max() if q_max >= 1.0 else torch.quantile(block, q_max)
             thresholds.append((
@@ -446,6 +443,7 @@ class CropTifVolumeHotDataset(Dataset):
             "manifest_token": manifest_token,
             "normalize": self.normalize,
             "percentile_clim": self.percentile_clim,
+            "threshold_mode": "fusion_unpadded_v1",
         }, sort_keys=True)
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
