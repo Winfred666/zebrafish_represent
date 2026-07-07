@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from utils.dataset.fusion import center_pad_fusion_volume
 
@@ -229,6 +229,104 @@ def _midw_indices(max_w: int, slice_count: int) -> np.ndarray:
     return np.linspace(0, max_w - 1, slice_count, dtype=int)
 
 
+def _scale_2d_pixels(field: np.ndarray, scale: int) -> np.ndarray:
+    if scale == 1:
+        return field
+    return np.repeat(np.repeat(field, scale, axis=0), scale, axis=1)
+
+
+def _draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+) -> None:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x0, y0, x1, y1 = box
+    x = x0 + max(0, (x1 - x0 - text_w) // 2)
+    y = y0 + max(0, (y1 - y0 - text_h) // 2)
+    draw.text((x - bbox[0], y - bbox[1]), text, fill=(0, 0, 0), font=font)
+
+
+def _label_font(max_height: int, max_width: int, samples: tuple[str, ...]) -> ImageFont.ImageFont:
+    max_height = max(1, int(max_height))
+    max_width = max(1, int(max_width))
+    for font_size in range(max(6, min(18, max_height - 4)), 5, -1):
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except OSError:
+            return ImageFont.load_default()
+        draw_probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        sample_boxes = [draw_probe.textbbox((0, 0), sample, font=font) for sample in samples]
+        max_sample_width = max(box[2] - box[0] for box in sample_boxes)
+        max_sample_height = max(box[3] - box[1] for box in sample_boxes)
+        if max_sample_width <= int(max_width) - 4 and max_sample_height <= int(max_height) - 4:
+            return font
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", 8)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _add_midw_grid_labels(
+    image: np.ndarray,
+    *,
+    row_labels: list[str],
+    pair_count: int,
+    has_pred: bool,
+) -> np.ndarray:
+    if not row_labels or pair_count <= 0:
+        return image
+
+    source_row_height = max(1, int(image.shape[0]) // len(row_labels))
+    panel_count = 2 if has_pred else 1
+    pair_width = int(image.shape[1]) // pair_count
+    panel_width = pair_width // panel_count
+    header_labels = ("GT", "pred") if has_pred else ("pred",)
+    font = _label_font(source_row_height, panel_width, tuple(header_labels) + tuple(row_labels))
+    draw_probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    font_bbox = draw_probe.textbbox((0, 0), "GT", font=font)
+    row_label_width = max(
+        56,
+        max(draw_probe.textbbox((0, 0), label, font=font)[2] for label in row_labels) + 16,
+    )
+    header_height = max(28, font_bbox[3] - font_bbox[1] + 12)
+
+    labeled = np.full(
+        (int(image.shape[0]) + header_height, int(image.shape[1]) + row_label_width, 3),
+        255,
+        dtype=np.uint8,
+    )
+    labeled[header_height:, row_label_width:] = image
+
+    pil_image = Image.fromarray(labeled)
+    draw = ImageDraw.Draw(pil_image)
+    for pair_idx in range(pair_count):
+        pair_x0 = row_label_width + pair_idx * pair_width
+        for panel_idx, label in enumerate(header_labels):
+            x0 = pair_x0 + panel_idx * panel_width
+            _draw_centered_text(
+                draw,
+                (x0, 0, x0 + panel_width, header_height),
+                label,
+                font,
+            )
+
+    for row_idx, label in enumerate(row_labels):
+        y0 = header_height + row_idx * source_row_height
+        y1 = int(labeled.shape[0]) if row_idx == len(row_labels) - 1 else y0 + source_row_height
+        _draw_centered_text(
+            draw,
+            (0, y0, row_label_width, y1),
+            label,
+            font,
+        )
+
+    return np.asarray(pil_image, dtype=np.uint8)
+
+
 def build_clipped_midw_grid(
     pred_volumes: list[torch.Tensor],
     *,
@@ -236,6 +334,8 @@ def build_clipped_midw_grid(
     slice_count: int,
     yz_crop_shape: tuple[int, int] | None = None,
     colorbar_limits: tuple[float, float] = (-1.0, 1.0),
+    pixel_scale: int = 1,
+    show_labels: bool = False,
 ) -> np.ndarray | None:
     if not pred_volumes:
         return None
@@ -243,6 +343,9 @@ def build_clipped_midw_grid(
         raise ValueError(
             f"clean/pred volume count mismatch: {len(clean_volumes)} vs {len(pred_volumes)}"
         )
+    pixel_scale = int(pixel_scale)
+    if pixel_scale <= 0:
+        raise ValueError(f"pixel_scale must be positive, got {pixel_scale}")
 
     clean_np = [_channel0_volume_np(volume) for volume in clean_volumes] if clean_volumes else None
     pred_np = [_channel0_volume_np(volume) for volume in pred_volumes]
@@ -276,6 +379,9 @@ def build_clipped_midw_grid(
                 gt_slice = center_crop_2d(gt_slice, yz_crop_shape)
                 if pred_slice is not None:
                     pred_slice = center_crop_2d(pred_slice, yz_crop_shape)
+            gt_slice = _scale_2d_pixels(gt_slice, pixel_scale)
+            if pred_slice is not None:
+                pred_slice = _scale_2d_pixels(pred_slice, pixel_scale)
             fusion_grid_rows[row_idx].append(
                 fix_2d_scalar(
                     gt_slice,
@@ -287,7 +393,15 @@ def build_clipped_midw_grid(
     fusion_rows = [np.hstack(row) for row in fusion_grid_rows if row]
     if not fusion_rows:
         return None
-    return np.vstack(fusion_rows)
+    fusion_grid = np.vstack(fusion_rows)
+    if show_labels:
+        return _add_midw_grid_labels(
+            fusion_grid,
+            row_labels=[f"z_{int(wi):02d}" for wi in w_indices],
+            pair_count=len(pred_np),
+            has_pred=clean_np is not None,
+        )
+    return fusion_grid
 
 
 def build_w_mip_grid(

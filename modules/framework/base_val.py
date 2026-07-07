@@ -264,6 +264,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     clean_volumes=clean_fused_volumes,
                     slice_count=self.FUSION_SLICE_NUMBER,
                     colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+                    show_labels=True,
                 )
                 detail_image = build_clipped_midw_grid(
                     denoised_fused_volumes,
@@ -271,9 +272,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     slice_count=min(4, self.FUSION_SLICE_NUMBER),
                     yz_crop_shape=(64, 64),
                     colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+                    pixel_scale=4,
+                    show_labels=True,
                 )
-                if detail_image is not None:
-                    detail_image = np.repeat(np.repeat(detail_image, 4, axis=0), 4, axis=1)
 
             if should_log and fused_pairs_for_logging:
                 if fusion_image is not None:
