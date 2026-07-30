@@ -25,7 +25,7 @@ import os
 import sys
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -276,20 +276,6 @@ def _extract_crop(
     return crop.astype(np.float32, copy=False)
 
 
-def _should_keep_crop(crop_np: np.ndarray, normalize: bool) -> bool:
-    """Return whether a crop should be kept in the cache.
-
-    Comment out the call site in `_materialize_one_volume` to disable this
-    filtering without touching the threshold logic.
-    """
-    if not normalize:
-        return True
-
-    signal_threshold = -1.0 + 0.001 * 2  # 0.001 in [0,1] -> -0.998 in [-1,1]
-    signal_fraction = np.mean(crop_np > signal_threshold)
-    return bool(signal_fraction >= 0.001)  # exclude crops that are >=99.9% background
-
-
 def _materialize_one_volume(
     *,
     ds: CropTifVolumeHotDataset,
@@ -321,26 +307,15 @@ def _materialize_one_volume(
         volume, ds.crop_size, ds.overlap, ds.pad_to_multiple, ds.normalize,
     )
 
-    # ── extract & filter crops ──
-    # WARNING: comment out the _should_keep_crop call below to disable empty-crop filtering.
-    # This is a heuristic, may need adjustment for other datasets.
     kept_crops: list[np.ndarray] = []
     kept_starts: list[tuple[int, int, int]] = []
-    empty_count = 0
     for start_d, start_h, start_w in all_starts:
         crop_np = _extract_crop(volume, start_d, start_h, start_w, ds.crop_size, ds.normalize)
-        if not _should_keep_crop(crop_np, ds.normalize):
-            empty_count += 1
-            continue
         kept_crops.append(crop_np.copy())
         kept_starts.append((start_d, start_h, start_w))
 
-    if empty_count:
-        print(f"    empty crops filtered: {empty_count}/{len(all_starts)} removed, "
-              f"{len(kept_crops)} retained")
-
     if not kept_crops:
-        print(f"    all {len(all_starts)} crops empty — skipping volume entirely")
+        print(f"    no crop starts produced for {file_path.name}")
         return None
 
     crop_array = np.stack(kept_crops, axis=0).astype(np.float32, copy=False)
@@ -492,34 +467,18 @@ def _write_cache_bundle(
     ds: CropTifVolumeHotDataset,
     starts_list: list[list[tuple[int, int, int]]],
 ) -> None:
-    results: list[VolumeCacheArrays] = []
-    skipped_indices: list[int] = []
-    for vol_idx in range(ds.file_count):
-        result = _materialize_one_volume(
-            ds=ds,
-            vol_idx=vol_idx,
-            all_starts=starts_list[vol_idx],
-        )
-        if result is None:
-            skipped_indices.append(vol_idx)
-        else:
-            results.append(result)
+    def _iter_results():
+        for vol_idx in range(ds.file_count):
+            result = _materialize_one_volume(
+                ds=ds,
+                vol_idx=vol_idx,
+                all_starts=starts_list[vol_idx],
+            )
+            if result is None:
+                raise ValueError(f"No crops produced for volume index {vol_idx}")
+            yield result
 
-    if skipped_indices:
-        ds._file_paths = [p for i, p in enumerate(ds._file_paths) if i not in skipped_indices]
-        ds.file_count = len(ds._file_paths)
-        ds._selected_file_keys_value = ds._build_selected_file_keys()
-        # Renumber fusion_ids to be sequential after skipping
-        for new_idx, vol in enumerate(results):
-            vol = replace(vol, fusion_id=new_idx)
-            results[new_idx] = vol
-        print(f"  skipped {len(skipped_indices)} fully-empty volume(s), "
-              f"{ds.file_count} remaining")
-
-    if not results:
-        raise ValueError("All volumes are completely empty — nothing to cache")
-
-    write_cache_bundle_from_volumes(ds, results)
+    write_cache_bundle_from_volumes(ds, _iter_results())
 
 
 # ═══════════════════════════════════════════════════════════════════
