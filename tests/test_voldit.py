@@ -709,6 +709,42 @@ class VolDiTIntegrationTest(unittest.TestCase):
         for idx in range(16):
             self.assertEqual(float(preview_map[idx].item()), float(idx))
 
+    def test_fusion_validation_logs_xy_mip_mse(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyValSampleFramework(params)
+        clean = torch.zeros((1, 2, 2, 2), dtype=torch.float32)
+        denoised = clean.clone()
+        denoised[:, 0] = 1.0
+        crop_meta = {
+            "fusion_id": torch.tensor(0),
+            "pos_idx": torch.tensor([0, 0, 0]),
+            "full_size": torch.tensor([1, 2, 2, 2]),
+        }
+        module.val_fusions_clean = [[{"target": clean, **crop_meta}]]
+        module.val_fusions_noised = [{"sig050": [{"target": denoised, **crop_meta}]}]
+
+        with (
+            patch.object(module, "_validation_batch_size", return_value=1),
+            patch.object(module, "_make_clean", return_value=denoised.unsqueeze(0)),
+            patch.object(module, "log") as mock_log,
+        ):
+            module._log_fusion_validation()
+
+        mock_log.assert_called_once()
+        metric_name, metric_value = mock_log.call_args.args[:2]
+        self.assertEqual(metric_name, "val_fusion_mipmse_sig50")
+        self.assertAlmostEqual(float(metric_value), 1.0)
+
     def test_validation_step_uses_fixed_rng_without_advancing_global_rng(self) -> None:
         params = BaseFrameworkParams(
             model=TinySampleModel(),

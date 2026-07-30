@@ -253,7 +253,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 clean_fused = volume_fuse(clean_subset, fusion_id=fi)
                 denoised_fused = volume_fuse(denoised_crops, fusion_id=fi)
 
-                mse_sum += float(F.mse_loss(denoised_fused, clean_fused))
+                denoised_xy_mip = denoised_fused.amax(dim=1)
+                clean_xy_mip = clean_fused.amax(dim=1)
+                mse_sum += float(F.mse_loss(denoised_xy_mip, clean_xy_mip))
 
                 if should_log:
                     fusion_id = int(clean_subset[0]["fusion_id"])
@@ -274,7 +276,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
             if is_rank0:
                 self.log(
-                    f"val_fusion_mse_{sig_key}",
+                    f"val_fusion_mipmse_{detail_sig_key}",
                     mse_sum / max(1, n_fusions),
                     on_step=False,
                     on_epoch=True,
@@ -300,7 +302,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     denoised_fused_volumes,
                     clean_volumes=clean_fused_volumes,
                     slice_count=min(4, self.FUSION_SLICE_NUMBER),
-                    yz_crop_shape=(64, 64),
+                    yz_crop_shape=self._detail_yz_crop_shape(clean_fused_volumes),
                     colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
                     pixel_scale=4,
                     show_labels=True,
@@ -338,6 +340,13 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         )
         if image is not None:
             log_image_artifact(self.logger, image, tag, self.global_step)
+
+    @staticmethod
+    def _detail_yz_crop_shape(volumes: list[Tensor]) -> tuple[int, int]:
+        max_d = max(int(volume.shape[-3]) for volume in volumes)
+        max_h = max(int(volume.shape[-2]) for volume in volumes)
+        side = min(64, max_d, max_h)
+        return (side, side)
 
     @torch.no_grad()
     def log_sample_mip(self, samples: Tensor, tag: str, *, sample_dim: int = 0) -> None:
