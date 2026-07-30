@@ -10,14 +10,19 @@ If you think a destructive action is needed, ask first — confirm with the user
 
 ## Repository Scope
 
-This repository trains 3D generative representation models for zebrafish microscopy volumes, orchestrated by PyTorch Lightning. Two model architectures are supported:
+This repository trains 3D generative representation models for zebrafish
+microscopy volumes, orchestrated by PyTorch Lightning. Keep responsibilities
+separated by directory:
 
-- **PRDiT** — 3D DiT backbone with local denoising (`modules/model/prdit.py`)
-- **BiFlowNet** — dual-path 3D UNet diffusion model (`modules/model/biflownet.py`)
+- `modules/framework/`: Lightning modules, training losses, validation logic,
+  logging, sampling hooks, and metric orchestration.
+- `modules/model/`: backbone/network models used by any training pipeline.
+- `modules/block/`: reusable layers and model building blocks.
+- `utils/sanitize/`: decoupled config validator + object factory compiler, validates `params` via domain Pydantic models (only these Params classes are changeable), resolves `class_name` to instantiate objects, and resolves `runtime.X` cross-references mechanically.
+- `utils/dataset/`: dataset implementations and crop-cache loading.
+- `utils/display/`: reusable visualization and MLflow artifact helpers.
 
-Training objectives: rectified flow, DDPM, IaN flow. Framework modules live under `modules/framework/`.
-
-The previous `model/lightning/*` and old UNet training paths are stale and must not be reintroduced on `main`. The current 3D CNN UNet blocks in `modules/block/unet.py` are part of BiFlowNet and are the supported UNet implementation.
+Do not reintroduce stale `model/lightning/*` or old training paths.
 
 ## Launch Protocol
 
@@ -28,38 +33,51 @@ filesystems (each forked child reloads libraries from NFS).
 official recommendation.
 
 **Never use `nohup`.** It breaks stdout/stderr redirection to log files — output is
-silently lost. Use a plain background process with `PYTHONUNBUFFERED=1` and `disown`:
+silently lost. Put training in the background with `&` and `disown`; the monitor
+waits in the foreground. Write logs and sentinels directly under
+`/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/logs/<train_type>/`.
+Set `CUDA_VISIBLE_DEVICES` explicitly and match `--nproc_per_node` to the visible
+GPU count:
 
 ```bash
-export PYTHONUNBUFFERED=1
-python -m torch.distributed.run --nproc_per_node=N driver.py \
-  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
-  > /tmp/training.log 2>&1 &
-disown
-```
-
-Always write logs to `/tmp/` (local NVMe, 6 GB/s) — NOT to `result/logs/` (NFS, 51 MB/s).
-Symlink to `result/logs/` for easy access: `ln -sf /tmp/training.log result/logs/training.log`.
-
-Single-GPU:
-```bash
-export PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0
-python -m torch.distributed.run --nproc_per_node=1 driver.py \
-  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
-  > /tmp/training.log 2>&1 & disown
-```
-
-Multi-GPU (e.g. 4 GPUs on gpu07):
-```bash
+LOGDIR=/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/logs/<train_type>
+RUN=<run>
+mkdir -p "$LOGDIR"
 export PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0,1,2,3
-python -m torch.distributed.run --nproc_per_node=4 driver.py \
-  --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
-  > /tmp/training.log 2>&1 & disown
+(
+  python -m torch.distributed.run --nproc_per_node=4 driver.py \
+    --data-config ... --model-config ... --framework-config ... --wrapper-config ... \
+    > "$LOGDIR/$RUN.log" 2>&1
+  echo $? > "$LOGDIR/$RUN.status"
+) &
+echo $! > "$LOGDIR/$RUN.pid"
+disown
 ```
 
 Lightning detects `LOCAL_RANK` set by torchrun and uses the configured DDP strategy
 automatically — no code changes needed in `driver.py`. Always set
 `CUDA_VISIBLE_DEVICES` explicitly to avoid cross-job GPU contention.
+
+### Background Training Follow-up
+
+After launching background training, Codex must keep ownership of the run until it
+finishes unless the user explicitly says to leave it unattended. First confirm
+healthy startup from MLflow metrics; then start one blocking SSH wait command and
+leave that terminal active until the remote PID exits. This is token efficient:
+Codex is waiting on the terminal, not polling.
+
+Run the wait in the foreground, not with `&` or `disown`, so Codex remains in
+the waiting terminal until it exits:
+
+```bash
+ssh gpu07 'cd /home/ym.xiao/workspace/zebrafish_represent && L=/data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/logs/<train_type> && R=<run> && P=$(cat "$L/$R.pid") && tail --pid="$P" -f /dev/null; tail -n 120 "$L/$R.log"; exit "$(cat "$L/$R.status")"'
+```
+
+When the wait returns, inspect the final log, MLflow metrics/checkpoints, and
+generated validation artifacts before deciding whether the run is healthy, failed
+and needs recovery, or finished and needs a follow-up experiment. Record the
+outcome very briefly in `result/work_log/yyyy_mm_dd.md`.
+
 
 ## Python Binary to use
 
@@ -70,9 +88,9 @@ automatically — no code changes needed in `driver.py`. Always set
 
 Training configuration lives in 4 YAML files (data, model, framework, wrapper), merged at load time by `runtime_factory.py`. Every runtime-object section uses the `class_name` + `params` pattern. Config keys directly align with target class `__init__` parameter names — no unpack, renaming, or semantic derivation during config loading.
 
-Refer to the latest config files under `config/data/`, `config/model/`, `config/framework/`, `config/wrapper/` for concrete examples.
+Keep config names brief and sharp. Do not create a new config only for naming. Special runs should be identified by the one config that actually changed; for example, a resume-from-checkpoint variant should only add a concise marker like `loadlast` to the wrapper config name. Do not duplicate identifiers across config names; data-geometry or source-dataset markers belong in the data config name, not again in the wrapper config name.
 
-`utils/sanitize/` is a decoupled config validator + object factory compiler. It validates `params` via domain Pydantic models, resolves `class_name` to instantiate objects, and resolves `runtime.X` cross-references by blind iteration until all objects are built.
+Refer to the latest config files under `config/data/`, `config/model/`, `config/framework/`, `config/wrapper/` for concrete examples.
 
 ### Runtime Factory Protocol
 
@@ -85,32 +103,40 @@ Refer to the latest config files under `config/data/`, `config/model/`, `config/
 ### Adding a New Module or Config Section
 
 1. Define its param class in the appropriate domain file under `utils/sanitize/` (extend `IngestibleParams`).
-2. Write a builder `(section: dict) -> MyModule` and register it in `_BUILDERS` in `runtime_factory.py`.
-3. Add the YAML config section — any of the 4 config files can include the new key.
+2. Add the YAML config section — any of the 4 config files can include the new key.
 
 ## Architecture Rules
 
 - Never do backward compatibility work. Change config keys to the new version and delete stale code instead of adding shims.
 - Delete stale modules, imports, aliases, notebooks, and documentation as part of any refactor.
-- Perform validation and default resolution early in sanitize code. Modules consume validated objects, not infer optional behavior locally.
-- Resolve policy in sanitize stage, not in model internals (attention backend, device fallbacks).
-- Attention is always PyTorch SDPA — no external attention backend needed.
-- Use one-object parameter injection. Avoid long constructor or factory argument lists.
+- Perform validation and resolve policy early in sanitize code. Modules consume validated objects, not infer optional behavior locally.
+- Attention is always PyTorch SDPA
 - Persist checkpoints, config dumps, and generated samples through MLflow artifact helpers. Do not add config options like `output_root`, checkpoint `dirpath`, or sample output directories.
-- Keep reusable visualization and artifact code under `utils/display/`. Do not create one-off plotting scripts under `./script`.
+- Keep reusable visualization and artifact code under `utils/display/`.
 - **DDP-distributed validation**: When validation computation is expensive (e.g., iterative denoising), distribute work across all DDP ranks by striding `rank::world_size`, gather results with `dist.all_gather_object`, then merge and log only on rank 0. This keeps the per-rank memory envelope consistent with the main validation loop and avoids rank-0 bottlenecks.
 
 ## Dataset Terminology
 
-| Term | Definition | Source |
-|------|-----------|--------|
-| **fusion** | One whole TIF volume (or downsampled) | `utils/dataset/base_volume.py` |
-| **crop** | One fixed-size training sample served from a pre-materialized hot cache — no runtime grid computation or TIFF I/O | `utils/dataset/crop_volume.py` |
-| **hot cache** | One mmap-ready bundle under `.crop_cache_<hash>/` with `manifest.json`, `crops.bin`, `starts.bin`, and `full_sizes.bin`, built offline by `utils/script/build_hot_cache.py`. The dataset validates the bundle, warms the mapped files once, and serves read-only shared views so DDP ranks and DataLoader workers attach the same OS-backed pages instead of building per-process Python caches. | `utils/dataset/crop_volume.py` |
-| **patch** | One token that `PRDiT` processes via `ExtractPatches3D` — smallest model-operable unit | `modules/block/encoder.py` |
+The supported TIF training dataset is the prebuilt mmap crop cache served by
+`CropTifVolumeHotDataset` in `utils/dataset/crop_volume.py`.
 
-Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start coordinates), and `full_size` (original fusion shape). Use `volume_fuse` in `utils/dataset/fusion.py` to reassemble crops into the original fusion volume.
+| Term | Definition |
+|------|-----------|
+| **fusion** | One source TIF volume represented only through crop metadata during training. |
+| **crop** | One fixed-size training sample read from the prebuilt mmap cache. |
+| **hot cache** | A `.crop_cache_<hash>/` bundle with `manifest.json`, `crops.bin`, `starts.bin`, and `full_sizes.bin`, built offline by `utils/script/build_hot_cache.py`. |
 
+Every crop carries reconstruction metadata: `fusion_id`, `pos_idx` start
+coordinates, and `full_size`. Use `volume_fuse` in `utils/dataset/fusion.py` only
+when crops must be reassembled into a fusion volume.
+
+Cache location is node-dependent:
+
+- **gpu04 / gpu05**: use data configs named `*network_file.yaml`; they set
+  `cache_root: null`, so the dataset reads the prebuilt cache beside the
+  network-shared data instead of expecting a local `/tmp` copy.
+- **gpu06 / gpu07**: use configs with explicit local `/tmp/...` `cache_root`
+  values for the prebuilt mmap cache.
 
 ## Data and Tensor Conventions
 
@@ -118,7 +144,6 @@ Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start co
 - Dataset sample dict: `{"target": Tensor[C, D, H, W], "fusion_id": int, "pos_idx": Tensor[3], "full_size": Tensor[4]}`
 - Spatial axis order is always `(D, H, W)`
 - Volume channels are channel-first after preprocessing
-- This repository works on TIF/TIFF microscopy volumes, not NIfTI
 
 ## Visualization Protocol
 
@@ -137,24 +162,13 @@ Every crop carries metadata for reconstruction: `fusion_id`, `pos_idx` (start co
 ## Editing Rules
 
 - Keep changes config-driven; place defaults and validation in sanitize models.
-- Preserve the current DiT-based generative path only. Do not reintroduce UNet, masked-pretext, or stale branches unless explicitly requested.
+- Keep framework/model changes inside the active config-driven runtime path. Do not reintroduce stale branches unless explicitly requested.
 - For cleanup commits, prefer net deletion over net addition. If code must grow, split one large file into smaller focused files.
 - Keep code ASCII unless a file already requires Unicode.
 - Avoid touching large data artifacts under `data/`, `checkpoints/`, `logs/`, `outputs/`, `result/`.
 - `README.md` is guidance for beginners. Seldom change it. Do not use it as a work log.
 - Record past working history (feature changes, verifications, bug fixes) to `result/work_log/yyyy_mm_dd.md`.
 
-## Run and Validation
-
-Smoke run (adjust Python binary per node — see Python Binary section above):
-```
-export CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1
-python -m torch.distributed.run --nproc_per_node=1 driver.py \
-  --data-config config/data/base_0125.yaml \
-  --model-config config/model/base.yaml \
-  --framework-config config/framework/base.yaml \
-  --wrapper-config config/wrapper/base.yaml
-```
 
 After changes, at minimum:
 - `/home/ym.xiao/workspace/zebrafish_represent/.venv/bin/python -m compileall driver.py modules utils`
