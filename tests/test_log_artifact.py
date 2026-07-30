@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from utils.display.log_artifact import ArtifactManager, upload_checkpoints
+import numpy as np
+
+from utils.display.log_artifact import ArtifactManager, log_image_artifact, upload_checkpoints
 
 
 class ArtifactManagerTest(unittest.TestCase):
@@ -27,6 +29,21 @@ class ArtifactManagerTest(unittest.TestCase):
             manager.cleanup_temp_folder()
             self.assertFalse(manager.root_dir.exists())
             self.assertTrue(manager.checkpoint_dir.exists())
+
+
+class LogImageArtifactTest(unittest.TestCase):
+    def test_image_upload_failure_is_nonfatal(self) -> None:
+        class _Experiment:
+            def log_image(self, **kwargs):
+                raise RuntimeError("artifact store unavailable")
+
+        logger = SimpleNamespace(run_id="run-123", experiment=_Experiment())
+
+        with mock.patch("builtins.print") as mocked_print:
+            log_image_artifact(logger, np.zeros((4, 4), dtype=np.float32), "val_projection", step=5)
+
+        self.assertEqual(mocked_print.call_count, 1)
+        self.assertIn("Image artifact upload failed", mocked_print.call_args.args[0])
 
 
 class UploadCheckpointsTest(unittest.TestCase):

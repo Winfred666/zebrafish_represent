@@ -68,6 +68,14 @@ class MLFlowLoggerParams(IngestibleParams):
     log_model: bool = False
 
 
+class ArtifactManagerParams(IngestibleParams):
+    """Params for ArtifactManager."""
+
+    logger: object
+    checkpoint_dir: str | Path | None = None
+    staging_root: str | Path | None = None
+
+
 class ModelCheckpointParams(IngestibleParams):
     """Params for ModelCheckpoint callback."""
 
@@ -76,6 +84,7 @@ class ModelCheckpointParams(IngestibleParams):
     mode: Literal["min", "max"] = "min"
     save_top_k: int = 1
     save_last: bool = True
+    save_weights_only: bool = False
     filename: str = "epoch{epoch:03d}-step{step:06d}"
     auto_insert_metric_name: bool = False
     verbose: bool = True
@@ -124,6 +133,7 @@ class TrainerParams(IngestibleParams):
     precision: str | int = "32"
     deterministic: bool = False
     log_every_n_steps: int = Field(default=10, ge=1)
+    enable_progress_bar: bool = False
     check_val_every_n_epoch: int = Field(default=1, ge=1)
     enable_checkpointing: bool = True
     gradient_clip_val: float = Field(default=1.0, ge=0.0)

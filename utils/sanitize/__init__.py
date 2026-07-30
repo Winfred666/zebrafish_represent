@@ -33,6 +33,7 @@ from utils.sanitize.model_config import (
 )
 from utils.sanitize.param_class import IngestibleParams
 from utils.sanitize.wrapper_config import (
+    ArtifactManagerParams,
     EarlyStoppingParams,
     IntegratedGPUMemoryMonitorParams,
     LearningRateMonitorParams,
@@ -71,6 +72,7 @@ __all__ = [
     "VICRegModuleParams",
     "VQVAES1ModuleParams",
     "VQVAES2ModuleParams",
+    "ArtifactManagerParams",
     "MLFlowLoggerParams",
     "ModelCheckpointParams",
     "EarlyStoppingParams",

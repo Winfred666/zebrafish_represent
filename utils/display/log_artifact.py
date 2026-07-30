@@ -61,11 +61,12 @@ class ArtifactManager:
         self,
         logger: Any = None,
         checkpoint_dir: str | Path | None = None,
+        staging_root: str | Path | None = None,
     ) -> "ArtifactManager":
         tracking_uri = _require_tracking_uri_from_logger(logger)
-        staging_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_"))
-
-        artifact_root = staging_root.resolve()
+        staging_parent = Path(staging_root if staging_root is not None else "/tmp").resolve()
+        staging_parent.mkdir(parents=True, exist_ok=True)
+        artifact_root = Path(tempfile.mkdtemp(prefix="mlflow_staging_", dir=staging_parent)).resolve()
 
         checkpoint_dir_path = (
             Path(checkpoint_dir).resolve()
@@ -151,13 +152,19 @@ def log_image_artifact(
     if "/" in image_key_str:
         raise ValueError("image_key must use underscore-separated names like 'val_projection', not slash-separated names.")
 
-    logger.experiment.log_image(
-        run_id=logger.run_id,
-        image=np.asarray(image),
-        key=image_key_str,
-        step=int(step),
-        synchronous=True,
-    )
+    try:
+        logger.experiment.log_image(
+            run_id=logger.run_id,
+            image=np.asarray(image),
+            key=image_key_str,
+            step=int(step),
+            synchronous=True,
+        )
+    except Exception as exc:
+        print(
+            f"[MLFLOW] Image artifact upload failed for {image_key_str} "
+            f"at step {int(step)}; continuing without image artifact: {exc}"
+        )
 
 
 def upload_checkpoints(trainer, logger) -> None:
