@@ -32,7 +32,7 @@ class DiT3DParams(IngestibleParams):
     num_heads: int = Field(ge=1)
     mlp_ratio: float = Field(gt=0.0)
     tokenizer: Any = None
-    pos_encoding_type: str = "learned"
+    pos_encoding_type: Literal["learned", "sinusoidal"] = "sinusoidal"
     tokenizer_patch_size: tuple[int, int, int] | None = None
     tokenizer_stride: tuple[int, int, int] | None = None
     tokenizer_padding: tuple[int, int, int] = (0, 0, 0)
@@ -231,6 +231,7 @@ class VolDiTParams(IngestibleParams):
     load_from_ckpt: str | None = None
     strict_load: bool = False
     load_ema_shadow: bool = False
+    use_checkpointing: bool = False
 
     @model_validator(mode="after")
     def _validate_patch_grid(self) -> "VolDiTParams":

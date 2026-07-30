@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from modules.block.voldit import (
     VolDiTBlock,
@@ -47,6 +48,7 @@ class VolDiT(BaseVolumeModel):
         load_from_ckpt: str | None = None,
         strict_load: bool = False,
         load_ema_shadow: bool = False,
+        use_checkpointing: bool = False,
     ):
         super().__init__()
         self.learn_sigma = bool(learn_sigma)
@@ -56,6 +58,7 @@ class VolDiT(BaseVolumeModel):
         self.patch_size = int(patch_size)
         self.hidden_size = int(hidden_size)
         self.load_ema_shadow = bool(load_ema_shadow)
+        self.use_checkpointing = bool(use_checkpointing)
 
         if any(size % self.patch_size != 0 for size in self.input_size):
             raise ValueError(
@@ -143,7 +146,16 @@ class VolDiT(BaseVolumeModel):
         if self.y_embedder.num_classes > 0 and y is not None:
             condition = condition + self.y_embedder(y, self.training)
         for block in self.blocks:
-            tokens = block(tokens, condition, control=None)
+            if self.use_checkpointing and self.training:
+                tokens = checkpoint(
+                    block,
+                    tokens,
+                    condition,
+                    control=None,
+                    use_reentrant=False,
+                )
+            else:
+                tokens = block(tokens, condition, control=None)
         return self.unpatchify(self.final_layer(tokens, condition))
 
     def load_ckpt(

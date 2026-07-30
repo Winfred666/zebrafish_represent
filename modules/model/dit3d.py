@@ -120,7 +120,7 @@ class DiT3D(BaseVolumeModel):
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         tokenizer: nn.Module | None = None,
-        pos_encoding_type: str = "learned",
+        pos_encoding_type: str = "sinusoidal",
         tokenizer_patch_size: Tuple[int, int, int] | None = None,
         tokenizer_stride: Tuple[int, int, int] | None = None,
         tokenizer_padding: Tuple[int, int, int] = (0, 0, 0),
@@ -156,8 +156,10 @@ class DiT3D(BaseVolumeModel):
 
         if pos_encoding_type == "learned":
             self.pos_embedder: PositionEmbedder = LearnablePosEmbedder(self.num_patches, self.hidden_size)
-        else:
+        elif pos_encoding_type == "sinusoidal":
             self.pos_embedder = SinusoidalPosEmbedder(self.grid_size, self.hidden_size)
+        else:
+            raise ValueError(f"Unsupported pos_encoding_type={pos_encoding_type}")
 
         self.time_embedder = TimestepEmbedder(self.hidden_size)
         self.backbone = DiTBackbone3D(
