@@ -204,7 +204,7 @@ class DDPMModule(BaseValTrainingFramework):
 
     def _ddpm_loss(self, prediction: Tensor, target: Tensor) -> Tensor:
         loss_type = self.optimization.loss_type
-        if loss_type == "mse":
+        if loss_type == "mse": # WARNING: mse would produce smoother result in sparse structure.
             return (prediction - target).pow(2).mean()
         if loss_type == "l1":
             return (prediction - target).abs().mean()
