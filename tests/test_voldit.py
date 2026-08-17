@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ from modules.framework.vq_vae_s2 import VQVAES2Module
 from modules.model.dit3d import DiT3D
 from modules.model.voldit import VolDiT
 from modules.model.vq_gan import MONAIVQGAN
+from utils.dataset.fusion import volume_fuse
 from utils.sanitize.framework_config import (
     BaseFrameworkParams,
     CommonDiffusionParams,
@@ -121,6 +122,21 @@ class TinyRandomValFramework(BaseValTrainingFramework):
         return float(sigma)
 
 
+class TinyFusionNoiseFramework(TinyValSampleFramework):
+    latent_factor = (1, 1, 1)
+
+    def _before_make_noisy(self, clean: torch.Tensor) -> torch.Tensor:
+        return F.avg_pool3d(
+            clean,
+            kernel_size=self.latent_factor,
+            stride=self.latent_factor,
+        )
+
+    def _q_sample(self, clean: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+        del t
+        return clean + noise
+
+
 class TinyCheckpointVolDiT(VolDiT):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -139,6 +155,247 @@ class TinyCheckpointVolDiT(VolDiT):
 
 
 class VolDiTIntegrationTest(unittest.TestCase):
+    def _fusion_noise_module(
+        self,
+        *,
+        factor: tuple[int, int, int] = (1, 1, 1),
+        noise_weight: float = 1.0,
+    ) -> TinyFusionNoiseFramework:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=noise_weight),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+        )
+        module = TinyFusionNoiseFramework(params)
+        module.latent_factor = factor
+        module._runtime_seed = 123
+        return module
+
+    @staticmethod
+    def _fusion_noise(
+        module: BaseValTrainingFramework,
+        clean_4d: torch.Tensor,
+        t_tensor: torch.Tensor,
+        fusion_id: int,
+        pos_idx: torch.Tensor,
+        full_size: torch.Tensor,
+        sig_key: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prepared_clean = module._before_make_noisy(clean_4d.unsqueeze(0))
+        return module._make_fusion_noisy_with_global_noise(
+            clean_4d,
+            prepared_clean,
+            t_tensor,
+            fusion_id,
+            pos_idx,
+            full_size,
+            sig_key,
+        )
+
+    def test_fusion_global_noise_matches_full_and_tiled_crops_exactly(self) -> None:
+        module = self._fusion_noise_module()
+        full_size = torch.tensor([1, 32, 256, 64])
+        t_tensor = torch.tensor([0.5])
+        _, full_noise = self._fusion_noise(
+            module,
+            torch.zeros(1, 32, 256, 64),
+            t_tensor,
+            7,
+            torch.tensor([0, 0, 0]),
+            full_size,
+            "sig050",
+        )
+        full_crop = {
+            "target": full_noise.squeeze(0),
+            "fusion_id": torch.tensor(7),
+            "pos_idx": torch.tensor([0, 0, 0]),
+            "full_size": full_size,
+        }
+        tile_crops = []
+        for start_h in range(0, 256, 32):
+            for start_w in range(0, 64, 32):
+                _, tile_noise = self._fusion_noise(
+                    module,
+                    torch.zeros(1, 32, 32, 32),
+                    t_tensor,
+                    7,
+                    torch.tensor([0, start_h, start_w]),
+                    full_size,
+                    "sig050",
+                )
+                tile_crops.append({
+                    "target": tile_noise.squeeze(0),
+                    "fusion_id": torch.tensor(7),
+                    "pos_idx": torch.tensor([0, start_h, start_w]),
+                    "full_size": full_size,
+                })
+
+        self.assertTrue(torch.equal(
+            volume_fuse([full_crop], fusion_id=7),
+            volume_fuse(tile_crops, fusion_id=7),
+        ))
+
+    def test_latent_ddpm_fusion_noise_encodes_once_and_maps_position(self) -> None:
+        class CountingStage1(TinyStage1):
+            def __init__(self) -> None:
+                super().__init__()
+                self.encode_calls = 0
+
+            def encode_stage_2_inputs(self, x: torch.Tensor) -> torch.Tensor:
+                self.encode_calls += 1
+                return super().encode_stage_2_inputs(x)
+
+        stage1 = CountingStage1()
+        params = LatentDDPMModuleParams(
+            model=TinyLatentModel(),
+            stage1_model=stage1,
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=4,
+            ),
+            diffusion=DDPMDiffusionParams(
+                num_train_timesteps=4,
+                beta_schedule="linear",
+                prediction_type="epsilon",
+                gen_noise_weight=0.25,
+            ),
+        )
+        module = LatentDDPMModule(params)
+        module.FUSION_NUMBER = 1
+        module._runtime_seed = 123
+        full_size = torch.tensor([1, 12, 16, 8])
+        batch = {
+            "target": torch.zeros(1, 1, 8, 8, 8),
+            "fusion_id": torch.tensor([0]),
+            "pos_idx": torch.tensor([[2, 4, 0]]),
+            "full_size": full_size.unsqueeze(0),
+        }
+
+        with patch.object(module, "_q_sample", side_effect=lambda clean, t, noise: noise):
+            module._maybe_collect_fusion_crops(batch)
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            module._seed_from_parts(
+                "fusion_global_noise",
+                0,
+                tuple(int(value) for value in full_size),
+                "sig050",
+            )
+        )
+        global_noise = torch.randn((1, 8, 6, 8, 4), generator=generator)
+        expected = global_noise[:, :, 1:5, 2:6, 0:4] * 0.25
+        stored_noise = module.val_fusions_noised[0]["sig050"][0]["target"]
+
+        self.assertEqual(stage1.encode_calls, 1)
+        self.assertTrue(torch.equal(stored_noise, expected.squeeze(0)))
+
+    def test_fusion_global_noise_edge_padding_does_not_change_fused_valid_region(self) -> None:
+        module = self._fusion_noise_module()
+        _, noise = self._fusion_noise(
+            module,
+            torch.zeros(1, 4, 8, 8),
+            torch.tensor([0.5]),
+            2,
+            torch.tensor([0, 0, 0]),
+            torch.tensor([1, 3, 5, 7]),
+            "sig050",
+        )
+        crop = {
+            "target": noise.squeeze(0),
+            "fusion_id": torch.tensor(2),
+            "pos_idx": torch.tensor([0, 0, 0]),
+            "full_size": torch.tensor([1, 3, 5, 7]),
+        }
+        padded_changed = noise.squeeze(0).clone()
+        padded_changed[:, 3:, :, :] = 1000.0
+        padded_changed[:, :, 5:, :] = 1000.0
+        padded_changed[:, :, :, 7:] = 1000.0
+        changed_crop = {**crop, "target": padded_changed}
+
+        self.assertEqual(tuple(noise.shape), (1, 1, 4, 8, 8))
+        self.assertEqual(torch.count_nonzero(noise[:, :, 3:]).item(), 0)
+        self.assertEqual(torch.count_nonzero(noise[:, :, :, 5:]).item(), 0)
+        self.assertEqual(torch.count_nonzero(noise[:, :, :, :, 7:]).item(), 0)
+        self.assertTrue(torch.equal(
+            volume_fuse([crop], fusion_id=2),
+            volume_fuse([changed_crop], fusion_id=2),
+        ))
+
+    def test_fusion_global_noise_is_repeatable_and_rng_local(self) -> None:
+        module = self._fusion_noise_module()
+        clean = torch.zeros(1, 2, 2, 2)
+        args = (torch.tensor([0.5]), 1, torch.tensor([0, 0, 0]), torch.tensor([1, 2, 2, 2]), "sig050")
+        torch.manual_seed(987)
+        rng_state = torch.random.get_rng_state().clone()
+        first = self._fusion_noise(module, clean, *args)[1]
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), rng_state))
+        second = self._fusion_noise(module, clean, *args)[1]
+
+        self.assertTrue(torch.equal(first, second))
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), rng_state))
+
+    def test_fusion_global_noise_rejects_malformed_mapping(self) -> None:
+        module = self._fusion_noise_module(factor=(2, 2, 2))
+        common = (
+            torch.tensor([0.5]),
+            0,
+            torch.tensor([1, 8, 8, 8]),
+            "sig050",
+        )
+        with self.subTest("non-divisible clean and encoded shapes"):
+            with self.assertRaisesRegex(ValueError, "integral input-to-latent"):
+                self._fusion_noise(
+                    module,
+                    torch.zeros(1, 5, 4, 4),
+                    common[0],
+                    common[1],
+                    torch.tensor([0, 0, 0]),
+                    common[2],
+                    common[3],
+                )
+        with self.subTest("non-divisible position"):
+            with self.assertRaisesRegex(ValueError, "integer latent coordinate"):
+                self._fusion_noise(
+                    module,
+                    torch.zeros(1, 4, 4, 4),
+                    common[0],
+                    common[1],
+                    torch.tensor([1, 0, 0]),
+                    common[2],
+                    common[3],
+                )
+        with self.subTest("inconsistent factors for one fusion"):
+            consistent = self._fusion_noise_module(factor=(2, 2, 2))
+            self._fusion_noise(
+                consistent,
+                torch.zeros(1, 4, 4, 4),
+                common[0],
+                common[1],
+                torch.tensor([0, 0, 0]),
+                common[2],
+                common[3],
+            )
+            consistent.latent_factor = (1, 1, 1)
+            with self.assertRaisesRegex(ValueError, "Inconsistent fusion validation mapping"):
+                self._fusion_noise(
+                    consistent,
+                    torch.zeros(1, 4, 4, 4),
+                    common[0],
+                    common[1],
+                    torch.tensor([0, 0, 0]),
+                    common[2],
+                    common[3],
+                )
+
     def test_monai_vqgan_forward_and_checkpoint_load(self) -> None:
         model = MONAIVQGAN(
             channels=(16, 32),
@@ -376,10 +633,25 @@ class VolDiTIntegrationTest(unittest.TestCase):
         loss = module.training_step({"target": torch.randn(2, 1, 8, 8, 8)}, 0)
         self.assertEqual(loss.ndim, 0)
 
-    def test_latent_ddpm_collects_vqgan_recon_for_fusion_display_only(self) -> None:
+    def test_latent_ddpm_reconstructs_fused_clean_once_for_display_only(self) -> None:
+        class CountingStage1(TinyStage1):
+            def __init__(self) -> None:
+                super().__init__()
+                self.encoded_inputs: list[torch.Tensor] = []
+                self.decoded_inputs: list[torch.Tensor] = []
+
+            def encode_stage_2_inputs(self, x: torch.Tensor) -> torch.Tensor:
+                self.encoded_inputs.append(x.detach().cpu().clone())
+                return super().encode_stage_2_inputs(x)
+
+            def decode_stage_2_outputs(self, z: torch.Tensor) -> torch.Tensor:
+                self.decoded_inputs.append(z.detach().cpu().clone())
+                return super().decode_stage_2_outputs(z)
+
+        stage1 = CountingStage1()
         params = LatentDDPMModuleParams(
             model=TinyLatentModel(),
-            stage1_model=TinyStage1(),
+            stage1_model=stage1,
             optimization=OptimizationParams(
                 learning_rate=1e-4,
                 weight_decay=0.0,
@@ -393,27 +665,57 @@ class VolDiTIntegrationTest(unittest.TestCase):
         )
         module = LatentDDPMModule(params)
         module.FUSION_NUMBER = 1
-        target = torch.arange(1 * 1 * 8 * 8 * 8, dtype=torch.float32).reshape(1, 1, 8, 8, 8)
+        left = torch.arange(8, dtype=torch.float32).reshape(1, 1, 2, 2, 2)
+        right = left + 20.0
+        target = torch.cat([left, right], dim=0)
         batch = {
             "target": target,
-            "fusion_id": torch.tensor([0]),
-            "pos_idx": torch.tensor([[0, 0, 0]]),
-            "full_size": torch.tensor([[1, 8, 8, 8]]),
+            "fusion_id": torch.tensor([0, 0]),
+            "pos_idx": torch.tensor([[0, 0, 0], [0, 0, 2]]),
+            "full_size": torch.tensor([[1, 2, 2, 4], [1, 2, 2, 4]]),
         }
 
         module._maybe_collect_fusion_crops(batch)
 
-        stored_clean = module.val_fusions_clean[0][0]["target"]
-        stored_display_clean = module.val_fusions_clean[0][0]["display_target"]
-        stored_noisy = module.val_fusions_noised[0]["sig050"][0]["target"]
-        expected_recon = module.stage1_model.decode_stage_2_outputs(
-            module.stage1_model.encode_stage_2_inputs(target)
+        self.assertEqual(len(stage1.encoded_inputs), 2)
+        self.assertEqual(len(stage1.decoded_inputs), 0)
+        self.assertTrue(all("display_target" not in crop for crop in module.val_fusions_clean[0]))
+
+        stage1.encoded_inputs.clear()
+        stage1.decoded_inputs.clear()
+        clean_fused = torch.cat([left[0], right[0]], dim=-1)
+        expected_recon = F.interpolate(
+            F.avg_pool3d(clean_fused.unsqueeze(0), kernel_size=2),
+            scale_factor=2,
+            mode="nearest",
         )[0]
 
-        self.assertTrue(torch.equal(stored_clean, target[0]))
-        self.assertTrue(torch.equal(stored_display_clean, expected_recon))
-        self.assertFalse(torch.equal(stored_display_clean, stored_clean))
-        self.assertEqual(tuple(stored_noisy.shape), (8, 4, 4, 4))
+        with (
+            patch.object(module, "_validation_batch_size", return_value=2),
+            patch.object(module, "_make_clean", return_value=target),
+            patch.object(
+                LatentDDPMModule,
+                "logger",
+                new_callable=PropertyMock,
+                return_value=object(),
+            ),
+            patch(
+                "modules.framework.base_val.build_clipped_midw_grid",
+                return_value=np.zeros((2, 2), dtype=np.float32),
+            ) as mock_grid,
+            patch("modules.framework.base_val.log_image_artifact"),
+            patch.object(module, "log") as mock_log,
+        ):
+            module._log_fusion_validation()
+
+        self.assertEqual(len(stage1.encoded_inputs), 1)
+        self.assertEqual(len(stage1.decoded_inputs), 1)
+        self.assertTrue(torch.equal(stage1.encoded_inputs[0], clean_fused.unsqueeze(0)))
+        self.assertTrue(torch.equal(mock_grid.call_args_list[0].kwargs["clean_volumes"][0], expected_recon))
+        metric_name, metric_value = mock_log.call_args.args[:2]
+        self.assertEqual(metric_name, "val_fusion_mipmse_sig50")
+        self.assertEqual(float(metric_value), 0.0)
+        self.assertFalse(torch.equal(expected_recon, clean_fused))
         self.assertEqual(module._fusion_display_clean_label(), "Rec.")
 
     def test_raw_dit3d_ddpm_loss_and_sample_without_stage1(self) -> None:
@@ -721,6 +1023,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
             diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
         )
+        self.assertFalse(params.fusion_feature_metrics)
         module = TinyValSampleFramework(params)
         clean = torch.zeros((1, 2, 2, 2), dtype=torch.float32)
         denoised = clean.clone()
@@ -736,6 +1039,8 @@ class VolDiTIntegrationTest(unittest.TestCase):
         with (
             patch.object(module, "_validation_batch_size", return_value=1),
             patch.object(module, "_make_clean", return_value=denoised.unsqueeze(0)),
+            patch("utils.eval.sample_quality.extract_standard_patch_features") as mock_extract,
+            patch("utils.eval.sample_quality.release_cached_feature_extractor") as mock_release,
             patch.object(module, "log") as mock_log,
         ):
             module._log_fusion_validation()
@@ -744,6 +1049,124 @@ class VolDiTIntegrationTest(unittest.TestCase):
         metric_name, metric_value = mock_log.call_args.args[:2]
         self.assertEqual(metric_name, "val_fusion_mipmse_sig50")
         self.assertAlmostEqual(float(metric_value), 1.0)
+        mock_extract.assert_not_called()
+        mock_release.assert_not_called()
+
+    def test_fusion_validation_logs_equal_raw_feature_banks(self) -> None:
+        params = BaseFrameworkParams(
+            model=TinySampleModel(),
+            optimization=OptimizationParams(
+                learning_rate=1e-4,
+                weight_decay=0.0,
+                loss_type="mse",
+                sample_steps=3,
+            ),
+            diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
+            testing=FrameworkTestingParams(run_sampling_after_fit=False),
+            fusion_feature_metrics=True,
+            sample_quality_checkpoint_path="medicalnet.ckpt",
+            sample_quality_input_normalization="raw",
+        )
+        module = TinyValSampleFramework(params)
+
+        def crop(value: float, shape: tuple[int, int, int], fusion_id: int) -> dict[str, torch.Tensor]:
+            target = torch.full((1, *shape), value, dtype=torch.float32)
+            return {
+                "target": target,
+                "fusion_id": torch.tensor(fusion_id),
+                "pos_idx": torch.tensor([0, 0, 0]),
+                "full_size": torch.tensor([1, *shape]),
+            }
+
+        clean_crops = [crop(0.0, (2, 2, 2), 0), crop(2.0, (2, 3, 4), 1)]
+        noised_crops = [crop(1.0, (2, 2, 2), 0), crop(3.0, (2, 3, 4), 1)]
+        module.val_fusions_clean = [[clean_crops[0]], [clean_crops[1]]]
+        module.val_fusions_noised = [
+            {"sig050": [noised_crops[0]]},
+            {"sig050": [noised_crops[1]]},
+        ]
+
+        extracted_volumes: list[torch.Tensor] = []
+
+        def fake_extract(volumes: torch.Tensor, **kwargs) -> torch.Tensor:
+            self.assertEqual(kwargs["checkpoint_path"], "medicalnet.ckpt")
+            self.assertEqual(kwargs["input_normalization"], "raw")
+            extracted_volumes.append(volumes.detach().cpu().clone())
+            row_count = int(volumes.shape[-1])
+            return torch.full(
+                (row_count, 2),
+                float(volumes.mean()),
+                dtype=torch.float64,
+            )
+
+        with (
+            patch.object(module, "_validation_batch_size", return_value=1),
+            patch.object(module, "_make_clean", side_effect=lambda batch, _: batch),
+            patch(
+                "utils.eval.sample_quality.extract_standard_patch_features",
+                side_effect=fake_extract,
+            ),
+            patch(
+                "utils.eval.sample_quality.standardize_feature_bank_rows",
+            ) as mock_standardize,
+            patch(
+                "utils.eval.sample_quality.compute_fid_from_feature_stats",
+                return_value=1.25,
+            ) as mock_fid,
+            patch(
+                "utils.eval.sample_quality.compute_mmd_from_features",
+                return_value=2.5,
+            ) as mock_mmd,
+            patch("utils.eval.sample_quality.release_cached_feature_extractor") as mock_release,
+            patch.object(
+                module,
+                "_reconstruct_fused_clean_for_display",
+                side_effect=lambda clean: clean + 99.0,
+            ) as mock_display,
+            patch.object(
+                TinyValSampleFramework,
+                "logger",
+                new_callable=PropertyMock,
+                return_value=object(),
+            ),
+            patch(
+                "modules.framework.base_val.build_clipped_midw_grid",
+                return_value=np.zeros((2, 2), dtype=np.float32),
+            ) as mock_grid,
+            patch("modules.framework.base_val.log_image_artifact"),
+            patch.object(module, "log") as mock_log,
+        ):
+            module._log_fusion_validation()
+
+        self.assertEqual([tuple(volume.shape) for volume in extracted_volumes], [
+            (1, 1, 2, 2, 2),
+            (1, 1, 2, 2, 2),
+            (1, 1, 2, 3, 4),
+            (1, 1, 2, 3, 4),
+        ])
+        self.assertEqual([float(volume.mean()) for volume in extracted_volumes], [0.0, 1.0, 2.0, 3.0])
+        self.assertEqual(mock_display.call_count, 2)
+        self.assertEqual(
+            [float(call.args[0].mean()) for call in mock_display.call_args_list],
+            [0.0, 2.0],
+        )
+        self.assertEqual(
+            [float(volume.mean()) for volume in mock_grid.call_args_list[0].kwargs["clean_volumes"]],
+            [99.0, 101.0],
+        )
+        mock_standardize.assert_not_called()
+        mock_release.assert_called_once_with()
+        self.assertEqual(mock_fid.call_args.args[0]["count"], 6)
+        self.assertEqual(mock_fid.call_args.args[1]["count"], 6)
+        reference_features, generated_features = mock_mmd.call_args.args
+        self.assertEqual(tuple(reference_features.shape), (6, 2))
+        self.assertEqual(tuple(generated_features.shape), (6, 2))
+
+        logged = {call.args[0]: call.args[1] for call in mock_log.call_args_list}
+        self.assertAlmostEqual(float(logged["val_fusion_mipmse_sig50"]), 1.0)
+        self.assertAlmostEqual(float(logged["val_fusion_fid_sig50"]), 1.25)
+        self.assertAlmostEqual(float(logged["val_fusion_mmd_sig50"]), 2.5)
+        self.assertEqual(int(logged["val_fusion_feature_count_sig50"]), 6)
 
     def test_validation_step_uses_fixed_rng_without_advancing_global_rng(self) -> None:
         params = BaseFrameworkParams(

@@ -32,10 +32,9 @@ class LatentDDPMModule(DDPMModule):
         decoded = self._decode_latents(denoised)
         return decoded.detach()
 
-    def _fusion_display_clean_targets(self, clean: Tensor) -> Tensor | None:
-        self.stage1_model.eval()
-        latents = self.stage1_model.encode_stage_2_inputs(clean).detach()
-        return self.stage1_model.decode_stage_2_outputs(latents).detach()
+    def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
+        prepared_clean = self._before_make_noisy(clean_fused.unsqueeze(0).to(self.device))
+        return self._after_make_clean(prepared_clean).squeeze(0).detach().cpu()
 
     def _fusion_display_clean_label(self) -> str:
         return "Rec."

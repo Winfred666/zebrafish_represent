@@ -43,6 +43,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         self.val_fusions_noised: list[dict[str, list]] = []
         self._fusion_collecting: bool = False
         self._fusion_object_pg = None
+        self._fusion_noise_specs: dict[
+            int, tuple[tuple[int, int, int, int], int, tuple[int, int, int]]
+        ] = {}
         self._val_stat_generated_features: torch.Tensor | None = None
         self._val_stat_generated_previews: dict[int, Tensor] | None = None
         self._val_stat_generated_foreground_l1: float | None = None
@@ -59,12 +62,126 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def _validation_step_seed(self, batch_idx: int) -> int:
         return self._seed_from_parts("validation_step", int(batch_idx))
 
-    def _fusion_display_clean_targets(self, clean: Tensor) -> Tensor | None:
-        del clean
+    def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
+        del clean_fused
         return None
 
     def _fusion_display_clean_label(self) -> str:
         return "GT"
+
+    def _make_fusion_noisy_with_global_noise(
+        self,
+        clean_4d: Tensor,
+        prepared_clean: Tensor,
+        t_tensor: Tensor,
+        fusion_id: int,
+        pos_idx: Tensor,
+        full_size: Tensor,
+        sig_key: str,
+    ) -> tuple[Tensor, Tensor]:
+        if clean_4d.ndim != 4:
+            raise ValueError("Fusion clean crop must have shape (C, D, H, W)")
+
+        if prepared_clean.ndim != 5 or prepared_clean.shape[0] != 1:
+            raise ValueError("Encoded fusion crop must have shape (1, C, D, H, W)")
+
+        clean_spatial = tuple(int(size) for size in clean_4d.shape[-3:])
+        encoded_spatial = tuple(int(size) for size in prepared_clean.shape[-3:])
+        factors = []
+        for axis, clean_size, encoded_size in zip("DHW", clean_spatial, encoded_spatial):
+            if encoded_size <= 0 or clean_size % encoded_size:
+                raise ValueError(
+                    "Fusion validation requires integral input-to-latent downsampling; "
+                    f"axis {axis} maps input={clean_size} to latent={encoded_size}"
+                )
+            factors.append(clean_size // encoded_size)
+
+        positions = tuple(int(value) for value in pos_idx.detach().cpu().reshape(-1).tolist())
+        full_shape = tuple(int(value) for value in full_size.detach().cpu().reshape(-1).tolist())
+        if len(positions) != 3 or len(full_shape) != 4:
+            raise ValueError(
+                "Fusion validation requires pos_idx=(D,H,W) and full_size=(C,D,H,W); "
+                f"got pos_idx={positions}, full_size={full_shape}"
+            )
+        if any(size <= 0 for size in full_shape):
+            raise ValueError("Fusion full_size must contain positive (C, D, H, W) dimensions")
+        if full_shape[0] != int(clean_4d.shape[0]):
+            raise ValueError(
+                "Fusion full_size channel count must match the clean crop; "
+                f"full_size={full_shape}, crop_shape={tuple(clean_4d.shape)}"
+            )
+        for axis, position, full_dim, factor in zip(
+            "DHW", positions, full_shape[-3:], factors
+        ):
+            if position < 0 or position >= full_dim:
+                raise ValueError(
+                    f"Fusion position is outside full_size on axis {axis}: "
+                    f"start={position}, full_size={full_dim}"
+                )
+            if position % factor:
+                raise ValueError(
+                    "Fusion position must map to an integer latent coordinate; "
+                    f"axis {axis} has start={position}, downsampling={factor}"
+                )
+
+        spec = (full_shape, int(prepared_clean.shape[1]), tuple(factors))
+        previous_spec = self._fusion_noise_specs.get(int(fusion_id))
+        if previous_spec is None:
+            self._fusion_noise_specs[int(fusion_id)] = spec
+        elif previous_spec != spec:
+            raise ValueError(
+                f"Inconsistent fusion validation mapping for fusion_id={fusion_id}: "
+                f"previous={previous_spec}, current={spec}"
+            )
+        full_latent_shape = tuple(
+            (size + factor - 1) // factor
+            for size, factor in zip(full_shape[-3:], factors)
+        )
+        latent_positions = tuple(
+            position // factor for position, factor in zip(positions, factors)
+        )
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            self._seed_from_parts(
+                "fusion_global_noise",
+                fusion_id,
+                full_shape,
+                sig_key,
+            )
+        )
+        global_noise = torch.randn(
+            (1, int(prepared_clean.shape[1]), *full_latent_shape),
+            dtype=torch.float32,
+            generator=generator,
+        )
+        crop_noise = global_noise[
+            :,
+            :,
+            latent_positions[0]:latent_positions[0] + encoded_spatial[0],
+            latent_positions[1]:latent_positions[1] + encoded_spatial[1],
+            latent_positions[2]:latent_positions[2] + encoded_spatial[2],
+        ]
+        padding = tuple(
+            encoded_size - actual_size
+            for encoded_size, actual_size in zip(encoded_spatial, crop_noise.shape[-3:])
+        )
+        if any(padding):
+            crop_noise = F.pad(
+                crop_noise,
+                (0, padding[2], 0, padding[1], 0, padding[0]),
+            )
+
+        noise = crop_noise.to(
+            device=prepared_clean.device,
+            dtype=prepared_clean.dtype,
+        ) * self._noise_w
+        if noise.shape != prepared_clean.shape:
+            raise RuntimeError(
+                "Fusion noise shape must match the prepared clean crop; "
+                f"noise={tuple(noise.shape)}, clean={tuple(prepared_clean.shape)}"
+            )
+        return self._q_sample(prepared_clean, t_tensor, noise), noise
 
     def _maybe_collect_fusion_crops(self, batch: dict[str, Tensor]) -> None:
         """Build the noisy-crop bank for all fusions during validation."""
@@ -72,8 +189,6 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             return
         if not self._fusion_collecting and self.val_fusions_noised:
             return
-
-        display_clean = self._fusion_display_clean_targets(batch["target"])
 
         if not self.val_fusions_noised:
             self.val_fusions_noised = [
@@ -89,29 +204,26 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
             for idx in fusion_mask.nonzero(as_tuple=True)[0]:
                 clean_4d = batch["target"][idx]
+                prepared_clean = self._before_make_noisy(clean_4d.unsqueeze(0))
                 clean_crop = {
                     "target": clean_4d.detach().cpu(),
                     "fusion_id": batch["fusion_id"][idx].detach().cpu(),
                     "pos_idx": batch["pos_idx"][idx].detach().cpu(),
                     "full_size": batch["full_size"][idx].detach().cpu(),
                 }
-                if display_clean is not None:
-                    clean_crop["display_target"] = display_clean[idx].detach().cpu()
                 self.val_fusions_clean[fusion_idx].append(clean_crop)
 
                 for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
                     t_val = self.get_t_from_sigma(float(sig_val))
                     t_tensor = torch.full((1,), t_val, device=clean_4d.device)
-                    crop_seed = self._seed_from_parts(
-                        "fusion",
-                        fusion_idx,
-                        batch["pos_idx"][idx],
-                        sig_key,
-                    )
-                    noisy, _ = self._make_noisy_with_seed(
-                        clean_4d.unsqueeze(0),
+                    noisy, _ = self._make_fusion_noisy_with_global_noise(
+                        clean_4d,
+                        prepared_clean,
                         t_tensor,
-                        seed=crop_seed,
+                        int(batch["fusion_id"][idx]),
+                        batch["pos_idx"][idx],
+                        batch["full_size"][idx],
+                        sig_key,
                     )
                     self.val_fusions_noised[fusion_idx][sig_key].append({
                         "target": noisy.squeeze(0).detach().cpu(),
@@ -202,6 +314,12 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             t_val = self.get_t_from_sigma(float(sig_val))
             mse_sum = 0.0
             fused_pairs_for_logging: list[tuple[int, Tensor, Tensor]] = []
+            fused_pairs_for_features: list[tuple[Tensor, Tensor]] = []
+            compute_fusion_features = (
+                is_rank0
+                and bool(getattr(self.config, "fusion_feature_metrics", False))
+                and float(sig_val) == 0.5
+            )
             uses_display_clean = False
             detail_sig_key = sig_key.replace("sig0", "sig", 1)
 
@@ -257,20 +375,17 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 clean_xy_mip = clean_fused.amax(dim=1)
                 mse_sum += float(F.mse_loss(denoised_xy_mip, clean_xy_mip))
 
+                if compute_fusion_features:
+                    fused_pairs_for_features.append((clean_fused, denoised_fused))
+
                 if should_log:
                     fusion_id = int(clean_subset[0]["fusion_id"])
-                    display_clean_fused = clean_fused
-                    if all("display_target" in clean_crop for clean_crop in clean_subset):
-                        display_clean_subset = [
-                            {
-                                "target": clean_crop["display_target"],
-                                "fusion_id": clean_crop["fusion_id"],
-                                "pos_idx": clean_crop["pos_idx"],
-                                "full_size": clean_crop["full_size"],
-                            }
-                            for clean_crop in clean_subset
-                        ]
-                        display_clean_fused = volume_fuse(display_clean_subset, fusion_id=fi)
+                    display_clean_fused = self._reconstruct_fused_clean_for_display(
+                        clean_fused
+                    )
+                    if display_clean_fused is None:
+                        display_clean_fused = clean_fused
+                    else:
                         uses_display_clean = True
                     fused_pairs_for_logging.append((fusion_id, display_clean_fused, denoised_fused))
 
@@ -283,6 +398,70 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     sync_dist=False,
                     rank_zero_only=True,
                 )
+
+            if fused_pairs_for_features:
+                from utils.eval.sample_quality import (
+                    compute_fid_from_feature_stats,
+                    compute_mmd_from_features,
+                    extract_standard_patch_features,
+                    release_cached_feature_extractor,
+                    summarize_feature_bank,
+                )
+
+                checkpoint_path = self._sample_quality_checkpoint_path()
+                input_normalization = self._sample_quality_input_normalization()
+                feature_kwargs = {
+                    "checkpoint_path": checkpoint_path,
+                    "input_normalization": input_normalization,
+                }
+                try:
+                    reference_feature_chunks = []
+                    generated_feature_chunks = []
+                    for clean_fused, denoised_fused in fused_pairs_for_features:
+                        reference_feature_chunks.append(
+                            extract_standard_patch_features(
+                                clean_fused.unsqueeze(0).to(device=self.device),
+                                **feature_kwargs,
+                            ).cpu()
+                        )
+                        generated_feature_chunks.append(
+                            extract_standard_patch_features(
+                                denoised_fused.unsqueeze(0).to(device=self.device),
+                                **feature_kwargs,
+                            ).cpu()
+                        )
+
+                    reference_features = torch.cat(reference_feature_chunks, dim=0)
+                    generated_features = torch.cat(generated_feature_chunks, dim=0)
+                    if reference_features.shape != generated_features.shape:
+                        raise RuntimeError(
+                            "Fusion reference and generated feature banks must have identical shapes"
+                        )
+
+                    val_fusion_fid = compute_fid_from_feature_stats(
+                        summarize_feature_bank(reference_features),
+                        summarize_feature_bank(generated_features),
+                    )
+                    val_fusion_mmd = compute_mmd_from_features(
+                        reference_features,
+                        generated_features,
+                    )
+                    feature_count = int(reference_features.shape[0])
+                    for metric_name, metric_value in (
+                        (f"val_fusion_fid_{detail_sig_key}", val_fusion_fid),
+                        (f"val_fusion_mmd_{detail_sig_key}", val_fusion_mmd),
+                        (f"val_fusion_feature_count_{detail_sig_key}", feature_count),
+                    ):
+                        self.log(
+                            metric_name,
+                            metric_value,
+                            on_step=False,
+                            on_epoch=True,
+                            sync_dist=False,
+                            rank_zero_only=True,
+                        )
+                finally:
+                    release_cached_feature_extractor()
 
             if fused_pairs_for_logging and should_log:
                 clean_fused_volumes = [clean_fused for _, clean_fused, _ in fused_pairs_for_logging]
