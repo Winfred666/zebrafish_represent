@@ -635,6 +635,8 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
     def test_latent_ddpm_reconstructs_fused_clean_once_for_display_only(self) -> None:
         class CountingStage1(TinyStage1):
+            downsample = (2,)
+
             def __init__(self) -> None:
                 super().__init__()
                 self.encoded_inputs: list[torch.Tensor] = []
@@ -666,6 +668,15 @@ class VolDiTIntegrationTest(unittest.TestCase):
         )
         module = LatentDDPMModule(params)
         module.FUSION_NUMBER = 1
+        odd_clean = torch.arange(27, dtype=torch.float32).reshape(1, 3, 3, 3)
+        odd_recon = module._reconstruct_fused_clean_for_display(odd_clean)
+        expected_padded = F.pad(odd_clean, (0, 1, 0, 1, 0, 1), value=-1.0)
+
+        self.assertTrue(torch.equal(stage1.encoded_inputs[0], expected_padded.unsqueeze(0)))
+        self.assertEqual(odd_recon.shape, odd_clean.shape)
+
+        stage1.encoded_inputs.clear()
+        stage1.decoded_inputs.clear()
         left = torch.arange(8, dtype=torch.float32).reshape(1, 1, 2, 2, 2)
         right = left + 20.0
         target = torch.cat([left, right], dim=0)

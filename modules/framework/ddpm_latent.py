@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import torch.nn.functional as F
 from torch import Tensor
 
 from modules.framework.ddpm import DDPMModule
@@ -33,9 +34,17 @@ class LatentDDPMModule(DDPMModule):
         return decoded.detach()
 
     def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
+        target_shape = clean_fused.shape[-3:]
+        factor = 1
+        for entry in getattr(self.stage1_model, "downsample", ()):
+            factor *= entry
+        padding = []
+        for size in reversed(target_shape):
+            total = (-size) % factor
+            padding.extend((total // 2, total - total // 2))
+        clean_fused = F.pad(clean_fused, tuple(padding), value=-1.0)
         prepared_clean = self._before_make_noisy(clean_fused.unsqueeze(0).to(self.device))
         decoded = self._after_make_clean(prepared_clean)
-        target_shape = clean_fused.shape[-3:]
         decoded_shape = decoded.shape[-3:]
         if any(
             decoded_size < target_size
