@@ -646,7 +646,8 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
             def decode_stage_2_outputs(self, z: torch.Tensor) -> torch.Tensor:
                 self.decoded_inputs.append(z.detach().cpu().clone())
-                return super().decode_stage_2_outputs(z)
+                decoded = super().decode_stage_2_outputs(z)
+                return F.pad(decoded, (0, 0, 3, 3, 0, 1))
 
         stage1 = CountingStage1()
         params = LatentDDPMModuleParams(

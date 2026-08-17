@@ -34,7 +34,28 @@ class LatentDDPMModule(DDPMModule):
 
     def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
         prepared_clean = self._before_make_noisy(clean_fused.unsqueeze(0).to(self.device))
-        return self._after_make_clean(prepared_clean).squeeze(0).detach().cpu()
+        decoded = self._after_make_clean(prepared_clean)
+        target_shape = clean_fused.shape[-3:]
+        decoded_shape = decoded.shape[-3:]
+        if any(
+            decoded_size < target_size
+            for decoded_size, target_size in zip(decoded_shape, target_shape)
+        ):
+            raise ValueError(
+                "Decoded fused-clean spatial shape "
+                f"{tuple(decoded_shape)} is smaller than target {tuple(target_shape)}."
+            )
+        starts = tuple(
+            (decoded_size - target_size) // 2
+            for decoded_size, target_size in zip(decoded_shape, target_shape)
+        )
+        decoded = decoded[
+            ...,
+            starts[0] : starts[0] + target_shape[0],
+            starts[1] : starts[1] + target_shape[1],
+            starts[2] : starts[2] + target_shape[2],
+        ]
+        return decoded.squeeze(0).detach().cpu()
 
     def _fusion_display_clean_label(self) -> str:
         return "Rec."
