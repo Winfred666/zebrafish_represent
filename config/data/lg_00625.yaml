@@ -1,0 +1,11 @@
+import_config: lg_00625_whole.yaml
+
+train_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/sample_full_picked_20260821/lg_00625/train
+    crop_size: [32, 32, 32]
+
+val_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/sample_full_picked_20260821/lg_00625/val
+    crop_size: [32, 32, 32]
