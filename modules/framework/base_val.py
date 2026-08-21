@@ -62,8 +62,13 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def _validation_step_seed(self, batch_idx: int) -> int:
         return self._seed_from_parts("validation_step", int(batch_idx))
 
-    def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
-        del clean_fused
+    def _reconstruct_fused_clean_for_display(
+        self,
+        clean_crops: list[dict[str, Tensor]],
+        fusion_id: int,
+        batch_size: int,
+    ) -> Tensor | None:
+        del clean_crops, fusion_id, batch_size
         return None
 
     def _fusion_display_clean_label(self) -> str:
@@ -381,7 +386,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 if should_log:
                     fusion_id = int(clean_subset[0]["fusion_id"])
                     display_clean_fused = self._reconstruct_fused_clean_for_display(
-                        clean_fused
+                        clean_subset,
+                        fusion_id,
+                        denoise_batch_size,
                     )
                     if display_clean_fused is None:
                         display_clean_fused = clean_fused

@@ -635,8 +635,6 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
     def test_latent_ddpm_reconstructs_fused_clean_once_for_display_only(self) -> None:
         class CountingStage1(TinyStage1):
-            downsample = (2,)
-
             def __init__(self) -> None:
                 super().__init__()
                 self.encoded_inputs: list[torch.Tensor] = []
@@ -648,8 +646,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
             def decode_stage_2_outputs(self, z: torch.Tensor) -> torch.Tensor:
                 self.decoded_inputs.append(z.detach().cpu().clone())
-                decoded = super().decode_stage_2_outputs(z)
-                return F.pad(decoded, (0, 0, 3, 3, 0, 1))
+                return super().decode_stage_2_outputs(z)
 
         stage1 = CountingStage1()
         params = LatentDDPMModuleParams(
@@ -668,12 +665,14 @@ class VolDiTIntegrationTest(unittest.TestCase):
         )
         module = LatentDDPMModule(params)
         module.FUSION_NUMBER = 1
-        odd_clean = torch.arange(27, dtype=torch.float32).reshape(1, 3, 3, 3)
-        odd_recon = module._reconstruct_fused_clean_for_display(odd_clean)
-        expected_padded = F.pad(odd_clean, (0, 1, 0, 1, 0, 1), value=-1.0)
-
-        self.assertTrue(torch.equal(stage1.encoded_inputs[0], expected_padded.unsqueeze(0)))
-        self.assertEqual(odd_recon.shape, odd_clean.shape)
+        odd_crop = {
+            "target": torch.arange(27, dtype=torch.float32).reshape(1, 3, 3, 3),
+            "fusion_id": torch.tensor(0),
+            "pos_idx": torch.tensor([0, 0, 0]),
+            "full_size": torch.tensor([1, 3, 3, 3]),
+        }
+        with self.assertRaisesRegex(ValueError, "preserve each dataset crop shape"):
+            module._reconstruct_fused_clean_for_display([odd_crop], 0, 1)
 
         stage1.encoded_inputs.clear()
         stage1.decoded_inputs.clear()
@@ -696,11 +695,21 @@ class VolDiTIntegrationTest(unittest.TestCase):
         stage1.encoded_inputs.clear()
         stage1.decoded_inputs.clear()
         clean_fused = torch.cat([left[0], right[0]], dim=-1)
-        expected_recon = F.interpolate(
-            F.avg_pool3d(clean_fused.unsqueeze(0), kernel_size=2),
-            scale_factor=2,
-            mode="nearest",
-        )[0]
+        expected_rec_crops = F.interpolate(
+            F.avg_pool3d(target, kernel_size=2), scale_factor=2, mode="nearest"
+        )
+        expected_recon = volume_fuse(
+            [
+                {
+                    "target": expected_rec_crops[idx],
+                    "fusion_id": batch["fusion_id"][idx],
+                    "pos_idx": batch["pos_idx"][idx],
+                    "full_size": batch["full_size"][idx],
+                }
+                for idx in range(2)
+            ],
+            fusion_id=0,
+        )
 
         with (
             patch.object(module, "_validation_batch_size", return_value=2),
@@ -722,7 +731,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
         self.assertEqual(len(stage1.encoded_inputs), 1)
         self.assertEqual(len(stage1.decoded_inputs), 1)
-        self.assertTrue(torch.equal(stage1.encoded_inputs[0], clean_fused.unsqueeze(0)))
+        self.assertTrue(torch.equal(stage1.encoded_inputs[0], target))
         self.assertTrue(torch.equal(mock_grid.call_args_list[0].kwargs["clean_volumes"][0], expected_recon))
         metric_name, metric_value = mock_log.call_args.args[:2]
         self.assertEqual(metric_name, "val_fusion_mipmse_sig50")
@@ -1133,7 +1142,9 @@ class VolDiTIntegrationTest(unittest.TestCase):
             patch.object(
                 module,
                 "_reconstruct_fused_clean_for_display",
-                side_effect=lambda clean: clean + 99.0,
+                side_effect=lambda crops, fusion_id, _: volume_fuse(
+                    crops, fusion_id
+                ) + 99.0,
             ) as mock_display,
             patch.object(
                 TinyValSampleFramework,
@@ -1159,7 +1170,7 @@ class VolDiTIntegrationTest(unittest.TestCase):
         self.assertEqual([float(volume.mean()) for volume in extracted_volumes], [0.0, 1.0, 2.0, 3.0])
         self.assertEqual(mock_display.call_count, 2)
         self.assertEqual(
-            [float(call.args[0].mean()) for call in mock_display.call_args_list],
+            [float(call.args[0][0]["target"].mean()) for call in mock_display.call_args_list],
             [0.0, 2.0],
         )
         self.assertEqual(

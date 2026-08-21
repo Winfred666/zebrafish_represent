@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import torch.nn.functional as F
 from torch import Tensor
 
 from modules.framework.ddpm import DDPMModule
+from utils.display.rec_mip_preview import build_rec_mip_preview_volume
 from utils.sanitize.framework_config import LatentDDPMModuleParams
 
 
@@ -33,38 +33,21 @@ class LatentDDPMModule(DDPMModule):
         decoded = self._decode_latents(denoised)
         return decoded.detach()
 
-    def _reconstruct_fused_clean_for_display(self, clean_fused: Tensor) -> Tensor | None:
-        target_shape = clean_fused.shape[-3:]
-        factor = 1
-        for entry in getattr(self.stage1_model, "downsample", ()):
-            factor *= entry
-        padding = []
-        for size in reversed(target_shape):
-            total = (-size) % factor
-            padding.extend((total // 2, total - total // 2))
-        clean_fused = F.pad(clean_fused, tuple(padding), value=-1.0)
-        prepared_clean = self._before_make_noisy(clean_fused.unsqueeze(0).to(self.device))
-        decoded = self._after_make_clean(prepared_clean)
-        decoded_shape = decoded.shape[-3:]
-        if any(
-            decoded_size < target_size
-            for decoded_size, target_size in zip(decoded_shape, target_shape)
-        ):
-            raise ValueError(
-                "Decoded fused-clean spatial shape "
-                f"{tuple(decoded_shape)} is smaller than target {tuple(target_shape)}."
-            )
-        starts = tuple(
-            (decoded_size - target_size) // 2
-            for decoded_size, target_size in zip(decoded_shape, target_shape)
+    def _reconstruct_fused_clean_for_display(
+        self,
+        clean_crops: list[dict[str, Tensor]],
+        fusion_id: int,
+        batch_size: int,
+    ) -> Tensor | None:
+        return build_rec_mip_preview_volume(
+            clean_crops,
+            fusion_id,
+            batch_size=batch_size,
+            device=self.device,
+            reconstruct_batch=lambda clean: self._after_make_clean(
+                self._before_make_noisy(clean)
+            ),
         )
-        decoded = decoded[
-            ...,
-            starts[0] : starts[0] + target_shape[0],
-            starts[1] : starts[1] + target_shape[1],
-            starts[2] : starts[2] + target_shape[2],
-        ]
-        return decoded.squeeze(0).detach().cpu()
 
     def _fusion_display_clean_label(self) -> str:
         return "Rec."
