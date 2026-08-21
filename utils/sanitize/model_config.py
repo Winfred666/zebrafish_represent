@@ -247,6 +247,39 @@ class VolDiTParams(IngestibleParams):
         return self
 
 
+class VolSwinTransformerParams(IngestibleParams):
+    """Params for the single-scale 3D Swin latent diffusion backbone."""
+
+    input_size: tuple[int, int, int]
+    patch_size: int = Field(ge=1)
+    in_channels: int = Field(ge=1)
+    width: int = Field(ge=1)
+    depth: int = Field(ge=1)
+    heads: int = Field(ge=1)
+    window_size: tuple[int, int, int]
+    mlp_ratio: float = Field(gt=0.0)
+    shift: bool
+
+    @model_validator(mode="after")
+    def _validate_swin_grid(self) -> "VolSwinTransformerParams":
+        if any(size % self.patch_size != 0 for size in self.input_size):
+            raise ValueError(
+                f"input_size must be divisible by patch_size. "
+                f"Got input_size={self.input_size}, patch_size={self.patch_size}"
+            )
+        if self.width % self.heads != 0:
+            raise ValueError(
+                f"width={self.width} must be divisible by heads={self.heads}"
+            )
+        grid_size = tuple(size // self.patch_size for size in self.input_size)
+        if any(window < 1 or window > size for window, size in zip(self.window_size, grid_size)):
+            raise ValueError(
+                f"window_size={self.window_size} must be positive and not exceed "
+                f"patch grid={grid_size}"
+            )
+        return self
+
+
 class BiFlowNetParams(IngestibleParams):
     """Params for the BiFlowNet dual-path diffusion model."""
 

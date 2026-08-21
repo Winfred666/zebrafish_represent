@@ -6,6 +6,7 @@ from modules.model.biflownet import BiFlowNet
 from modules.model.dit3d import DiT3D, PatchEmbed3D
 from modules.model.perceptual_net import PerceptualNetEncoder
 from modules.model.prdit import PRDiT
+from modules.model.swin3d import VolSwinTransformer
 from modules.model.trellis_occupancy_vae import TRELLISSparseStructureVAE
 from modules.model.trellis_ss_flow import TRELLISSparseStructureFlow
 from modules.model.voldit import VolDiT
@@ -19,6 +20,7 @@ __all__ = [
     "PerceptualNetEncoder",
     "PRDiT",
     "PatchEmbed3D",
+    "VolSwinTransformer",
     "TRELLISSparseStructureVAE",
     "TRELLISSparseStructureFlow",
     "VolDiT",

@@ -30,6 +30,7 @@ from utils.sanitize.model_config import (
     TRELLISSparseStructureFlowParams,
     TRELLISSparseStructureVAEParams,
     VolDiTParams,
+    VolSwinTransformerParams,
 )
 from utils.sanitize.param_class import IngestibleParams
 from utils.sanitize.wrapper_config import (
@@ -59,6 +60,7 @@ __all__ = [
     "TRELLISSparseStructureFlowParams",
     "TRELLISSparseStructureVAEParams",
     "VolDiTParams",
+    "VolSwinTransformerParams",
     "OptimizationParams",
     "DDPMDiffusionParams",
     "DDPMModuleParams",

@@ -1,0 +1,5 @@
+import_config: voldit_swin3d.yaml
+
+model:
+  params:
+    input_size: [8, 64, 16]
