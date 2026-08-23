@@ -259,6 +259,8 @@ class VolSwinTransformerParams(IngestibleParams):
     window_size: tuple[int, int, int]
     mlp_ratio: float = Field(gt=0.0)
     shift: bool
+    load_from_ckpt: str | None = None
+    strict_load: bool = False
 
     @model_validator(mode="after")
     def _validate_swin_grid(self) -> "VolSwinTransformerParams":

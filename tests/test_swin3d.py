@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import NamedTemporaryFile
 
 import torch
 import torch.nn.functional as F
@@ -74,6 +75,47 @@ class VolSwinTransformerTest(unittest.TestCase):
                 mlp_ratio=2.0,
                 shift=True,
             )
+
+    def test_load_from_lightning_checkpoint(self) -> None:
+        source = VolSwinTransformer(
+            input_size=(2, 4, 4),
+            patch_size=1,
+            in_channels=1,
+            width=24,
+            depth=1,
+            heads=4,
+            window_size=(2, 2, 2),
+            mlp_ratio=2.0,
+            shift=True,
+        )
+        with torch.no_grad():
+            source.x_embedder.proj.weight.fill_(0.25)
+        checkpoint = {
+            "state_dict": {
+                f"model.{key}": value.clone()
+                for key, value in source.state_dict().items()
+            }
+        }
+        with NamedTemporaryFile(suffix=".ckpt") as handle:
+            torch.save(checkpoint, handle.name)
+            loaded = VolSwinTransformer(
+                input_size=(2, 4, 4),
+                patch_size=1,
+                in_channels=1,
+                width=24,
+                depth=1,
+                heads=4,
+                window_size=(2, 2, 2),
+                mlp_ratio=2.0,
+                shift=True,
+                load_from_ckpt=handle.name,
+                strict_load=False,
+            )
+
+        self.assertTrue(torch.equal(
+            loaded.x_embedder.proj.weight,
+            source.x_embedder.proj.weight,
+        ))
 
     def test_small_overfit_smoke(self) -> None:
         torch.manual_seed(7)

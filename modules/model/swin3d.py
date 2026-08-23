@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -11,7 +13,15 @@ import torch.nn.functional as F
 from modules.block.pos_enc import SinusoidalPosEmbedder
 from modules.block.time_enc import TimestepEmbedder
 from modules.block.voldit import VolDiTFinalLayer, VolDiTPatchEmbed3D
-from modules.model.base import BaseVolumeModel
+from modules.model.base import (
+    BaseVolumeModel,
+    extract_checkpoint_state_dict,
+    filter_matching_state_dict,
+    load_raw_checkpoint,
+    strip_state_dict_prefixes,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _window_partition(x: torch.Tensor, window_size: tuple[int, int, int]) -> torch.Tensor:
@@ -301,6 +311,8 @@ class VolSwinTransformer(BaseVolumeModel):
         window_size: tuple[int, int, int],
         mlp_ratio: float,
         shift: bool,
+        load_from_ckpt: str | None = None,
+        strict_load: bool = False,
     ):
         super().__init__()
         self.input_size = tuple(int(value) for value in input_size)
@@ -351,6 +363,8 @@ class VolSwinTransformer(BaseVolumeModel):
             self.out_channels,
         )
         self.initialize_weights()
+        if load_from_ckpt:
+            self.load_ckpt(load_from_ckpt, strict=strict_load)
 
     def initialize_weights(self) -> None:
         def _init(module: nn.Module) -> None:
@@ -434,3 +448,24 @@ class VolSwinTransformer(BaseVolumeModel):
 
     def get_num_params(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)
+
+    def load_ckpt(self, ckpt_path: str | Path, *, strict: bool = False) -> None:
+        raw = load_raw_checkpoint(ckpt_path)
+        state_dict = extract_checkpoint_state_dict(raw)
+        normalized = strip_state_dict_prefixes(state_dict, prefixes=("module.", "model."))
+
+        if not strict:
+            normalized, skipped = filter_matching_state_dict(normalized, self.state_dict())
+            if skipped:
+                logger.warning(
+                    "Skipped %d VolSwinTransformer checkpoint keys with missing/shape mismatch",
+                    len(skipped),
+                )
+
+        missing, unexpected = self.load_state_dict(normalized, strict=strict)
+        logger.info(
+            "Loaded VolSwinTransformer checkpoint from %s (missing=%d, unexpected=%d)",
+            ckpt_path,
+            len(missing),
+            len(unexpected),
+        )
