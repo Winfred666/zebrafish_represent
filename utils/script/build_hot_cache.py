@@ -13,7 +13,8 @@ subdirectory with:
 - ``starts.bin``
 - ``full_sizes.bin``
 
-`CropTifVolumeHotDataset` mmaps those files directly during training.
+Source volumes may be TIFF stacks or Imaris ``.ims`` files.
+`CropTifVolumeHotDataset` mmaps the generated files directly during training.
 """
 
 from __future__ import annotations
@@ -38,7 +39,13 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from utils.dataset.crop_volume import CropTifVolumeHotDataset
 from utils.sanitize.data_config import CropTifVolumeHotDatasetParams
 from utils.runtime_factory import load_yaml_config
-from utils.tif2volume import _try_integer_downscale_factors, process_tif_to_array
+from utils.tif2volume import (
+    _to_channel_first_4d,
+    _try_integer_downscale_factors,
+    downsample_volume,
+    normalize_volume,
+    process_tif_to_array,
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,133 @@ class VolumeCacheArrays:
 # ═══════════════════════════════════════════════════════════════════
 #  standalone grid helpers (no dataset dependency)
 # ═══════════════════════════════════════════════════════════════════
+
+def _import_h5py():
+    try:
+        import h5py
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Reading .ims files requires h5py in the cache-build environment"
+        ) from exc
+    return h5py
+
+
+def _ims_level_for_scale(
+    handle,
+    scale_factor: tuple[float, ...],
+) -> tuple[int, tuple[float, ...]]:
+    if len(set(scale_factor)) == 1:
+        scale = float(scale_factor[0])
+        inverse = 1.0 / scale
+        level = int(round(np.log2(inverse))) if inverse >= 1.0 else -1
+        if level >= 0 and np.isclose(inverse, 2**level):
+            base = f"DataSet/ResolutionLevel {level}/TimePoint 0"
+            if base in handle:
+                return level, (1.0, 1.0, 1.0)
+    return 0, tuple(float(value) for value in scale_factor)
+
+
+def _ims_dataset_paths(handle, level: int) -> list[str]:
+    base = f"DataSet/ResolutionLevel {level}/TimePoint 0"
+    if base not in handle:
+        raise KeyError(f"Missing IMS group: {base}")
+    channels: list[tuple[int, str]] = []
+    for name in handle[base]:
+        if not name.startswith("Channel "):
+            continue
+        try:
+            channel_index = int(name.removeprefix("Channel "))
+        except ValueError:
+            continue
+        dataset_path = f"{base}/{name}/Data"
+        if dataset_path in handle:
+            channels.append((channel_index, dataset_path))
+    if not channels:
+        raise KeyError(f"No channel datasets found under {base}")
+    return [path for _channel_index, path in sorted(channels)]
+
+
+def _metadata_ims_volume_shape(
+    file_path: Path, in_channels: int,
+    scale_factor: tuple[float, ...], crop_size, overlap, pad_to_multiple,
+) -> tuple[int, ...]:
+    h5py = _import_h5py()
+    with h5py.File(file_path, "r") as handle:
+        level, residual_scale = _ims_level_for_scale(handle, scale_factor)
+        dataset_paths = _ims_dataset_paths(handle, level)
+        spatial_shapes = {
+            tuple(int(value) for value in handle[path].shape)
+            for path in dataset_paths
+        }
+
+    if len(spatial_shapes) != 1:
+        raise ValueError(f"IMS channels have different shapes: {sorted(spatial_shapes)}")
+    spatial = spatial_shapes.pop()
+    if len(spatial) != 3:
+        raise ValueError(f"Expected IMS channel shape (D,H,W), got {spatial}")
+    if len(dataset_paths) < in_channels:
+        raise ValueError(
+            f"File {file_path} has {len(dataset_paths)} channels, "
+            f"smaller than requested in_channels={in_channels}"
+        )
+
+    downsampled = _downsampled_spatial_shape(spatial, residual_scale)
+    padded = _padded_spatial_shape(downsampled, crop_size, overlap, pad_to_multiple)
+    return (in_channels, *padded)
+
+
+def process_ims_to_array(
+    ims_path: str,
+    *,
+    scale_factor: tuple[float, float, float] = (0.25, 0.25, 0.25),
+    normalize: bool = True,
+    clip_percentile: tuple[float, float] | None = (0, 100),
+) -> np.ndarray:
+    """Load an IMS pyramid as a channel-first ``(C,D,H,W)`` float32 array."""
+    h5py = _import_h5py()
+    print(f"Loading {ims_path}...")
+    with h5py.File(ims_path, "r") as handle:
+        level, residual_scale = _ims_level_for_scale(handle, scale_factor)
+        dataset_paths = _ims_dataset_paths(handle, level)
+        channels = [handle[path][...] for path in dataset_paths]
+
+    volume = channels[0] if len(channels) == 1 else np.stack(channels, axis=-1)
+    print(f"IMS level {level} shape: {volume.shape}, dtype: {volume.dtype}")
+    if residual_scale != (1.0, 1.0, 1.0):
+        volume = downsample_volume(volume, residual_scale)
+    else:
+        volume = volume.astype(np.float32, copy=False)
+    print(f"Downsampled shape: {volume.shape}")
+
+    if normalize:
+        volume = normalize_volume(
+            volume,
+            method="minmax",
+            clip_percentile=clip_percentile,
+        )
+    return _to_channel_first_4d(volume).astype(np.float32, copy=False)
+
+
+def _load_volume_to_array(
+    file_path: Path,
+    *,
+    scale_factor: tuple[float, float, float],
+    normalize: bool,
+) -> np.ndarray:
+    if file_path.suffix.lower() == ".ims":
+        return process_ims_to_array(
+            str(file_path),
+            scale_factor=scale_factor,
+            normalize=normalize,
+            clip_percentile=None,
+        )
+    return process_tif_to_array(
+        str(file_path),
+        scale_factor=scale_factor,
+        normalize=normalize,
+        clip_percentile=None,
+    )
+
 
 def _estimate_page_count(file_path: Path, first_shape: tuple[int, ...], dtype: np.dtype) -> int:
     page_bytes = int(np.prod(first_shape)) * np.dtype(dtype).itemsize
@@ -74,6 +208,14 @@ def _metadata_volume_shape(
     file_path: Path, in_channels: int,
     scale_factor: tuple[float, ...], crop_size, overlap, pad_to_multiple,
 ) -> tuple[int, ...]:
+    suffix = file_path.suffix.lower()
+    if suffix == ".ims":
+        return _metadata_ims_volume_shape(
+            file_path, in_channels, scale_factor, crop_size, overlap, pad_to_multiple,
+        )
+    if suffix not in {".tif", ".tiff"}:
+        raise ValueError(f"Unsupported volume format: {file_path.suffix}")
+
     with tifffile.TiffFile(file_path) as tif:
         first_page = tif.pages[0]
         first_shape = tuple(int(v) for v in first_page.shape)
@@ -157,12 +299,12 @@ def _scan_volume_shapes(
                 file_path, in_channels, scale_factor, crop_size, overlap, pad_to_multiple,
             )
         except Exception as exc:
-            print(f"[TIF-LOG] WARNING: cannot inspect {file_path.name}, skipping: {exc}")
+            print(f"[VOLUME-LOG] WARNING: cannot inspect {file_path.name}, skipping: {exc}")
             continue
         shapes.append(shape)
         readable.append(file_path)
     if not shapes:
-        raise ValueError("No metadata-readable tif files found")
+        raise ValueError("No metadata-readable volume files found")
     return shapes, readable
 
 
@@ -285,11 +427,10 @@ def _materialize_one_volume(
     file_path = ds._file_paths[vol_idx]
     print(f"  [{vol_idx:04d}] {file_path.name} ...")
 
-    volume = process_tif_to_array(
-        str(file_path),
+    volume = _load_volume_to_array(
+        file_path,
         scale_factor=ds.scale_factor,
         normalize=ds.normalize,
-        clip_percentile=None,
     )
     if ds.normalize:
         volume = volume * 2.0 - 1.0

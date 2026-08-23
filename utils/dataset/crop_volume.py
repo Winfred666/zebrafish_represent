@@ -1,6 +1,6 @@
 """Hot-cache crop dataset backed directly by mmap-ready binary cache files.
 
-`utils/script/build_hot_cache.py` is responsible for parsing TIF volumes and
+`utils/script/build_hot_cache.py` parses TIFF or IMS volumes and
 serializing the final cache bundle. The dataset only validates the bundle,
 warms its pages once, and exposes lightweight shared mmap views to all ranks
 and workers.
@@ -45,7 +45,7 @@ class CropTifVolumeHotDataset(Dataset):
     """Fully warm crop dataset backed by shared mmap files."""
 
     CACHE_MODE = "hot_mmap_v2"
-    CACHE_VERSION = 2
+    CACHE_VERSION = 3
     CROPS_FILE_NAME = "crops.bin"
     STARTS_FILE_NAME = "starts.bin"
     FULL_SIZES_FILE_NAME = "full_sizes.bin"
@@ -144,12 +144,14 @@ class CropTifVolumeHotDataset(Dataset):
 
     def _discover_all_files(self) -> list[Path]:
         files = sorted(
-            list(self.data_dir.rglob("*.tif")) + list(self.data_dir.rglob("*.tiff"))
+            list(self.data_dir.rglob("*.tif"))
+            + list(self.data_dir.rglob("*.tiff"))
+            + list(self.data_dir.rglob("*.ims"))
         )
         if not files and not (
             self.config.max_files is not None and int(self.config.max_files) == 0
         ):
-            raise ValueError(f"No tif files found in {self.data_dir}")
+            raise ValueError(f"No .tif, .tiff, or .ims files found in {self.data_dir}")
         rng = random.Random(42)
         rng.shuffle(files)
         return files
@@ -270,8 +272,6 @@ class CropTifVolumeHotDataset(Dataset):
         return manifest
 
     def _validate_manifest(self, manifest: dict) -> None:
-        if manifest.get("version") != self.CACHE_VERSION:
-            raise ValueError("Unsupported hot cache manifest version")
         if manifest.get("mode") != self.CACHE_MODE:
             raise ValueError("Unsupported hot cache manifest mode")
         if manifest.get("cache_key") != self._cache_key():
