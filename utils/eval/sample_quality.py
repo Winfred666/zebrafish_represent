@@ -1,7 +1,7 @@
 """Self-contained post-fit sample quality metrics for 3D volumes.
 
-FID and MMD use one 128³ volume-level feature vector per sample from a local
-vanilla MedicalNet ResNet backbone loaded through the standard MONAI wrapper.
+FID and MMD use foreground-containing 128³ views from a local vanilla
+MedicalNet ResNet backbone loaded through the standard MONAI wrapper.
 
 MS-SSIM and Wasserstein distance operate directly on jointly-normalised volume
 pairs.
@@ -27,6 +27,7 @@ _FEATURE_EXTRACTOR_KEY = None
 _FEATURE_CODE_SHA1 = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
 PATCH_SIZE = 128
 STANDARD_FEATURE_BANK_ROWS = 1534
+FEATURE_FOREGROUND_THRESHOLD = -0.99
 DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION = "sample_zscore"
 DEFAULT_SAMPLE_QUALITY_CHECKPOINT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -373,16 +374,36 @@ def extract_standard_patch_features(
     checkpoint_path: str | None = None,
     input_normalization: str = DEFAULT_SAMPLE_QUALITY_INPUT_NORMALIZATION,
 ) -> torch.Tensor:
-    feature_batches = [
-        extract_patch_features(
+    """Return foreground-view features, preserving one row for blank volumes."""
+    feature_batches: list[torch.Tensor] = []
+    first_features: torch.Tensor | None = None
+    kept_by_sample: torch.Tensor | None = None
+
+    for view in _iter_standard_feature_views(volumes):
+        features = extract_patch_features(
             view,
             checkpoint_path=checkpoint_path,
             input_normalization=input_normalization,
         )
-        for view in _iter_standard_feature_views(volumes)
-    ]
-    if not feature_batches:
+        if first_features is None:
+            first_features = features
+            kept_by_sample = torch.zeros(
+                int(features.shape[0]),
+                dtype=torch.bool,
+                device=features.device,
+            )
+
+        foreground = (view > FEATURE_FOREGROUND_THRESHOLD).flatten(start_dim=1).any(dim=1)
+        if bool(foreground.any()):
+            feature_batches.append(features[foreground])
+            kept_by_sample |= foreground.to(device=kept_by_sample.device)
+
+    if first_features is None or kept_by_sample is None:
         return empty_feature_bank(checkpoint_path=checkpoint_path)
+
+    blank = ~kept_by_sample
+    if bool(blank.any()):
+        feature_batches.append(first_features[blank])
     return torch.cat(feature_batches, dim=0)
 
 
@@ -873,9 +894,8 @@ def compute_sample_quality_metrics(
 ) -> dict[str, float | int | list[int]]:
     """Compute 3D quality metrics between generated and reference volumes.
 
-    FID and MMD resize each volume to 128³ if needed, run a vanilla MedicalNet
-    ResNet feature extractor once per volume, and compare the resulting
-    feature distributions.
+    FID and MMD extract foreground-containing 128³ views, run a vanilla
+    MedicalNet ResNet, and compare the resulting feature distributions.
 
     MS-SSIM and Wasserstein distance use joint-normalised volume pairs.
     """

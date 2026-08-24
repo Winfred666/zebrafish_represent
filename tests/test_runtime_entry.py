@@ -88,11 +88,11 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertNotIn("augment", config["val_dataset"]["params"])
 
     def test_inherited_non_overfit_crop_train_dataset_disables_augment(self) -> None:
-        config = load_yaml_config("config/data/lg_0125_whole_voldit.yaml")
+        config = load_yaml_config("config/data/lg_0125_whole.yaml")
         self.assertFalse(config["train_dataset"]["params"]["augment"])
 
     def test_overfit1_crop_train_dataset_disables_augment(self) -> None:
-        config = load_yaml_config("config/data/lg_0125_whole_voldit_overfit1.yaml")
+        config = load_yaml_config("config/data/lg_0125_whole_overfit1.yaml")
         self.assertFalse(config["train_dataset"]["params"]["augment"])
 
     # ── Runtime ref utilities ──
@@ -167,6 +167,23 @@ class RuntimeEntryTest(unittest.TestCase):
             checkpoint_params["dirpath"],
             "runtime.artifact_manager.checkpoint_dir",
         )
+
+    def test_fusion_detail_crop_shrinks_to_smallest_yz_axis(self) -> None:
+        from modules.framework.base_val import BaseValTrainingFramework
+
+        self.assertEqual(
+            BaseValTrainingFramework._detail_yz_crop_shape([torch.zeros(1, 8, 64, 16)]),
+            (8, 8),
+        )
+        self.assertEqual(
+            BaseValTrainingFramework._detail_yz_crop_shape([torch.zeros(1, 128, 512, 128)]),
+            (64, 64),
+        )
+
+    def test_trellis_wrapper_uses_weights_only_checkpoints(self) -> None:
+        config = load_yaml_config("config/wrapper/ddp4_trellis_ss_flow_gpu07.yaml")
+        checkpoint_params = config["trainer"]["params"]["callbacks"][0]["params"]
+        self.assertTrue(checkpoint_params["save_weights_only"])
 
     def test_model_param_validation(self) -> None:
         from utils.sanitize.model_config import (
@@ -389,7 +406,13 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(framework_config["framework"]["params"]["model"], "runtime.model")
         self.assertEqual(
             framework_config["framework"]["params"]["diffusion"]["prediction_type"],
-            "v_prediction",
+            "epsilon",
+        )
+
+        framework_x0_config = load_yaml_config("config/framework/ddpm_x0.yaml")
+        self.assertEqual(
+            framework_x0_config["framework"]["params"]["diffusion"]["prediction_type"],
+            "x0",
         )
 
     def test_trellis_sparse_flow_configs_load(self) -> None:
@@ -406,7 +429,6 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(framework_config["framework"]["params"]["stage1_model"], "runtime.stage1_model")
         self.assertEqual(framework_config["framework"]["params"]["t_schedule_name"], "logitNormal")
         self.assertEqual(framework_config["framework"]["params"]["total_timesteps"], 1000)
-
 
 if __name__ == "__main__":
     unittest.main()

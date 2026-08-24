@@ -1,4 +1,4 @@
-import_config: lg_0125_whole_voldit.yaml
+import_config: lg_0125_whole.yaml
 
 train_dataset:
   params:
@@ -9,8 +9,8 @@ train_dataset:
 
 val_dataset:
   params:
-    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full/train
-    cache_root: /tmp/zebrafish_represent_hot_cache/voldit_ds0125/train
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full_picked_20260821/train
+    cache_root: /tmp/zebrafish_represent_hot_cache/sample_full_picked_20260821/lg_0125_whole/train
     max_files: 1
     crop_size: [64, 512, 128]
     percentile_clim: [0.0, 100.0]

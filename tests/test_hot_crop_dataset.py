@@ -131,7 +131,7 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertTrue(torch.equal(item["pos_idx"], torch.tensor([0, 0, 0])))
             self.assertIsInstance(item["full_size"], torch.Tensor)
 
-    def test_compatible_legacy_manifest_version_loads(self) -> None:
+    def test_legacy_manifest_version_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
@@ -147,9 +147,11 @@ class HotCropDatasetTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = CropTifVolumeHotDataset(config)
-            self.assertEqual(len(dataset), 2)
-            self.assertEqual(dataset._load_manifest()["version"], 2)
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsupported hot cache manifest version",
+            ):
+                stub._load_manifest()
 
     def test_incomplete_cache_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,7 +266,7 @@ class HotCropDatasetTest(unittest.TestCase):
             )
             self.assertNotEqual(ds_full._crop_cache_dir(), ds_subset._crop_cache_dir())
 
-    def test_manifest_version_does_not_change_cache_identity(self) -> None:
+    def test_manifest_version_changes_cache_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
@@ -275,7 +277,7 @@ class HotCropDatasetTest(unittest.TestCase):
                 future = CropTifVolumeHotDataset.build_stub(config)
 
             self.assertEqual(CropTifVolumeHotDataset.CACHE_VERSION, 3)
-            self.assertEqual(current._crop_cache_dir(), future._crop_cache_dir())
+            self.assertNotEqual(current._crop_cache_dir(), future._crop_cache_dir())
 
     def test_attach_computes_thresholds_per_fusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -140,7 +140,7 @@ Cache location is node-dependent:
 
 ## Data and Tensor Conventions
 
-- Network tensor shape: `(B, C, D, H, W)`
+- Network tensor shape: `(B, C, D, H, W)`, where D=Z, H=Y, W=X.
 - Dataset sample dict: `{"target": Tensor[C, D, H, W], "fusion_id": int, "pos_idx": Tensor[3], "full_size": Tensor[4]}`
 - Spatial axis order is always `(D, H, W)`
 - Volume channels are channel-first after preprocessing

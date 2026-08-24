@@ -322,7 +322,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             fused_pairs_for_features: list[tuple[Tensor, Tensor]] = []
             compute_fusion_features = (
                 is_rank0
-                and bool(getattr(self.config, "fusion_feature_metrics", False))
+                and self._should_run_validation_stat_metrics()
                 and float(sig_val) == 0.5
             )
             uses_display_clean = False
@@ -440,9 +440,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
                     reference_features = torch.cat(reference_feature_chunks, dim=0)
                     generated_features = torch.cat(generated_feature_chunks, dim=0)
-                    if reference_features.shape != generated_features.shape:
+                    if reference_features.shape[1] != generated_features.shape[1]:
                         raise RuntimeError(
-                            "Fusion reference and generated feature banks must have identical shapes"
+                            "Fusion reference and generated feature dimensions must match"
                         )
 
                     val_fusion_fid = compute_fid_from_feature_stats(
@@ -603,7 +603,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         )
 
     def _should_run_validation_stat_metrics(self) -> bool:
-        trainer = getattr(self, "trainer", None)
+        trainer = getattr(self, "_trainer", None)
         if trainer is None:
             return False
         every_n_epochs = int(getattr(self.config, "stat_metrics_every_n_epochs", 0) or 0)

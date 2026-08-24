@@ -1,0 +1,27 @@
+import_config: lg_0125_whole.yaml
+
+train_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/sample_full_picked_20260821/lg_003_whole/train
+    crop_size: [16, 128, 32]
+    scale_factor: [0.03125, 0.03125, 0.03125]
+
+val_dataset:
+  params:
+    cache_root: /tmp/zebrafish_represent_hot_cache/sample_full_picked_20260821/lg_003_whole/val
+    crop_size: [16, 128, 32]
+    scale_factor: [0.03125, 0.03125, 0.03125]
+
+train_dataloader:
+  params:
+    batch_size: 512
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+
+val_dataloader:
+  params:
+    batch_size: 512
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false

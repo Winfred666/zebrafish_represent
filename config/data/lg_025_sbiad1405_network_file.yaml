@@ -1,0 +1,9 @@
+import_config: lg_025_network_file.yaml
+
+train_dataset:
+  params:
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/S-BIAD1405/train
+
+val_dataset:
+  params:
+    data_dir: /home/ym.xiao/workspace/zebrafish_represent/data/raw/S-BIAD1405/val

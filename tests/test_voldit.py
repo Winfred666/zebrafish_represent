@@ -1044,7 +1044,6 @@ class VolDiTIntegrationTest(unittest.TestCase):
             diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
         )
-        self.assertFalse(params.fusion_feature_metrics)
         module = TinyValSampleFramework(params)
         clean = torch.zeros((1, 2, 2, 2), dtype=torch.float32)
         denoised = clean.clone()
@@ -1084,11 +1083,16 @@ class VolDiTIntegrationTest(unittest.TestCase):
             ),
             diffusion=CommonDiffusionParams(gen_noise_weight=1.0),
             testing=FrameworkTestingParams(run_sampling_after_fit=False),
-            fusion_feature_metrics=True,
+            stat_metrics_every_n_epochs=1,
             sample_quality_checkpoint_path="medicalnet.ckpt",
             sample_quality_input_normalization="raw",
         )
         module = TinyValSampleFramework(params)
+        module.trainer = type(
+            "TrainerStub",
+            (),
+            {"sanity_checking": False, "current_epoch": 0, "global_step": 0},
+        )()
 
         def crop(value: float, shape: tuple[int, int, int], fusion_id: int) -> dict[str, torch.Tensor]:
             target = torch.full((1, *shape), value, dtype=torch.float32)

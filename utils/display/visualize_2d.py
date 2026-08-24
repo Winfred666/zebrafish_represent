@@ -427,7 +427,7 @@ def build_w_mip_grid(
         pred_padded = center_pad_fusion_volume(pred_volume_np, max_shape, fill_value=pad_value)
         projection_row.append(
             fix_2d_scalar(
-                np.max(pred_padded, axis=2),
+                np.max(pred_padded, axis=2), # WARNING: for MIP show the XY projection, along Z axis.
                 colorbar_limits=colorbar_limits,
             )
         )

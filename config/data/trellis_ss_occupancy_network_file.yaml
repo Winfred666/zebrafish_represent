@@ -1,0 +1,10 @@
+import_config:
+  - trellis_ss_occupancy_pt.yaml
+
+train_dataset:
+  params:
+    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_full/train/.mask_cache_fba7deb7a868
+
+val_dataset:
+  params:
+    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_full/val/.mask_cache_dc0eeca21ae8

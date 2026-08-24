@@ -185,6 +185,7 @@ class CropTifVolumeHotDataset(Dataset):
                 file_entries.append({"path": str(path), "size": None, "mtime_ns": None})
         parts = {
             "cache_mode": self.CACHE_MODE,
+            "cache_version": self.CACHE_VERSION,
             "files": file_entries,
             "crop_size": self.crop_size,
             "overlap": self.overlap,
@@ -272,6 +273,8 @@ class CropTifVolumeHotDataset(Dataset):
         return manifest
 
     def _validate_manifest(self, manifest: dict) -> None:
+        if manifest.get("version") != self.CACHE_VERSION:
+            raise ValueError("Unsupported hot cache manifest version")
         if manifest.get("mode") != self.CACHE_MODE:
             raise ValueError("Unsupported hot cache manifest mode")
         if manifest.get("cache_key") != self._cache_key():
