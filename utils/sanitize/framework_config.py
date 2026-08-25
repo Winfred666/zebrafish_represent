@@ -94,6 +94,12 @@ class DDPMModuleParams(BaseFrameworkParams):
     timestep_repeats: int = Field(default=1, ge=1)
 
 
+class DDIMPatchFusionModuleParams(DDPMModuleParams):
+    """Params for full-volume training with patch-conditioned DDIM inference."""
+
+    ddim_eta: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
 class LatentDDPMModuleParams(DDPMModuleParams):
     """Params for latent DDPM training with a frozen stage-1 encoder."""
 

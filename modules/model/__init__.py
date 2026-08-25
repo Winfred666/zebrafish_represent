@@ -5,6 +5,7 @@ from modules.model.base import BaseVolumeModel
 from modules.model.biflownet import BiFlowNet
 from modules.model.dit3d import DiT3D, PatchEmbed3D
 from modules.model.perceptual_net import PerceptualNetEncoder
+from modules.model.patchfusion_unet import PatchFusionUNet
 from modules.model.prdit import PRDiT
 from modules.model.swin3d import VolSwinTransformer
 from modules.model.trellis_occupancy_vae import TRELLISSparseStructureVAE
@@ -17,6 +18,7 @@ __all__ = [
     "BiFlowNet",
     "DiT3D",
     "MONAIVQGAN",
+    "PatchFusionUNet",
     "PerceptualNetEncoder",
     "PRDiT",
     "PatchEmbed3D",

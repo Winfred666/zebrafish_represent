@@ -6,6 +6,7 @@ from modules.framework.IaN_flow import IaNFlowModule
 from modules.framework.ddpm import DDPMModule
 from modules.framework.ddpm_latent import LatentDDPMModule
 from modules.framework.mae import MAEFinetuneModule
+from modules.framework.ddim_patchfusion import DDIMPatchFusionModule
 from modules.framework.rect_flow import RectifiedFlowModule
 from modules.framework.trellis_occupancy_vae import TRELLISOccupancyVAEModule
 from modules.framework.vic_reg import VICRegModule
@@ -19,6 +20,7 @@ __all__ = [
     "IaNFlowModule",
     "LatentDDPMModule",
     "MAEFinetuneModule",
+    "DDIMPatchFusionModule",
     "RectifiedFlowModule",
     "TRELLISOccupancyVAEModule",
     "VICRegModule",

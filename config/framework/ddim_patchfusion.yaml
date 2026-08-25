@@ -1,0 +1,31 @@
+# Direct voxel-space epsilon prediction using the paper's linear 1000-step schedule.
+framework:
+  class_name: DDIMPatchFusionModule
+  params:
+    model: runtime.model
+    stat_metrics_every_n_epochs: 0
+    use_ema: true
+    ema_decay: 0.999
+    ddim_eta: 0.4
+    timestep_repeats: 1
+    optimization:
+      learning_rate: 0.00002
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      lr_scheduler: none
+      loss_type: mse
+      sample_steps: 200
+    diffusion:
+      num_train_timesteps: 1000
+      beta_schedule: linear
+      beta_start: 0.0001
+      beta_end: 0.02
+      prediction_type: epsilon
+      sampling_method: ddim
+      timestep_respacing: null
+      gen_noise_weight: 1.0
+    testing:
+      run_sampling_after_fit: false
+      num_samples: 1
+      sample_steps: 200

@@ -282,6 +282,66 @@ class VolSwinTransformerParams(IngestibleParams):
         return self
 
 
+class PatchFusionUNetParams(IngestibleParams):
+    """Params for the global-aware patch-conditioned 3D U-Net."""
+
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=1, ge=1)
+    input_size: tuple[int, int, int]
+    full_size: tuple[int, int, int]
+    base_channels: int = Field(default=64, ge=4)
+    channel_mults: tuple[int, ...] = (1, 2, 4, 4)
+    num_res_blocks: int = Field(default=2, ge=1)
+    attention_levels: tuple[int, ...] = (2,)
+    attention_heads: int = Field(default=1, ge=1)
+    group_norm_groups: int = Field(default=32, ge=1)
+    inference_stride: tuple[int, int, int] | None = None
+    inference_patch_batch_size: int = Field(default=4, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_patch_geometry(self) -> "PatchFusionUNetParams":
+        if len(self.channel_mults) < 2:
+            raise ValueError("channel_mults must contain at least two U-Net levels")
+        if any(value < 1 for value in (*self.input_size, *self.full_size)):
+            raise ValueError("input_size and full_size must contain positive integers")
+        if any(crop > full for crop, full in zip(self.input_size, self.full_size)):
+            raise ValueError(
+                f"input_size={self.input_size} must fit within full_size={self.full_size}"
+            )
+        downsample_factor = 2 ** (len(self.channel_mults) - 1)
+        if any(size % downsample_factor != 0 for size in self.input_size):
+            raise ValueError(
+                f"input_size={self.input_size} must be divisible by "
+                f"downsample_factor={downsample_factor}"
+            )
+        if any(multiplier < 1 for multiplier in self.channel_mults):
+            raise ValueError("channel_mults must contain positive integers")
+        widths = tuple(self.base_channels * multiplier for multiplier in self.channel_mults)
+        if any(width % self.group_norm_groups != 0 for width in widths):
+            raise ValueError(
+                f"Every U-Net width {widths} must be divisible by "
+                f"group_norm_groups={self.group_norm_groups}"
+            )
+        if any(width % self.attention_heads != 0 for width in widths):
+            raise ValueError(
+                f"Every U-Net width {widths} must be divisible by "
+                f"attention_heads={self.attention_heads}"
+            )
+        if any(level < 0 or level >= len(widths) for level in self.attention_levels):
+            raise ValueError(
+                f"attention_levels={self.attention_levels} must index "
+                f"channel_mults={self.channel_mults}"
+            )
+        stride = self.inference_stride or self.input_size
+        if any(value < 1 for value in stride):
+            raise ValueError("inference_stride must contain positive integers")
+        if any(value > crop for value, crop in zip(stride, self.input_size)):
+            raise ValueError(
+                f"inference_stride={stride} cannot exceed input_size={self.input_size}"
+            )
+        return self
+
+
 class BiFlowNetParams(IngestibleParams):
     """Params for the BiFlowNet dual-path diffusion model."""
 

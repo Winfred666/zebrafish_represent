@@ -1,0 +1,16 @@
+# Paper-style 3D U-Net: local noisy crop + downsampled noisy full volume + DHW coordinates.
+model:
+  class_name: PatchFusionUNet
+  params:
+    in_channels: 1
+    out_channels: 1
+    input_size: [32, 32, 32]
+    full_size: [64, 480, 64]
+    base_channels: 64
+    channel_mults: [1, 2, 4, 4]
+    num_res_blocks: 2
+    attention_levels: [2]
+    attention_heads: 1
+    group_norm_groups: 32
+    inference_stride: [32, 16, 16]
+    inference_patch_batch_size: 4

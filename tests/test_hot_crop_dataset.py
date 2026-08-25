@@ -279,6 +279,30 @@ class HotCropDatasetTest(unittest.TestCase):
             self.assertEqual(CropTifVolumeHotDataset.CACHE_VERSION, 3)
             self.assertNotEqual(current._crop_cache_dir(), future._crop_cache_dir())
 
+    def test_cache_version_changes_legacy_cache_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            tifffile.imwrite(data_dir / "test.tif", np.zeros((2, 4, 2), dtype=np.uint16))
+            config = CropTifVolumeHotDatasetParams.model_validate(self._params(data_dir))
+
+            current = CropTifVolumeHotDataset.build_stub(config)
+            json_dumps = json.dumps
+
+            def dump_july_v2_key(parts: dict, **kwargs) -> str:
+                legacy_parts = dict(parts)
+                legacy_parts.pop("cache_version", None)
+                return json_dumps(legacy_parts, **kwargs)
+
+            with mock.patch(
+                "utils.dataset.crop_volume.json.dumps",
+                side_effect=dump_july_v2_key,
+            ):
+                july_v2_key = current._build_cache_key(files=current._file_paths)
+            july_v2_dir = Path(config.cache_root) / f".crop_cache_{july_v2_key}"
+
+            self.assertEqual(CropTifVolumeHotDataset.CACHE_VERSION, 3)
+            self.assertNotEqual(current._crop_cache_dir(), july_v2_dir)
+
     def test_attach_computes_thresholds_per_fusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
