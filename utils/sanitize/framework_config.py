@@ -43,7 +43,7 @@ class BaseFrameworkParams(IngestibleParams):
     optimization: OptimizationParams
     diffusion: CommonDiffusionParams
     testing: TestingParams = TestingParams()
-    stat_metrics_every_n_epochs: int = Field(default=0, ge=0)
+    stat_metrics_every_n_epochs: int = Field(default=400, ge=0)
     sample_quality_checkpoint_path: str | None = "result/checkpoints/medicalnet_resnet50_vicreg_reliable_mild.ckpt"
     sample_quality_input_normalization: Literal["raw", "sample_zscore"] = "sample_zscore"
     sample_quality_mmd_kernel: Literal["rbf"] = "rbf"

@@ -341,23 +341,6 @@ class RuntimeEntryTest(unittest.TestCase):
                 }
             )
 
-    def test_base_framework_params_default_stat_metric_interval(self) -> None:
-        from utils.sanitize.framework_config import BaseFrameworkParams
-
-        params = BaseFrameworkParams.model_validate(
-            {
-                "model": None,
-                "optimization": {
-                    "learning_rate": 1e-4,
-                    "weight_decay": 0.0,
-                    "loss_type": "mse",
-                    "sample_steps": 4,
-                },
-                "diffusion": {"gen_noise_weight": 0.5},
-            }
-        )
-        self.assertEqual(params.stat_metrics_every_n_epochs, 0)
-
     def test_trellis_framework_config_defaults(self) -> None:
         config = load_yaml_config("config/framework/trellis_ss_vae.yaml")
         self.assertEqual(config["framework"]["class_name"], "TRELLISOccupancyVAEModule")

@@ -134,10 +134,10 @@ class TrainerParams(IngestibleParams):
     deterministic: bool = False
     log_every_n_steps: int = Field(default=10, ge=1)
     enable_progress_bar: bool = False
-    check_val_every_n_epoch: int = Field(default=1, ge=1)
+    check_val_every_n_epoch: int = Field(default=200, ge=1)
     enable_checkpointing: bool = True
     gradient_clip_val: float = Field(default=1.0, ge=0.0)
-    num_sanity_val_steps: int = Field(default=1, ge=0)
+    num_sanity_val_steps: int = Field(default=-1, ge=-1)
     accumulate_grad_batches: int = Field(default=1, ge=1)
     limit_train_batches: float = Field(default=1.0, gt=0.0)
     limit_val_batches: float = Field(default=1.0, ge=0.0)
