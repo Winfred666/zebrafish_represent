@@ -1,0 +1,32 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 20
+    devices: 4
+    strategy: ddp_find_unused_parameters_true
+    gradient_clip_val: 0.0
+    precision: "bf16-mixed"
+    callbacks:
+      - class_name: ModelCheckpoint
+        params:
+          monitor: val_recon_loss
+          mode: min
+          save_top_k: 1
+          save_last: true
+          filename: "epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: IntegratedGPUMemoryMonitor
+        params:
+          log_frequency_mins: 1
+      - class_name: EarlyStopping
+        params:
+          monitor: val_recon_loss
+          mode: min
+          patience: 4
+          min_delta: 1.0e-5
+          strict: false
+          check_finite: true
+      - class_name: LearningRateMonitor
+        params:
+          logging_interval: epoch

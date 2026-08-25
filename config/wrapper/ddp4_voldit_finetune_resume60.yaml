@@ -1,9 +1,0 @@
-import_config:
-  - ddp4_voldit_finetune.yaml
-  - _callbacks_val_loss_no_early_stopping.yaml
-
-resume_ckpt_path: /tmp/mlflow_checkpoints/last-v19.ckpt
-
-trainer:
-  params:
-    max_epochs: 60

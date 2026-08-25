@@ -1,0 +1,9 @@
+import_config: ddp4_find_unused.yaml
+
+train_dataloader:
+  params:
+    batch_size: 128
+
+val_dataloader:
+  params:
+    batch_size: 128

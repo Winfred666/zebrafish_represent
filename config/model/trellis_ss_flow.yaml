@@ -31,5 +31,5 @@ model:
     num_heads: 16
     mlp_ratio: 4.0
     pos_encoding_type: sinusoidal
-    load_from_ckpt: result/checkpoints/sparse_structure/ss_flow_img_dit_L_fullcanvas_patch16_localwarm.safetensors
+    load_from_ckpt: null
     strict_load: false

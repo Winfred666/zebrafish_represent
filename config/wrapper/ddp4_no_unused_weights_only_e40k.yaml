@@ -1,0 +1,14 @@
+import_config:
+  - ddp4_no_unused_weights_only.yaml
+
+artifact_manager:
+  class_name: ArtifactManager
+  params:
+    logger: runtime.logging
+    checkpoint_dir: result/temp/checkpoints
+
+trainer:
+  params:
+    devices: 4
+    max_epochs: 40000
+    check_val_every_n_epoch: 200

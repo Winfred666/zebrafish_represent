@@ -4,7 +4,3 @@ framework:
   params:
     lr: 0.000005
     weight_decay: 0.000001
-
-logging:
-  params:
-    run_name: vic_reg_resnet50_finetune

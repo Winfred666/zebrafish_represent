@@ -1,0 +1,7 @@
+import_config: ddp3_recon_e5000.yaml
+
+artifact_manager:
+  class_name: ArtifactManager
+  params:
+    logger: runtime.logging
+    staging_root: /dev/shm/zrf_runtime_temp

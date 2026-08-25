@@ -1,0 +1,11 @@
+import_config: ddp4_b128.yaml
+
+resume_ckpt_path: null
+
+train_dataloader:
+  params:
+    batch_size: 512
+
+val_dataloader:
+  params:
+    batch_size: 512

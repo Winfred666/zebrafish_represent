@@ -1,0 +1,6 @@
+import_config: ddp8_probe.yaml
+
+trainer:
+  params:
+    devices: 1
+    strategy: auto

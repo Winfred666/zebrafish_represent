@@ -1,0 +1,35 @@
+import_config: ddp4_e100_no_early.yaml
+
+trainer:
+  params:
+    callbacks:
+      - class_name: ModelCheckpoint
+        params:
+          monitor: val_loss
+          mode: min
+          save_top_k: 1
+          save_last: true
+          filename: "loss-epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: ModelCheckpoint
+        params:
+          monitor: val_fid
+          mode: min
+          save_top_k: 1
+          save_last: false
+          filename: "fid-epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: ModelCheckpoint
+        params:
+          monitor: val_mmd
+          mode: min
+          save_top_k: 1
+          save_last: false
+          filename: "mmd-epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: IntegratedGPUMemoryMonitor
+        params:
+          log_frequency_mins: 1
+      - class_name: LearningRateMonitor
+        params:
+          logging_interval: epoch

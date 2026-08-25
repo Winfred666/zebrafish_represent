@@ -1,7 +1,0 @@
-# VolDiT stage-1 VQ-GAN model configuration.
-# Usage: --model-config config/model/vqvae.yaml
-import_config: voldit_vqgan_ds8.yaml
-
-model:
-  params:
-    load_from_ckpt: result/checkpoints/voldit_vqgan_lg025_ddp3_resume2_best.pth

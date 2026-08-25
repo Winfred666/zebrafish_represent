@@ -1,0 +1,15 @@
+import_config: ddp3_recon_e5000.yaml
+
+artifact_manager:
+  class_name: ArtifactManager
+  params:
+    logger: runtime.logging
+    staging_root: /dev/shm/zrf_patch_runtime_temp
+
+train_dataloader:
+  params:
+    batch_size: 10
+
+val_dataloader:
+  params:
+    batch_size: 10

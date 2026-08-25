@@ -1,29 +1,13 @@
-seed: 42
-resume_ckpt_path: null
-
-logging:
-  class_name: MLFlowLogger
-  params:
-    tracking_uri: http://172.27.2.100:5000
-    tags:
-      job_type: train
-    log_model: false
+import_config: base.yaml
 
 trainer:
-  class_name: Trainer
   params:
-    max_epochs: 40
-    accelerator: auto
-    devices: 1
-    precision: "bf16"
-    deterministic: true
-    check_val_every_n_epoch: 200
-    enable_checkpointing: true
-    gradient_clip_val: 1.0
-    num_sanity_val_steps: 10 # WARNING: make sure first fusion is logs during validation before training
-    accumulate_grad_batches: 1
-    log_every_n_steps: 20
-    logger: runtime.logging
+    accelerator: gpu
+    devices: 4
+    strategy: ddp_find_unused_parameters_false
+    precision: "bf16-mixed"
+    deterministic: false
+    num_sanity_val_steps: -1
     callbacks:
       - class_name: ModelCheckpoint
         params:
@@ -36,8 +20,6 @@ trainer:
       - class_name: IntegratedGPUMemoryMonitor
         params:
           log_frequency_mins: 1
-      
-      # To disable a callback, comment it out here and uncomment it when needed again.
       - class_name: EarlyStopping
         params:
           monitor: val_loss

@@ -1,0 +1,7 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    accelerator: gpu
+    strategy: ddp_find_unused_parameters_false
+    devices: 4

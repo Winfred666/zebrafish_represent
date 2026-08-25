@@ -8,7 +8,3 @@ framework:
     input_normalization: sample_zscore
     freeze_encoder_batchnorm: true
     anchor_weight: 1.0
-
-logging:
-  params:
-    run_name: vic_reg_resnet50_reliable_mild

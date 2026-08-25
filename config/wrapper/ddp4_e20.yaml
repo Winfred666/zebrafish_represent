@@ -1,0 +1,8 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    max_epochs: 20
+    devices: 4
+    strategy: ddp_find_unused_parameters_true
+    precision: "bf16-mixed"

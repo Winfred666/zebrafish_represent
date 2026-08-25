@@ -1,0 +1,13 @@
+import_config: base.yaml
+
+artifact_manager:
+  class_name: ArtifactManager
+  params:
+    logger: runtime.logging
+    staging_root: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/temp/runtime_temp
+
+trainer:
+  params:
+    devices: 4
+    strategy: ddp_find_unused_parameters_true
+    precision: "bf16-mixed"

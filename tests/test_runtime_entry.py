@@ -15,6 +15,7 @@ from utils.runtime_factory import (
     ConfigPaths,
     build_any_runtime_object,
     build_training_runtime,
+    build_training_runtime_from_files,
     load_split_configs,
     load_yaml_config,
 )
@@ -66,6 +67,49 @@ class RuntimeEntryTest(unittest.TestCase):
                      "val_dataloader", "model", "framework",
                      "seed", "logging", "trainer"):
             self.assertIn(key, merged, f"Missing key: {key}")
+
+    @mock.patch("utils.runtime_factory.build_training_runtime")
+    def test_tracking_names_are_derived_from_all_split_configs(
+        self,
+        mock_build_training_runtime,
+    ) -> None:
+        build_training_runtime_from_files(
+            data_config_path="config/data/base_0125.yaml",
+            model_config_path="config/model/dit.yaml",
+            framework_config_path="config/framework/base.yaml",
+            wrapper_config_path="config/wrapper/base.yaml",
+        )
+
+        merged = mock_build_training_runtime.call_args.kwargs["merged_config"]
+        logging_params = merged["logging"]["params"]
+        self.assertEqual(
+            logging_params["experiment_name"],
+            "DiT3D_RectifiedFlowModule",
+        )
+        self.assertRegex(
+            logging_params["run_name"],
+            r"^dit-base-base_0125-base-\d{6}_\d{6}$",
+        )
+
+    def test_active_configs_only_load_stage1_checkpoints(self) -> None:
+        def checkpoint_paths(value, path=()):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = path + (key,)
+                    if key in {"resume_ckpt_path", "load_from_ckpt"} and child:
+                        yield child_path
+                    yield from checkpoint_paths(child, child_path)
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    yield from checkpoint_paths(child, path + (str(index),))
+
+        for config_path in Path("config").rglob("*.yaml"):
+            for checkpoint_path in checkpoint_paths(load_yaml_config(config_path)):
+                self.assertEqual(
+                    checkpoint_path[0],
+                    "stage1_model",
+                    f"{config_path} loads {'.'.join(checkpoint_path)}",
+                )
 
     def test_callbacks_are_inline_in_trainer(self) -> None:
         """Trainer callbacks are inline {class_name, params} specs."""
@@ -181,7 +225,7 @@ class RuntimeEntryTest(unittest.TestCase):
         )
 
     def test_trellis_wrapper_uses_weights_only_checkpoints(self) -> None:
-        config = load_yaml_config("config/wrapper/ddp4_trellis_ss_flow_gpu07.yaml")
+        config = load_yaml_config("config/wrapper/ddp4_no_unused_weights_only.yaml")
         checkpoint_params = config["trainer"]["params"]["callbacks"][0]["params"]
         self.assertTrue(checkpoint_params["save_weights_only"])
 
@@ -359,7 +403,7 @@ class RuntimeEntryTest(unittest.TestCase):
 
     def test_wrapper_override_inherits_base_callbacks(self) -> None:
         """Child wrapper config inherits callbacks from base, unless overridden."""
-        config = load_yaml_config("config/wrapper/prdit_s1.yaml")
+        config = load_yaml_config("config/wrapper/single_e10.yaml")
         trainer_params = config["trainer"]["params"]
         self.assertIn("callbacks", trainer_params)
 
@@ -405,6 +449,7 @@ class RuntimeEntryTest(unittest.TestCase):
         self.assertEqual(model_config["stage1_model"]["params"]["input_size"], [128, 832, 192])
         self.assertEqual(model_config["model"]["params"]["input_size"], [32, 208, 48])
         self.assertEqual(model_config["model"]["params"]["pos_encoding_type"], "sinusoidal")
+        self.assertIsNone(model_config["model"]["params"]["load_from_ckpt"])
         self.assertFalse(model_config["model"]["params"]["strict_load"])
 
         framework_config = load_yaml_config("config/framework/trellis_ss_flow_rectified.yaml")

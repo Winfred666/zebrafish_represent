@@ -1,0 +1,49 @@
+import_config: base.yaml
+
+artifact_manager:
+  class_name: ArtifactManager
+  params:
+    logger: runtime.logging
+    staging_root: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/result/temp/runtime_temp
+
+resume_ckpt_path: null
+
+train_dataloader:
+  params:
+    batch_size: 128
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+    drop_last: true
+
+val_dataloader:
+  params:
+    batch_size: 64
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+    drop_last: false
+
+trainer:
+  params:
+    devices: 4
+    strategy: ddp_find_unused_parameters_true
+    precision: "bf16-mixed"
+    max_epochs: 100000
+    max_steps: 20000
+    check_val_every_n_epoch: 14
+    callbacks:
+      - class_name: ModelCheckpoint
+        params:
+          monitor: val_loss
+          mode: min
+          save_top_k: 1
+          save_last: true
+          filename: "epoch{epoch:03d}-step{step:06d}"
+          dirpath: runtime.artifact_manager.checkpoint_dir
+      - class_name: IntegratedGPUMemoryMonitor
+        params:
+          log_frequency_mins: 1
+      - class_name: LearningRateMonitor
+        params:
+          logging_interval: epoch

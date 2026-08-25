@@ -1,0 +1,6 @@
+import_config:
+  - ddp4_no_unused_weights_only.yaml
+
+trainer:
+  params:
+    devices: 7

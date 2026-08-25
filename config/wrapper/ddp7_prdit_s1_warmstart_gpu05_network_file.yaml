@@ -1,7 +1,0 @@
-import_config: ddp7_prdit_s1_gpu05_network_file.yaml
-
-logging:
-  params:
-    run_name: prdit_s1_ddp7_gpu05_network_file_warmstart
-    tags:
-      init: load_from_ckpt_260608_064826

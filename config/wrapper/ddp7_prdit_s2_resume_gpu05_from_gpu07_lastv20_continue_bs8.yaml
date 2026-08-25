@@ -1,9 +1,0 @@
-import_config: ddp7_prdit_s2_resume_gpu05_from_gpu07_lastv20_continue.yaml
-
-logging:
-  params:
-    run_name: prdit_s2_ddp7_gpu05_resume_from_gpu07_lastv20_continue_bs8
-    tags:
-      data_config: lg_025_network_file_bs8
-      train_batch_size: "8"
-      val_batch_size: "2"

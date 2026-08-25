@@ -1,0 +1,6 @@
+import_config: base.yaml
+
+trainer:
+  params:
+    accelerator: gpu
+    devices: 4

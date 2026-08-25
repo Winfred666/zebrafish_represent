@@ -61,8 +61,8 @@ def _validate_logged_name(value: str, field_name: str) -> str:
 class MLFlowLoggerParams(IngestibleParams):
     """Params for MLFlowLogger."""
 
-    experiment_name: str = "zebrafish_volume_gen"
-    run_name: str | None = None
+    experiment_name: str
+    run_name: str
     tracking_uri: str | None = Field(default_factory=lambda: os.environ.get("MLFLOW_TRACKING_URI"))
     tags: dict[str, str] = Field(default_factory=dict)
     log_model: bool = False

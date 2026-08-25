@@ -1,0 +1,7 @@
+import_config:
+  - ddp4_no_unused_weights_only.yaml
+
+trainer:
+  params:
+    max_epochs: 3
+    check_val_every_n_epoch: 1

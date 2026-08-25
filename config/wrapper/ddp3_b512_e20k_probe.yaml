@@ -1,0 +1,5 @@
+import_config: ddp4_b512_e20k_no_early.yaml
+
+trainer:
+  params:
+    devices: 3

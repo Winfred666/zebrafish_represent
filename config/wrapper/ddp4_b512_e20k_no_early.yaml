@@ -1,0 +1,16 @@
+import_config: ddp4_e100_no_early.yaml
+
+resume_ckpt_path: null
+
+train_dataloader:
+  params:
+    batch_size: 512
+
+val_dataloader:
+  params:
+    batch_size: 512
+
+trainer:
+  params:
+    max_epochs: 20000
+    check_val_every_n_epoch: 200

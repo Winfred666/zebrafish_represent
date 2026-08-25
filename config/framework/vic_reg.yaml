@@ -7,7 +7,3 @@ framework:
     cov_weight: 5.0
     lr: 0.00001 # Finetune on medical net, use very small learning rate
     weight_decay: 0.000001
-
-logging:
-  params:
-    run_name: vic_reg_run

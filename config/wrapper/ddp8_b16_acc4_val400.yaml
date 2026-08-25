@@ -1,0 +1,13 @@
+import_config: ddp8_b64_val400.yaml
+
+train_dataloader:
+  params:
+    batch_size: 16
+
+val_dataloader:
+  params:
+    batch_size: 8
+
+trainer:
+  params:
+    accumulate_grad_batches: 4

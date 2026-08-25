@@ -1,7 +1,0 @@
-# 4-GPU DDP wrapper for VQ-VAE stage 2.
-import_config: base.yaml
-
-trainer:
-  params:
-    devices: 4
-    precision: "bf16-mixed"

@@ -1,0 +1,22 @@
+import_config: ddp4_b128_val203.yaml
+
+train_dataloader:
+  params:
+    batch_size: 64
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+    drop_last: false
+
+val_dataloader:
+  params:
+    batch_size: 32
+    num_workers: 2
+    prefetch_factor: 1
+    persistent_workers: false
+    drop_last: false
+
+trainer:
+  params:
+    devices: 8
+    check_val_every_n_epoch: 400

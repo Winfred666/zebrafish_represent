@@ -1,0 +1,5 @@
+import_config: ddp4_b128_val203.yaml
+
+trainer:
+  params:
+    check_val_every_n_epoch: 400

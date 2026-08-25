@@ -1,0 +1,5 @@
+import_config: ddp4_e20.yaml
+
+trainer:
+  params:
+    devices: 3

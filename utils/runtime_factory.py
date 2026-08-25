@@ -478,12 +478,22 @@ def build_training_runtime_from_files(
         wrapper_config_path=wrapper_config_path,
     )
 
+    logging_params = merged_config.setdefault("logging", {}).setdefault("params", {})
+
     # Hard-overwrite run_name: <model>-<wrapper>-<data>-<framework>-YYMMDD_HHMMSS
     run_name = (
         f"{paths.model.stem}-{paths.wrapper.stem}-{paths.data.stem}"
         f"-{paths.framework.stem}-{datetime.now().strftime('%y%m%d_%H%M%S')}"
     )
-    merged_config.setdefault("logging", {}).setdefault("params", {})["run_name"] = run_name
+    logging_params["run_name"] = run_name
+    try:
+        model_class_name = merged_config["model"]["class_name"]
+        framework_class_name = merged_config["framework"]["class_name"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "Model and framework configs must each define class_name for MLflow naming"
+        ) from exc
+    logging_params["experiment_name"] = f"{model_class_name}_{framework_class_name}"
     # Hard-inject artifact_manager before building so it participates in blind-iteration
     if "artifact_manager" not in merged_config:
         merged_config["artifact_manager"] = {

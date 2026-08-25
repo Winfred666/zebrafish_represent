@@ -1,0 +1,5 @@
+import_config: ddp4_no_unused.yaml
+
+trainer:
+  params:
+    devices: 8

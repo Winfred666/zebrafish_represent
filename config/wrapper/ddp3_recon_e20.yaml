@@ -1,0 +1,6 @@
+import_config: ddp4_recon_e20_no_early.yaml
+
+trainer:
+  params:
+    devices: 3
+    deterministic: false

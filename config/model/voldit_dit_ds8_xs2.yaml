@@ -1,4 +1,4 @@
-# VolDiT-XS/2 for zebrafish 128^3 crops encoded by ds8 VQ-GAN -> 16^3 latents.
+# VolDiT-XS/2 scratch training with a pretrained stage-1 VQ-GAN.
 stage1_model:
   class_name: MONAIVQGAN
   params:
@@ -36,5 +36,5 @@ model:
     class_dropout_prob: 0.0
     num_classes: 0
     learn_sigma: false
-    load_from_ckpt: result/checkpoints/voldit_xs_luna_hf.pth
+    load_from_ckpt: null
     strict_load: false

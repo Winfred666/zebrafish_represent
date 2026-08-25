@@ -1,0 +1,22 @@
+import_config:
+  - ddp4_e20.yaml
+  - _callbacks_val_loss_no_early_stopping.yaml
+
+resume_ckpt_path: null
+
+train_dataloader:
+  params:
+    batch_size: 4
+
+val_dataloader:
+  params:
+    batch_size: 4
+
+trainer:
+  params:
+    max_epochs: 100
+    check_val_every_n_epoch: 20
+
+framework:
+  params:
+    stat_metrics_every_n_epochs: 20

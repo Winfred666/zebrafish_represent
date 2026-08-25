@@ -1,7 +1,0 @@
-# 4-GPU DDP wrapper for BiFlowNet training.
-import_config: base.yaml
-
-trainer:
-  params:
-    devices: 4
-    precision: "bf16-mixed"
