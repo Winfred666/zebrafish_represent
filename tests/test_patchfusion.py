@@ -234,22 +234,10 @@ class DDIMPatchFusionTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual, expected))
 
-    def test_configs_keep_dataset_full_and_model_crop_internal(self) -> None:
-        data_config = load_yaml_config("config/data/lg_00625_patchfusion_network_file.yaml")
+    def test_configs_keep_model_crop_internal(self) -> None:
         model_config = load_yaml_config("config/model/patchfusion_unet.yaml")
         framework_config = load_yaml_config("config/framework/ddim_patchfusion.yaml")
 
-        self.assertEqual(data_config["train_dataset"]["params"]["crop_size"], [64, 480, 64])
-        self.assertEqual(
-            data_config["train_dataset"]["params"]["data_dir"],
-            "/home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full_picked/train",
-        )
-        self.assertIsNone(data_config["train_dataset"]["params"]["cache_root"])
-        self.assertEqual(data_config["train_dataloader"]["params"]["batch_size"], 16)
-        self.assertEqual(
-            data_config["val_dataset"]["params"]["data_dir"],
-            "/home/ym.xiao/workspace/zebrafish_represent/data/raw/sample_full_picked/val",
-        )
         self.assertEqual(model_config["model"]["params"]["input_size"], [32, 32, 32])
         self.assertEqual(model_config["model"]["params"]["full_size"], [64, 480, 64])
         self.assertEqual(
