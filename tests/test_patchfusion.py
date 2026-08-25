@@ -200,6 +200,12 @@ class DDIMPatchFusionTests(unittest.TestCase):
     def test_validation_defaults_to_eight_fusions(self) -> None:
         self.assertEqual(DDIMPatchFusionModule.FUSION_NUMBER, 8)
 
+    def test_validation_stat_sample_count_can_be_capped(self) -> None:
+        module = self._module()
+        module.config = module.config.model_copy(update={"stat_metrics_max_samples": 4})
+
+        self.assertEqual(module._validation_stat_sample_count(range(62)), 4)
+
     def test_ddim_step_uses_paper_eta_noise_mixing(self) -> None:
         module = self._module()
         noisy = torch.ones(1, 1, 4, 6, 6)

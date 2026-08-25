@@ -612,6 +612,11 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         current_epoch = int(self.current_epoch)
         return getattr(trainer, "sanity_checking", False) or ((current_epoch + 1) % every_n_epochs) == 0
 
+    def _validation_stat_sample_count(self, val_dataset) -> int:
+        sample_count = len(val_dataset)
+        max_samples = getattr(self.config, "stat_metrics_max_samples", None)
+        return min(sample_count, int(max_samples)) if max_samples is not None else sample_count
+
     def _validation_stat_rank_world(self) -> tuple[int, int]:
         import torch.distributed as dist
 
@@ -864,7 +869,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
         self._ensure_real_feature_cache(val_dataset)
         self._val_stat_foreground_l1_dataset = val_dataset if len(val_dataset) == 1 else None
-        self._val_stat_generated_features = self._build_generated_feature_bank(len(val_dataset))
+        self._val_stat_generated_features = self._build_generated_feature_bank(
+            self._validation_stat_sample_count(val_dataset)
+        )
 
     def on_validation_epoch_end(self) -> None:
         try:
