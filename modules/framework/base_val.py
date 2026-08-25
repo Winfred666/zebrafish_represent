@@ -238,18 +238,26 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                     })
 
     def _fusion_bank_complete(self) -> bool:
-        if len(self.val_fusions_clean) != self.FUSION_NUMBER:
-            return False
-        if len(self.val_fusions_noised) != self.FUSION_NUMBER:
-            return False
-        for fusion_idx in range(self.FUSION_NUMBER):
-            if not self.val_fusions_clean[fusion_idx]:
-                return False
-            fusion_noised = self.val_fusions_noised[fusion_idx]
-            for t_key in self.FUSION_SIG_KEYS:
-                if not fusion_noised.get(t_key):
-                    return False
-        return True
+        import torch.distributed as dist
+
+        local_complete = torch.zeros(
+            self.FUSION_NUMBER,
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        if (
+            len(self.val_fusions_clean) == self.FUSION_NUMBER
+            and len(self.val_fusions_noised) == self.FUSION_NUMBER
+        ):
+            for fusion_idx in range(self.FUSION_NUMBER):
+                fusion_noised = self.val_fusions_noised[fusion_idx]
+                local_complete[fusion_idx] = bool(self.val_fusions_clean[fusion_idx]) and all(
+                    bool(fusion_noised.get(t_key)) for t_key in self.FUSION_SIG_KEYS
+                )
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(local_complete, op=dist.ReduceOp.MAX)
+        return bool(local_complete.all().item())
 
     def _fusion_object_group(self):
         import torch.distributed as dist
@@ -306,14 +314,11 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         should_log = is_rank0 and self.logger is not None
 
         merged_clean_by_fusion: list[list] = [[] for _ in range(n_fusions)]
-        for fi in range(n_fusions):
-            gathered_clean = self._gather_object_to_rank0(self.val_fusions_clean[fi])
-            if is_rank0:
-                merged_clean_by_fusion[fi] = [
-                    item
-                    for rank_items in (gathered_clean or [])
-                    for item in (rank_items or [])
-                ]
+        gathered_clean = self._gather_object_to_rank0(self.val_fusions_clean)
+        if is_rank0:
+            for rank_fusions in gathered_clean or []:
+                for fi, clean_crops in enumerate(rank_fusions or []):
+                    merged_clean_by_fusion[fi].extend(clean_crops or [])
 
         for sig_val, sig_key in zip(self.FUSION_SIG_VALS, self.FUSION_SIG_KEYS):
             t_val = self.get_t_from_sigma(float(sig_val))
@@ -328,10 +333,9 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
             uses_display_clean = False
             detail_sig_key = sig_key.replace("sig0", "sig", 1)
 
+            local_denoised_by_fusion: list[list] = [[] for _ in range(n_fusions)]
             for fi in range(n_fusions):
                 crop_dicts = self.val_fusions_noised[fi].get(sig_key, [])
-                clean_crops = merged_clean_by_fusion[fi] if is_rank0 else []
-                local_denoised: list[tuple[tuple[int, tuple[int, int, int], tuple[int, int, int, int]], Tensor]] = []
                 if crop_dicts:
                     for b_start in range(0, len(crop_dicts), denoise_batch_size):
                         b_end = min(b_start + denoise_batch_size, len(crop_dicts))
@@ -339,19 +343,22 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                         sub_batch = torch.stack([c["target"] for c in sub], dim=0).to(self.device)
                         sub_denoised = self._make_clean(sub_batch, t_val)
                         for crop_dict, denoised in zip(sub, sub_denoised):
-                            local_denoised.append(
+                            local_denoised_by_fusion[fi].append(
                                 (_fusion_crop_key(crop_dict), denoised.detach().cpu())
                             )
 
-                gathered_denoised = self._gather_object_to_rank0(local_denoised)
-                if not is_rank0:
-                    continue
+            gathered_denoised = self._gather_object_to_rank0(local_denoised_by_fusion)
+            if not is_rank0:
+                continue
 
-                denoised_items = [
-                    item
-                    for rank_items in (gathered_denoised or [])
-                    for item in (rank_items or [])
-                ]
+            merged_denoised_by_fusion: list[list] = [[] for _ in range(n_fusions)]
+            for rank_fusions in gathered_denoised or []:
+                for fi, denoised_items in enumerate(rank_fusions or []):
+                    merged_denoised_by_fusion[fi].extend(denoised_items or [])
+
+            for fi in range(n_fusions):
+                clean_crops = merged_clean_by_fusion[fi]
+                denoised_items = merged_denoised_by_fusion[fi]
                 if not clean_crops or not denoised_items:
                     continue
 

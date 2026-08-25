@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import torch
 
@@ -205,6 +205,56 @@ class DDIMPatchFusionTests(unittest.TestCase):
         module.config = module.config.model_copy(update={"stat_metrics_max_samples": 4})
 
         self.assertEqual(module._validation_stat_sample_count(range(62)), 4)
+
+    def test_fusion_bank_completeness_is_reduced_across_ddp_ranks(self) -> None:
+        module = self._module()
+        module.FUSION_NUMBER = 2
+        module.val_fusions_clean = [[object()], []]
+        module.val_fusions_noised = [{"sig050": [object()]}, {"sig050": []}]
+
+        def complete_remote_fusion(presence, *, op):
+            self.assertEqual(op, torch.distributed.ReduceOp.MAX)
+            presence.fill_(1)
+
+        with (
+            patch("torch.distributed.is_available", return_value=True),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.all_reduce", side_effect=complete_remote_fusion),
+        ):
+            self.assertTrue(module._fusion_bank_complete())
+
+    def test_fusion_validation_gathers_all_rank_owned_fusions_together(self) -> None:
+        module = self._module()
+        module.FUSION_NUMBER = 2
+        full_size = torch.tensor([1, 4, 6, 6])
+        module.val_fusions_clean = []
+        module.val_fusions_noised = []
+        for fusion_id in range(2):
+            crop = {
+                "target": torch.zeros(1, 4, 6, 6),
+                "fusion_id": torch.tensor(fusion_id),
+                "pos_idx": torch.tensor([0, 0, 0]),
+                "full_size": full_size,
+            }
+            module.val_fusions_clean.append([crop])
+            module.val_fusions_noised.append({"sig050": [crop]})
+
+        gather = module._gather_object_to_rank0
+        with (
+            patch.object(module, "_gather_object_to_rank0", wraps=gather) as mock_gather,
+            patch.object(module, "_validation_batch_size", return_value=1),
+            patch.object(module, "_make_clean", side_effect=lambda noisy, _: noisy),
+            patch.object(
+                DDIMPatchFusionModule,
+                "logger",
+                new_callable=PropertyMock,
+                return_value=None,
+            ),
+            patch.object(module, "log"),
+        ):
+            module._log_fusion_validation()
+
+        self.assertEqual(mock_gather.call_count, 2)
 
     def test_ddim_step_uses_paper_eta_noise_mixing(self) -> None:
         module = self._module()
