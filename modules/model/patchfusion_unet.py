@@ -98,8 +98,8 @@ class _DDIMUpsample3D(nn.Module):
         super().__init__()
         self.conv = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.conv(F.interpolate(x, scale_factor=2.0, mode="nearest"))
+    def forward(self, x: Tensor, output_size: tuple[int, int, int]) -> Tensor:
+        return self.conv(F.interpolate(x, size=output_size, mode="nearest"))
 
 
 class _DDIMLevel(nn.Module):
@@ -136,7 +136,6 @@ class PatchFusionUNet(BaseVolumeModel):
         attention_levels: tuple[int, ...] = (2,),
         attention_heads: int = 1,
         group_norm_groups: int = 32,
-        inference_stride: tuple[int, int, int] | None = None,
         inference_patch_batch_size: int = 4,
     ):
         super().__init__()
@@ -144,9 +143,6 @@ class PatchFusionUNet(BaseVolumeModel):
         self.out_channels = int(out_channels)
         self.input_size = tuple(int(value) for value in input_size)
         self.full_size = tuple(int(value) for value in full_size)
-        self.inference_stride = tuple(
-            int(value) for value in (inference_stride or self.input_size)
-        )
         self.inference_patch_batch_size = int(inference_patch_batch_size)
 
         widths = tuple(int(base_channels * multiplier) for multiplier in channel_mults)
@@ -265,45 +261,13 @@ class PatchFusionUNet(BaseVolumeModel):
             padding=1,
         )
 
-    @staticmethod
-    def _position_channels(
-        crop_starts: Tensor,
-        crop_size: tuple[int, int, int],
-        full_size: tuple[int, int, int],
-        *,
-        dtype: torch.dtype,
-    ) -> Tensor:
-        if crop_starts.ndim != 2 or crop_starts.shape[1] != 3:
-            raise ValueError(
-                f"crop_starts must have shape (B, 3), got {tuple(crop_starts.shape)}"
-            )
-        batch_size = int(crop_starts.shape[0])
-        channels: list[Tensor] = []
-        for axis, (crop_dim, full_dim) in enumerate(zip(crop_size, full_size)):
-            positions = crop_starts[:, axis].to(dtype=dtype).unsqueeze(1)
-            positions = positions + torch.arange(
-                crop_dim,
-                device=crop_starts.device,
-                dtype=dtype,
-            ).unsqueeze(0)
-            if full_dim > 1:
-                positions = positions.mul(2.0 / float(full_dim - 1)).sub(1.0)
-            else:
-                positions = torch.zeros_like(positions)
-            view_shape = [batch_size, 1, 1, 1, 1]
-            view_shape[axis + 2] = crop_dim
-            expand_shape = [batch_size, 1, *crop_size]
-            channels.append(positions.view(*view_shape).expand(*expand_shape))
-        return torch.cat(channels, dim=1)
-
     def forward(
         self,
         noisy_patch: Tensor,
         timesteps: Tensor,
         *,
-        global_volume: Tensor,
-        crop_starts: Tensor,
-        full_size: tuple[int, int, int] | None = None,
+        global_context: Tensor,
+        position: Tensor,
         validate: bool = False,
     ) -> Tensor:
         del validate
@@ -316,25 +280,21 @@ class PatchFusionUNet(BaseVolumeModel):
             raise ValueError(
                 f"noisy_patch channels must be {self.in_channels}, got {noisy_patch.shape[1]}"
             )
-        if global_volume.shape[0] != noisy_patch.shape[0]:
-            raise ValueError("global_volume and noisy_patch batch sizes must match")
-        if global_volume.shape[1] != self.in_channels:
+        expected_context_shape = (
+            noisy_patch.shape[0],
+            self.in_channels,
+            *self.input_size,
+        )
+        if tuple(global_context.shape) != expected_context_shape:
             raise ValueError(
-                f"global_volume channels must be {self.in_channels}, got {global_volume.shape[1]}"
+                f"global_context must have shape {expected_context_shape}, "
+                f"got {tuple(global_context.shape)}"
             )
-        active_full_size = tuple(int(value) for value in (full_size or self.full_size))
-        global_context = F.interpolate(
-            global_volume,
-            size=self.input_size,
-            mode="trilinear",
-            align_corners=False,
-        )
-        position = self._position_channels(
-            crop_starts,
-            self.input_size,
-            active_full_size,
-            dtype=noisy_patch.dtype,
-        )
+        expected_position_shape = (noisy_patch.shape[0], 3, *self.input_size)
+        if tuple(position.shape) != expected_position_shape:
+            raise ValueError(
+                f"position must have shape {expected_position_shape}, got {tuple(position.shape)}"
+            )
         x = self.input_conv(torch.cat((noisy_patch, global_context, position), dim=1))
         time_embedding = self.time_mlp(timesteps.to(dtype=torch.float32))
 
@@ -360,96 +320,142 @@ class PatchFusionUNet(BaseVolumeModel):
                     )
                 x = attention(block(torch.cat((x, skip), dim=1), time_embedding))
             if level_idx < len(self.up_levels) - 1:
-                x = level.resample(x)
+                x = level.resample(x, tuple(int(value) for value in skips[-1].shape[-3:]))
         if skips:
             raise RuntimeError(f"PatchFusionUNet left {len(skips)} unused skip tensors")
         return self.output_conv(F.silu(self.output_norm(x)))
 
-    @staticmethod
-    def _extract_crops(volume: Tensor, starts: Tensor, crop_size: tuple[int, int, int]) -> Tensor:
-        crops = []
-        crop_d, crop_h, crop_w = crop_size
-        for sample, start in zip(volume, starts):
-            start_d, start_h, start_w = (int(value) for value in start.tolist())
-            crops.append(
-                sample[
-                    :,
-                    start_d:start_d + crop_d,
-                    start_h:start_h + crop_h,
-                    start_w:start_w + crop_w,
-                ]
-            )
-        return torch.stack(crops, dim=0)
-
-    def random_crop_starts(self, batch_size: int, *, device: torch.device) -> Tensor:
-        starts = []
-        for full_dim, crop_dim in zip(self.full_size, self.input_size):
-            starts.append(
-                torch.randint(
-                    0,
-                    full_dim - crop_dim + 1,
-                    (batch_size,),
-                    device=device,
-                )
-            )
-        return torch.stack(starts, dim=1)
-
-    def predict_training_noise(
-        self,
-        noisy_full: Tensor,
-        full_noise: Tensor,
-        timesteps: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        self._validate_full_volume(noisy_full)
-        if full_noise.shape != noisy_full.shape:
-            raise ValueError("full_noise must match noisy_full")
-        starts = self.random_crop_starts(noisy_full.shape[0], device=noisy_full.device)
-        noisy_patches = self._extract_crops(noisy_full, starts, self.input_size)
-        noise_targets = self._extract_crops(full_noise, starts, self.input_size)
-        prediction = self(
-            noisy_patches,
-            timesteps,
-            global_volume=noisy_full,
-            crop_starts=starts,
-            full_size=self.full_size,
-        )
-        return prediction, noise_targets, starts
-
-    @staticmethod
-    def _axis_starts(full_dim: int, crop_dim: int, stride: int) -> list[int]:
-        last_start = full_dim - crop_dim
-        starts = list(range(0, last_start + 1, stride))
-        if starts[-1] != last_start:
-            starts.append(last_start)
-        return starts
-
-    def inference_crop_starts(self) -> list[tuple[int, int, int]]:
-        per_axis = [
-            self._axis_starts(full_dim, crop_dim, stride)
-            for full_dim, crop_dim, stride in zip(
-                self.full_size,
-                self.input_size,
-                self.inference_stride,
-            )
-        ]
-        return list(product(*per_axis))
-
-    def predict_full_noise(self, noisy_full: Tensor, timesteps: Tensor) -> Tensor:
-        """Average overlapping patch predictions into one full-volume noise field."""
-        self._validate_full_volume(noisy_full)
-        if timesteps.ndim != 1 or timesteps.shape[0] != noisy_full.shape[0]:
-            raise ValueError("timesteps must have shape (B,) matching noisy_full")
-
-        crop_d, crop_h, crop_w = self.input_size
-        all_starts = self.inference_crop_starts()
-        outputs: list[Tensor] = []
-        global_context = F.interpolate(
-            noisy_full,
+    def downsample_context(self, full_volume: Tensor) -> Tensor:
+        self._validate_full_volume(full_volume)
+        return F.interpolate(
+            full_volume,
             size=self.input_size,
             mode="trilinear",
             align_corners=False,
         )
+
+    def random_grid_offsets(self, batch_size: int, *, device: torch.device) -> Tensor:
+        axes = [
+            torch.randint(-patch_dim + 1, 1, (batch_size,), device=device)
+            for patch_dim in self.input_size
+        ]
+        return torch.stack(axes, dim=1)
+
+    def partition_starts(self, grid_offset: Tensor) -> Tensor:
+        if tuple(grid_offset.shape) != (3,):
+            raise ValueError(f"grid_offset must have shape (3,), got {tuple(grid_offset.shape)}")
+        per_axis = [
+            range(
+                int(offset),
+                int(offset) + full_dim + patch_dim,
+                patch_dim,
+            )
+            for offset, full_dim, patch_dim in zip(
+                grid_offset.tolist(),
+                self.full_size,
+                self.input_size,
+            )
+        ]
+        return torch.tensor(
+            list(product(*per_axis)),
+            device=grid_offset.device,
+            dtype=torch.long,
+        )
+
+    def extract_padded_crops(self, volume: Tensor, starts: Tensor) -> Tensor:
+        if volume.ndim != 5 or tuple(volume.shape[-3:]) != self.full_size:
+            raise ValueError(
+                f"volume must have shape (B,C,{self.full_size[0]},"
+                f"{self.full_size[1]},{self.full_size[2]}), got {tuple(volume.shape)}"
+            )
+        if starts.ndim != 2 or starts.shape != (volume.shape[0], 3):
+            raise ValueError(
+                f"starts must have shape ({volume.shape[0]}, 3), got {tuple(starts.shape)}"
+            )
+        crops = volume.new_zeros((volume.shape[0], volume.shape[1], *self.input_size))
+        for sample_idx, start in enumerate(starts.tolist()):
+            source_starts = [max(0, value) for value in start]
+            source_ends = [
+                min(full_dim, value + patch_dim)
+                for value, full_dim, patch_dim in zip(
+                    start,
+                    self.full_size,
+                    self.input_size,
+                )
+            ]
+            if any(end <= begin for begin, end in zip(source_starts, source_ends)):
+                continue
+            destination_starts = [
+                source - value for source, value in zip(source_starts, start)
+            ]
+            destination_ends = [
+                destination + source_end - source_start
+                for destination, source_start, source_end in zip(
+                    destination_starts,
+                    source_starts,
+                    source_ends,
+                )
+            ]
+            sd, sh, sw = source_starts
+            se_d, se_h, se_w = source_ends
+            dd, dh, dw = destination_starts
+            de_d, de_h, de_w = destination_ends
+            crops[sample_idx, :, dd:de_d, dh:de_h, dw:de_w] = volume[
+                sample_idx,
+                :,
+                sd:se_d,
+                sh:se_h,
+                sw:se_w,
+            ]
+        return crops
+
+    def position_patches(self, starts: Tensor, *, dtype: torch.dtype) -> Tensor:
+        batch_size = int(starts.shape[0])
+        channels = []
+        validity = []
+        for axis, (patch_dim, full_dim) in enumerate(zip(self.input_size, self.full_size)):
+            positions = starts[:, axis].unsqueeze(1) + torch.arange(
+                patch_dim,
+                device=starts.device,
+                dtype=starts.dtype,
+            ).unsqueeze(0)
+            valid = (positions >= 0) & (positions < full_dim)
+            values = positions.to(dtype=dtype).mul(2.0 / float(full_dim - 1)).sub(1.0)
+            values = values.masked_fill(~valid, 0.0)
+            view_shape = [1, 1, 1, 1, 1]
+            view_shape[0] = batch_size
+            view_shape[axis + 2] = patch_dim
+            channels.append(values.view(*view_shape).expand(batch_size, 1, *self.input_size))
+            validity.append(valid.view(*view_shape).expand(batch_size, 1, *self.input_size))
+        valid_voxels = torch.stack(validity, dim=0).all(dim=0)
+        return torch.cat(channels, dim=1).masked_fill(~valid_voxels, 0.0)
+
+    def predict_full_noise(
+        self,
+        noisy_full: Tensor,
+        timesteps: Tensor,
+        *,
+        grid_offsets: Tensor | None = None,
+    ) -> Tensor:
+        """Predict one non-overlapping, randomly offset partition per volume."""
+        self._validate_full_volume(noisy_full)
+        if timesteps.ndim != 1 or timesteps.shape[0] != noisy_full.shape[0]:
+            raise ValueError("timesteps must have shape (B,) matching noisy_full")
+        if grid_offsets is None:
+            grid_offsets = self.random_grid_offsets(
+                noisy_full.shape[0],
+                device=noisy_full.device,
+            )
+        if tuple(grid_offsets.shape) != (noisy_full.shape[0], 3):
+            raise ValueError(
+                f"grid_offsets must have shape ({noisy_full.shape[0]}, 3), "
+                f"got {tuple(grid_offsets.shape)}"
+            )
+
+        outputs: list[Tensor] = []
+        global_context = self.downsample_context(noisy_full)
         for sample_idx in range(noisy_full.shape[0]):
+            all_starts = self.partition_starts(grid_offsets[sample_idx])
             accumulator = torch.zeros(
                 (self.out_channels, *self.full_size),
                 device=noisy_full.device,
@@ -461,39 +467,64 @@ class PatchFusionUNet(BaseVolumeModel):
                 dtype=torch.float32,
             )
             for chunk_start in range(0, len(all_starts), self.inference_patch_batch_size):
-                chunk = all_starts[
+                starts = all_starts[
                     chunk_start:chunk_start + self.inference_patch_batch_size
                 ]
-                starts = torch.tensor(chunk, device=noisy_full.device, dtype=torch.long)
                 repeated_sample = noisy_full[sample_idx:sample_idx + 1].expand(
-                    len(chunk), -1, -1, -1, -1
+                    len(starts), -1, -1, -1, -1
                 )
-                patches = self._extract_crops(repeated_sample, starts, self.input_size)
+                patches = self.extract_padded_crops(repeated_sample, starts)
                 prediction = self(
                     patches,
-                    timesteps[sample_idx:sample_idx + 1].expand(len(chunk)),
-                    global_volume=global_context[sample_idx:sample_idx + 1].expand(
-                        len(chunk), -1, -1, -1, -1
+                    timesteps[sample_idx:sample_idx + 1].expand(len(starts)),
+                    global_context=global_context[sample_idx:sample_idx + 1].expand(
+                        len(starts), -1, -1, -1, -1
                     ),
-                    crop_starts=starts,
-                    full_size=self.full_size,
+                    position=self.position_patches(starts, dtype=noisy_full.dtype),
                 )
-                for patch_prediction, (start_d, start_h, start_w) in zip(prediction, chunk):
+                for patch_prediction, start in zip(prediction, starts.tolist()):
+                    destination_starts = [max(0, value) for value in start]
+                    destination_ends = [
+                        min(full_dim, value + patch_dim)
+                        for value, full_dim, patch_dim in zip(
+                            start,
+                            self.full_size,
+                            self.input_size,
+                        )
+                    ]
+                    if any(end <= begin for begin, end in zip(destination_starts, destination_ends)):
+                        continue
+                    source_starts = [
+                        destination - value
+                        for destination, value in zip(destination_starts, start)
+                    ]
+                    source_ends = [
+                        source + destination_end - destination_start
+                        for source, destination_start, destination_end in zip(
+                            source_starts,
+                            destination_starts,
+                            destination_ends,
+                        )
+                    ]
+                    dd, dh, dw = destination_starts
+                    ed, eh, ew = destination_ends
+                    sd, sh, sw = source_starts
+                    se_d, se_h, se_w = source_ends
                     accumulator[
                         :,
-                        start_d:start_d + crop_d,
-                        start_h:start_h + crop_h,
-                        start_w:start_w + crop_w,
-                    ].add_(patch_prediction.float())
+                        dd:ed,
+                        dh:eh,
+                        dw:ew,
+                    ].add_(patch_prediction[:, sd:se_d, sh:se_h, sw:se_w].float())
                     weight[
                         :,
-                        start_d:start_d + crop_d,
-                        start_h:start_h + crop_h,
-                        start_w:start_w + crop_w,
+                        dd:ed,
+                        dh:eh,
+                        dw:ew,
                     ].add_(1.0)
-            if bool((weight == 0).any()):
-                raise RuntimeError("Patch-fusion inference grid left uncovered voxels")
-            outputs.append((accumulator / weight).to(dtype=noisy_full.dtype))
+            if not bool((weight == 1).all()):
+                raise RuntimeError("Patch-fusion partition must cover every voxel exactly once")
+            outputs.append(accumulator.to(dtype=noisy_full.dtype))
         return torch.stack(outputs, dim=0)
 
     def _validate_full_volume(self, volume: Tensor) -> None:

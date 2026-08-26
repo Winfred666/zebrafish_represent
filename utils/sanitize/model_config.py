@@ -295,7 +295,6 @@ class PatchFusionUNetParams(IngestibleParams):
     attention_levels: tuple[int, ...] = (2,)
     attention_heads: int = Field(default=1, ge=1)
     group_norm_groups: int = Field(default=32, ge=1)
-    inference_stride: tuple[int, int, int] | None = None
     inference_patch_batch_size: int = Field(default=4, ge=1)
 
     @model_validator(mode="after")
@@ -309,10 +308,15 @@ class PatchFusionUNetParams(IngestibleParams):
                 f"input_size={self.input_size} must fit within full_size={self.full_size}"
             )
         downsample_factor = 2 ** (len(self.channel_mults) - 1)
-        if any(size % downsample_factor != 0 for size in self.input_size):
+        if any(size < downsample_factor for size in self.input_size):
             raise ValueError(
-                f"input_size={self.input_size} must be divisible by "
-                f"downsample_factor={downsample_factor}"
+                f"input_size={self.input_size} must be at least "
+                f"downsample_factor={downsample_factor} on every axis"
+            )
+        if any(full % crop != 0 for crop, full in zip(self.input_size, self.full_size)):
+            raise ValueError(
+                f"input_size={self.input_size} must divide full_size={self.full_size} "
+                "for non-overlapping partitions"
             )
         if any(multiplier < 1 for multiplier in self.channel_mults):
             raise ValueError("channel_mults must contain positive integers")
@@ -331,13 +335,6 @@ class PatchFusionUNetParams(IngestibleParams):
             raise ValueError(
                 f"attention_levels={self.attention_levels} must index "
                 f"channel_mults={self.channel_mults}"
-            )
-        stride = self.inference_stride or self.input_size
-        if any(value < 1 for value in stride):
-            raise ValueError("inference_stride must contain positive integers")
-        if any(value > crop for value, crop in zip(stride, self.input_size)):
-            raise ValueError(
-                f"inference_stride={stride} cannot exceed input_size={self.input_size}"
             )
         return self
 

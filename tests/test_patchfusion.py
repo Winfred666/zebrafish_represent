@@ -19,13 +19,12 @@ from utils.sanitize.model_config import PatchFusionUNetParams
 
 def _tiny_model(
     *,
-    full_size: tuple[int, int, int] = (4, 6, 6),
-    inference_stride: tuple[int, int, int] = (4, 2, 2),
+    full_size: tuple[int, int, int] = (4, 8, 4),
 ) -> PatchFusionUNet:
     return PatchFusionUNet(
         in_channels=1,
         out_channels=1,
-        input_size=(4, 4, 4),
+        input_size=(2, 4, 2),
         full_size=full_size,
         base_channels=8,
         channel_mults=(1, 2),
@@ -33,27 +32,27 @@ def _tiny_model(
         attention_levels=(),
         attention_heads=2,
         group_norm_groups=2,
-        inference_stride=inference_stride,
         inference_patch_batch_size=2,
     )
 
 
 class PatchFusionUNetTests(unittest.TestCase):
-    def test_forward_accepts_crop_global_context_and_absolute_positions(self) -> None:
+    def test_forward_uses_paper_five_channel_conditioning(self) -> None:
         model = _tiny_model()
-        noisy_patch = torch.randn(2, 1, 4, 4, 4)
-        global_volume = torch.randn(2, 1, 4, 6, 6)
+        noisy_patch = torch.randn(2, 1, 2, 4, 2)
+        global_context = torch.randn(2, 1, 2, 4, 2)
+        position = torch.randn(2, 3, 2, 4, 2)
         timesteps = torch.tensor([1, 3])
-        crop_starts = torch.tensor([[0, 0, 0], [0, 2, 2]])
 
         output = model(
             noisy_patch,
             timesteps,
-            global_volume=global_volume,
-            crop_starts=crop_starts,
+            global_context=global_context,
+            position=position,
         )
 
-        self.assertEqual(tuple(output.shape), (2, 1, 4, 4, 4))
+        self.assertEqual(model.input_conv.in_channels, 5)
+        self.assertEqual(tuple(output.shape), (2, 1, 2, 4, 2))
         self.assertTrue(torch.isfinite(output).all())
 
     def test_paper_configuration_has_reported_parameter_count(self) -> None:
@@ -62,71 +61,67 @@ class PatchFusionUNetTests(unittest.TestCase):
 
         self.assertEqual(model.get_num_params(), 68_590_209)
 
-    def test_position_channels_span_absolute_full_volume_coordinates(self) -> None:
-        starts = torch.tensor([[0, 0, 0], [0, 2, 2]])
-        coordinates = PatchFusionUNet._position_channels(
+    def test_position_patches_are_normalized_and_zero_padded(self) -> None:
+        model = _tiny_model()
+        starts = torch.tensor([[-1, 0, 0], [2, 4, 2]])
+        coordinates = model.position_patches(
             starts,
-            (4, 4, 4),
-            (4, 6, 6),
             dtype=torch.float32,
         )
 
-        self.assertEqual(tuple(coordinates.shape), (2, 3, 4, 4, 4))
-        self.assertAlmostEqual(float(coordinates[0, 0, 0, 0, 0]), -1.0)
-        self.assertAlmostEqual(float(coordinates[0, 0, -1, 0, 0]), 1.0)
-        self.assertAlmostEqual(float(coordinates[1, 1, 0, 0, 0]), -0.2, places=6)
-        self.assertAlmostEqual(float(coordinates[1, 1, 0, -1, 0]), 1.0, places=6)
+        self.assertEqual(tuple(coordinates.shape), (2, 3, 2, 4, 2))
+        self.assertTrue(torch.equal(coordinates[0, :, 0], torch.zeros_like(coordinates[0, :, 0])))
+        self.assertAlmostEqual(float(coordinates[0, 0, 1, 0, 0]), -1.0)
+        self.assertAlmostEqual(float(coordinates[1, 0, 0, 0, 0]), 1.0 / 3.0, places=6)
+        self.assertAlmostEqual(float(coordinates[1, 1, 0, 0, 0]), 1.0 / 7.0, places=6)
 
-    def test_training_uses_one_random_offset_and_matching_noise_crop(self) -> None:
+    def test_random_grid_offsets_match_paper_range(self) -> None:
         torch.manual_seed(7)
         model = _tiny_model()
-        noisy = torch.randn(3, 1, 4, 6, 6)
-        noise = torch.arange(noisy.numel(), dtype=torch.float32).reshape_as(noisy)
-        prediction, target, starts = model.predict_training_noise(
-            noisy,
-            noise,
-            torch.tensor([0, 1, 2]),
-        )
+        offsets = model.random_grid_offsets(1000, device=torch.device("cpu"))
 
-        self.assertEqual(tuple(prediction.shape), (3, 1, 4, 4, 4))
-        self.assertTrue(torch.equal(target, model._extract_crops(noise, starts, model.input_size)))
-        self.assertTrue(torch.equal(starts[:, 0], torch.zeros(3, dtype=torch.long)))
-        self.assertTrue(((starts[:, 1:] >= 0) & (starts[:, 1:] <= 2)).all())
+        lower = -torch.tensor(model.input_size) + 1
+        self.assertTrue((offsets >= lower).all())
+        self.assertTrue((offsets <= 0).all())
+        self.assertTrue(torch.equal(offsets.max(dim=0).values, torch.zeros(3, dtype=torch.long)))
+        self.assertTrue(torch.equal(offsets.min(dim=0).values, lower))
 
-    def test_inference_averages_overlapping_patch_predictions(self) -> None:
-        model = _tiny_model(
-            full_size=(4, 6, 4),
-            inference_stride=(4, 2, 4),
-        )
+    def test_partition_is_non_overlapping_and_covers_full_volume_once(self) -> None:
+        model = _tiny_model()
+        offset = torch.tensor([-1, -3, 0])
+        starts = model.partition_starts(offset)
+
+        self.assertEqual(tuple(starts.shape), (27, 3))
+        for axis, patch_size in enumerate(model.input_size):
+            residues = torch.remainder(starts[:, axis] - offset[axis], patch_size)
+            self.assertTrue(torch.equal(residues, torch.zeros_like(residues)))
 
         def fake_forward(
             noisy_patch,
             timesteps,
             *,
-            global_volume,
-            crop_starts,
-            full_size=None,
+            global_context,
+            position,
             validate=False,
         ):
-            del timesteps, global_volume, full_size, validate
-            values = crop_starts[:, 1].to(dtype=noisy_patch.dtype).view(-1, 1, 1, 1, 1)
-            return values.expand(-1, 1, *model.input_size)
+            del timesteps, global_context, position, validate
+            return torch.ones_like(noisy_patch)
 
         with patch.object(model, "forward", side_effect=fake_forward):
             fused = model.predict_full_noise(
-                torch.zeros(1, 1, 4, 6, 4),
+                torch.zeros(1, 1, 4, 8, 4),
                 torch.tensor([3]),
+                grid_offsets=offset.unsqueeze(0),
             )
 
-        expected_h = torch.tensor([0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
-        self.assertTrue(torch.equal(fused[0, 0, 0, :, 0], expected_h))
+        self.assertTrue(torch.equal(fused, torch.ones_like(fused)))
 
-    def test_params_reject_uncovered_inference_stride(self) -> None:
-        with self.assertRaisesRegex(ValueError, "cannot exceed input_size"):
+    def test_params_require_patch_size_to_tile_full_volume(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must divide full_size"):
             PatchFusionUNetParams(
                 in_channels=1,
                 out_channels=1,
-                input_size=(4, 4, 4),
+                input_size=(2, 3, 2),
                 full_size=(4, 8, 8),
                 base_channels=8,
                 channel_mults=(1, 2),
@@ -134,7 +129,6 @@ class PatchFusionUNetTests(unittest.TestCase):
                 attention_levels=(),
                 attention_heads=2,
                 group_norm_groups=2,
-                inference_stride=(4, 5, 4),
                 inference_patch_batch_size=1,
             )
 
@@ -145,15 +139,14 @@ class PatchFusionUNetTests(unittest.TestCase):
                 "params": {
                     "in_channels": 1,
                     "out_channels": 1,
-                    "input_size": [4, 4, 4],
-                    "full_size": [4, 6, 6],
+                    "input_size": [2, 4, 2],
+                    "full_size": [4, 8, 4],
                     "base_channels": 8,
                     "channel_mults": [1, 2],
                     "num_res_blocks": 1,
                     "attention_levels": [],
                     "attention_heads": 2,
                     "group_norm_groups": 2,
-                    "inference_stride": [4, 2, 2],
                     "inference_patch_batch_size": 2,
                 },
             }
@@ -187,15 +180,35 @@ class DDIMPatchFusionTests(unittest.TestCase):
         )
         return DDIMPatchFusionModule(params)
 
-    def test_loss_crops_full_volume_inside_model_path(self) -> None:
+    def test_training_batch_repeats_one_randomly_selected_fusion(self) -> None:
         module = self._module()
-        loss = module.get_data_loss({"target": torch.randn(2, 1, 4, 6, 6)})["loss"]
+        clean = torch.stack(
+            [torch.full((1, 4, 8, 4), float(index)) for index in range(3)]
+        )
+        torch.manual_seed(4)
+        selected = module._select_training_volume(clean, patch_batch_size=6)
+
+        self.assertEqual(tuple(selected.shape), (6, 1, 4, 8, 4))
+        self.assertTrue(torch.equal(selected, selected[0:1].expand_as(selected)))
+        self.assertIn(float(selected[0, 0, 0, 0, 0]), (0.0, 1.0, 2.0))
+
+    def test_training_patch_locations_share_one_non_overlapping_grid(self) -> None:
+        module = self._module()
+        torch.manual_seed(5)
+        starts = module._sample_training_starts(12, device=torch.device("cpu"))
+        offsets = torch.remainder(starts, torch.tensor(module.model.input_size))
+
+        self.assertTrue(torch.equal(offsets, offsets[0:1].expand_as(offsets)))
+
+    def test_loss_uses_paper_patch_batch(self) -> None:
+        module = self._module()
+        loss = module.get_data_loss({"target": torch.randn(2, 1, 4, 8, 4)})["loss"]
         self.assertEqual(loss.ndim, 0)
         self.assertTrue(torch.isfinite(loss))
 
     def test_initial_noise_uses_full_volume_not_patch_shape(self) -> None:
         module = self._module()
-        self.assertEqual(tuple(module._make_initial_noise(2).shape), (2, 1, 4, 6, 6))
+        self.assertEqual(tuple(module._make_initial_noise(2).shape), (2, 1, 4, 8, 4))
 
     def test_validation_defaults_to_eight_fusions(self) -> None:
         self.assertEqual(DDIMPatchFusionModule.FUSION_NUMBER, 8)
@@ -226,12 +239,12 @@ class DDIMPatchFusionTests(unittest.TestCase):
     def test_fusion_validation_gathers_all_rank_owned_fusions_together(self) -> None:
         module = self._module()
         module.FUSION_NUMBER = 2
-        full_size = torch.tensor([1, 4, 6, 6])
+        full_size = torch.tensor([1, 4, 8, 4])
         module.val_fusions_clean = []
         module.val_fusions_noised = []
         for fusion_id in range(2):
             crop = {
-                "target": torch.zeros(1, 4, 6, 6),
+                "target": torch.zeros(1, 4, 8, 4),
                 "fusion_id": torch.tensor(fusion_id),
                 "pos_idx": torch.tensor([0, 0, 0]),
                 "full_size": full_size,
@@ -256,15 +269,19 @@ class DDIMPatchFusionTests(unittest.TestCase):
 
         self.assertEqual(mock_gather.call_count, 2)
 
-    def test_ddim_step_uses_paper_eta_noise_mixing(self) -> None:
+    def test_ddim_step_uses_paper_recurrent_noising_and_variance(self) -> None:
         module = self._module()
-        noisy = torch.ones(1, 1, 4, 6, 6)
-        predicted_epsilon = torch.full_like(noisy, 0.25)
-        sampled_epsilon = torch.full_like(noisy, 2.0)
+        noisy = torch.ones(1, 1, 4, 8, 4)
+        predicted_epsilons = [torch.full_like(noisy, 0.25), torch.full_like(noisy, 0.5)]
+        sampled_epsilons = [
+            torch.full_like(noisy, 1.0),
+            torch.full_like(noisy, 2.0),
+            torch.full_like(noisy, 3.0),
+        ]
 
         with (
-            patch.object(module, "forward", return_value=predicted_epsilon),
-            patch("torch.randn_like", return_value=sampled_epsilon),
+            patch.object(module, "forward", side_effect=predicted_epsilons) as mock_forward,
+            patch("torch.randn_like", side_effect=sampled_epsilons),
         ):
             actual = module._ddim_step(noisy, timestep=3, prev_timestep=2)
 
@@ -275,26 +292,41 @@ class DDIMPatchFusionTests(unittest.TestCase):
             timesteps,
             noisy.ndim,
         )
-        pred_x0 = (noisy - sigma * predicted_epsilon) / alpha
+        pred_x0_first = (noisy - sigma * predicted_epsilons[0]) / alpha
+        renoised = alpha * pred_x0_first + sigma * sampled_epsilons[0]
+        pred_x0_second = (renoised - sigma * predicted_epsilons[1]) / alpha
+        pred_x0_average = (pred_x0_first + pred_x0_second) / 2.0
+        epsilon_sum = (predicted_epsilons[0] + predicted_epsilons[1]) / (2.0**0.5)
         previous = torch.tensor([2], dtype=torch.long)
         alpha_prev = module._extract(module.alphas_cumprod, previous, noisy.ndim)
+        alpha_now = module._extract(module.alphas_cumprod, timesteps, noisy.ndim)
         eta = module.config.ddim_eta
-        mixed_epsilon = (1.0 - eta**2) ** 0.5 * predicted_epsilon + eta * sampled_epsilon
-        expected = torch.sqrt(alpha_prev) * pred_x0 + torch.sqrt(1.0 - alpha_prev) * mixed_epsilon
+        ddim_sigma = eta * torch.sqrt(
+            ((1.0 - alpha_prev) / (1.0 - alpha_now))
+            * (1.0 - alpha_now / alpha_prev)
+        )
+        expected = (
+            torch.sqrt(alpha_prev) * pred_x0_average
+            + torch.sqrt(1.0 - alpha_prev - ddim_sigma.square()) * epsilon_sum
+            + ddim_sigma * sampled_epsilons[2]
+        )
 
+        self.assertEqual(mock_forward.call_count, 2)
         self.assertTrue(torch.allclose(actual, expected))
 
     def test_configs_keep_model_crop_internal(self) -> None:
         model_config = load_yaml_config("config/model/patchfusion_unet.yaml")
         framework_config = load_yaml_config("config/framework/ddim_patchfusion.yaml")
 
-        self.assertEqual(model_config["model"]["params"]["input_size"], [32, 32, 32])
+        self.assertEqual(model_config["model"]["params"]["input_size"], [8, 60, 8])
         self.assertEqual(model_config["model"]["params"]["full_size"], [64, 480, 64])
+        self.assertNotIn("inference_stride", model_config["model"]["params"])
         self.assertEqual(
             framework_config["framework"]["params"]["diffusion"]["sampling_method"],
             "ddim",
         )
-        self.assertEqual(framework_config["framework"]["params"]["ddim_eta"], 0.4)
+        self.assertEqual(framework_config["framework"]["params"]["recurrent_noising_repeats"], 2)
+        self.assertEqual(framework_config["framework"]["params"]["ddim_eta"], 0.8)
 
 
 if __name__ == "__main__":
