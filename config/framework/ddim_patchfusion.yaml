@@ -6,8 +6,10 @@ framework:
     stat_metrics_every_n_epochs: 0
     use_ema: true
     ema_decay: 0.999
-    ddim_eta: 0.8
-    recurrent_noising_repeats: 2
+    ddim_eta: 0.4
+    recurrent_noising_repeats: 1
+    fusion_ddim_eta: 0.8
+    fusion_recurrent_noising_repeats: 2
     timestep_repeats: 1
     optimization:
       learning_rate: 0.00002

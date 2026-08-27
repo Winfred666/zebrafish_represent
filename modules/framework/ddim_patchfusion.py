@@ -17,6 +17,7 @@ class DDIMPatchFusionModule(DDPMModule):
 
     def __init__(self, config: DDIMPatchFusionModuleParams):
         super().__init__(config)
+        self._fusion_sampling = False
         required_methods = (
             "downsample_context",
             "extract_padded_crops",
@@ -73,7 +74,12 @@ class DDIMPatchFusionModule(DDPMModule):
         current = noisy
         x0_estimates = []
         epsilon_estimates = []
-        for _ in range(int(self.config.recurrent_noising_repeats)):
+        recurrent_noising_repeats = int(
+            self.config.fusion_recurrent_noising_repeats
+            if self._fusion_sampling
+            else self.config.recurrent_noising_repeats
+        )
+        for _ in range(recurrent_noising_repeats):
             prediction = self(current, timesteps)
             x0_estimates.append(self._x0_from_prediction(prediction, current, timesteps))
             epsilon_estimates.append(
@@ -101,12 +107,12 @@ class DDIMPatchFusionModule(DDPMModule):
             )
             alpha_prev = self._extract(self.alphas_cumprod, previous, noisy.ndim)
 
-        eta = float(self.config.ddim_eta)
-        alpha_now = self._extract(self.alphas_cumprod, timesteps, noisy.ndim)
-        ddim_sigma = eta * torch.sqrt(
-            ((1.0 - alpha_prev) / (1.0 - alpha_now)).clamp_min(0.0)
-            * (1.0 - alpha_now / alpha_prev).clamp_min(0.0)
+        eta = float(
+            self.config.fusion_ddim_eta
+            if self._fusion_sampling
+            else self.config.ddim_eta
         )
+        ddim_sigma = eta * torch.sqrt((1.0 - alpha_prev).clamp_min(0.0))
         direction_scale = torch.sqrt(
             (1.0 - alpha_prev - ddim_sigma.square()).clamp_min(0.0)
         )
@@ -159,14 +165,8 @@ class DDIMPatchFusionModule(DDPMModule):
         full_noise = torch.randn_like(clean)
         noisy_full = self._q_sample(clean, timesteps, full_noise)
         starts = self._sample_training_starts(clean.shape[0], device=clean.device)
-        clean_patches = self.model.extract_padded_crops(clean, starts)
+        noisy_patches = self.model.extract_padded_crops(noisy_full, starts)
         noise_target = self.model.extract_padded_crops(full_noise, starts)
-        valid = self.model.extract_padded_crops(
-            torch.ones_like(clean[:, :1]),
-            starts,
-        )
-        noise_target = noise_target + (1.0 - valid) * torch.randn_like(noise_target)
-        noisy_patches = self._q_sample(clean_patches, timesteps, noise_target)
         prediction = self.model(
             noisy_patches,
             timesteps,
@@ -174,6 +174,14 @@ class DDIMPatchFusionModule(DDPMModule):
             position=self.model.position_patches(starts, dtype=noisy_patches.dtype),
         )
         return {"loss": self._ddpm_loss(prediction, noise_target)}
+
+    @torch.no_grad()
+    def _log_fusion_validation(self) -> None:
+        self._fusion_sampling = True
+        try:
+            super()._log_fusion_validation()
+        finally:
+            self._fusion_sampling = False
 
     def _should_log_train_reconstruction_loss(self) -> bool:
         # A full reconstruction invokes the complete recurrent partition sampler.

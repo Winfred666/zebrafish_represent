@@ -1,0 +1,15 @@
+# Geometry ablation: factor-4 patches with the paper's 68.59M U-Net.
+model:
+  class_name: PatchFusionUNet
+  params:
+    in_channels: 1
+    out_channels: 1
+    input_size: [16, 120, 16]
+    full_size: [64, 480, 64]
+    base_channels: 64
+    channel_mults: [1, 2, 4, 4]
+    num_res_blocks: 2
+    attention_levels: [2]
+    attention_heads: 1
+    group_norm_groups: 32
+    inference_patch_batch_size: 128

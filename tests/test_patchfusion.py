@@ -61,6 +61,14 @@ class PatchFusionUNetTests(unittest.TestCase):
 
         self.assertEqual(model.get_num_params(), 68_590_209)
 
+    def test_geometry_ablation_preserves_paper_model_capacity(self) -> None:
+        config = load_yaml_config("config/model/patchfusion_unet_p16.yaml")
+        model = build_any_runtime_object(config["model"])
+
+        self.assertEqual(model.input_size, (16, 120, 16))
+        self.assertEqual(model.inference_patch_batch_size, 128)
+        self.assertEqual(model.get_num_params(), 68_590_209)
+
     def test_position_patches_are_normalized_and_zero_padded(self) -> None:
         model = _tiny_model()
         starts = torch.tensor([[-1, 0, 0], [2, 4, 2]])
@@ -206,6 +214,30 @@ class DDIMPatchFusionTests(unittest.TestCase):
         self.assertEqual(loss.ndim, 0)
         self.assertTrue(torch.isfinite(loss))
 
+    def test_training_zero_padding_is_applied_after_full_volume_noising(self) -> None:
+        module = self._module()
+        starts = torch.tensor([[-1, 0, 0], [-1, 0, 0]])
+        prediction = torch.zeros(2, 1, 2, 4, 2)
+
+        with (
+            patch.object(module, "_sample_training_starts", return_value=starts),
+            patch.object(module.model, "forward", return_value=prediction) as mock_forward,
+            patch.object(module, "_ddpm_loss", wraps=module._ddpm_loss) as mock_loss,
+        ):
+            module.get_data_loss({"target": torch.ones(2, 1, 4, 8, 4)})
+
+        noisy_patches = mock_forward.call_args.args[0]
+        noise_target = mock_loss.call_args.args[1]
+        self.assertTrue(
+            torch.equal(noisy_patches[:, :, 0], torch.zeros_like(noisy_patches[:, :, 0]))
+        )
+        self.assertTrue(
+            torch.equal(noise_target[:, :, 0], torch.zeros_like(noise_target[:, :, 0]))
+        )
+        self.assertFalse(
+            torch.equal(noise_target[:, :, 1], torch.zeros_like(noise_target[:, :, 1]))
+        )
+
     def test_initial_noise_uses_full_volume_not_patch_shape(self) -> None:
         module = self._module()
         self.assertEqual(tuple(module._make_initial_noise(2).shape), (2, 1, 4, 8, 4))
@@ -253,10 +285,15 @@ class DDIMPatchFusionTests(unittest.TestCase):
             module.val_fusions_noised.append({"sig050": [crop]})
 
         gather = module._gather_object_to_rank0
+
+        def make_clean(noisy, _):
+            self.assertTrue(module._fusion_sampling)
+            return noisy
+
         with (
             patch.object(module, "_gather_object_to_rank0", wraps=gather) as mock_gather,
             patch.object(module, "_validation_batch_size", return_value=1),
-            patch.object(module, "_make_clean", side_effect=lambda noisy, _: noisy),
+            patch.object(module, "_make_clean", side_effect=make_clean),
             patch.object(
                 DDIMPatchFusionModule,
                 "logger",
@@ -268,51 +305,55 @@ class DDIMPatchFusionTests(unittest.TestCase):
             module._log_fusion_validation()
 
         self.assertEqual(mock_gather.call_count, 2)
+        self.assertFalse(module._fusion_sampling)
 
-    def test_ddim_step_uses_paper_recurrent_noising_and_variance(self) -> None:
-        module = self._module()
+    def test_ddim_step_uses_paper_generation_and_fusion_profiles(self) -> None:
         noisy = torch.ones(1, 1, 4, 8, 4)
-        predicted_epsilons = [torch.full_like(noisy, 0.25), torch.full_like(noisy, 0.5)]
-        sampled_epsilons = [
-            torch.full_like(noisy, 1.0),
-            torch.full_like(noisy, 2.0),
-            torch.full_like(noisy, 3.0),
-        ]
+        for fusion_sampling, repeats, eta in ((False, 1, 0.4), (True, 2, 0.8)):
+            with self.subTest(fusion_sampling=fusion_sampling):
+                module = self._module()
+                module._fusion_sampling = fusion_sampling
+                predicted_epsilons = [
+                    torch.full_like(noisy, 0.25 * (index + 1))
+                    for index in range(repeats)
+                ]
+                sampled_epsilons = [
+                    torch.full_like(noisy, float(index + 1))
+                    for index in range(repeats + 1)
+                ]
 
-        with (
-            patch.object(module, "forward", side_effect=predicted_epsilons) as mock_forward,
-            patch("torch.randn_like", side_effect=sampled_epsilons),
-        ):
-            actual = module._ddim_step(noisy, timestep=3, prev_timestep=2)
+                with (
+                    patch.object(module, "forward", side_effect=predicted_epsilons) as mock_forward,
+                    patch("torch.randn_like", side_effect=sampled_epsilons),
+                ):
+                    actual = module._ddim_step(noisy, timestep=3, prev_timestep=2)
 
-        timesteps = torch.tensor([3], dtype=torch.long)
-        alpha = module._extract(module.sqrt_alphas_cumprod, timesteps, noisy.ndim)
-        sigma = module._extract(
-            module.sqrt_one_minus_alphas_cumprod,
-            timesteps,
-            noisy.ndim,
-        )
-        pred_x0_first = (noisy - sigma * predicted_epsilons[0]) / alpha
-        renoised = alpha * pred_x0_first + sigma * sampled_epsilons[0]
-        pred_x0_second = (renoised - sigma * predicted_epsilons[1]) / alpha
-        pred_x0_average = (pred_x0_first + pred_x0_second) / 2.0
-        epsilon_sum = (predicted_epsilons[0] + predicted_epsilons[1]) / (2.0**0.5)
-        previous = torch.tensor([2], dtype=torch.long)
-        alpha_prev = module._extract(module.alphas_cumprod, previous, noisy.ndim)
-        alpha_now = module._extract(module.alphas_cumprod, timesteps, noisy.ndim)
-        eta = module.config.ddim_eta
-        ddim_sigma = eta * torch.sqrt(
-            ((1.0 - alpha_prev) / (1.0 - alpha_now))
-            * (1.0 - alpha_now / alpha_prev)
-        )
-        expected = (
-            torch.sqrt(alpha_prev) * pred_x0_average
-            + torch.sqrt(1.0 - alpha_prev - ddim_sigma.square()) * epsilon_sum
-            + ddim_sigma * sampled_epsilons[2]
-        )
+                timesteps = torch.tensor([3], dtype=torch.long)
+                alpha = module._extract(module.sqrt_alphas_cumprod, timesteps, noisy.ndim)
+                sigma = module._extract(
+                    module.sqrt_one_minus_alphas_cumprod,
+                    timesteps,
+                    noisy.ndim,
+                )
+                current = noisy
+                x0_estimates = []
+                for prediction, renoising in zip(predicted_epsilons, sampled_epsilons):
+                    pred_x0 = (current - sigma * prediction) / alpha
+                    x0_estimates.append(pred_x0)
+                    current = alpha * pred_x0 + sigma * renoising
+                pred_x0_average = torch.stack(x0_estimates).mean(dim=0)
+                epsilon_sum = torch.stack(predicted_epsilons).sum(dim=0) / repeats**0.5
+                previous = torch.tensor([2], dtype=torch.long)
+                alpha_prev = module._extract(module.alphas_cumprod, previous, noisy.ndim)
+                ddim_sigma = eta * torch.sqrt(1.0 - alpha_prev)
+                expected = (
+                    torch.sqrt(alpha_prev) * pred_x0_average
+                    + torch.sqrt(1.0 - alpha_prev - ddim_sigma.square()) * epsilon_sum
+                    + ddim_sigma * sampled_epsilons[-1]
+                )
 
-        self.assertEqual(mock_forward.call_count, 2)
-        self.assertTrue(torch.allclose(actual, expected))
+                self.assertEqual(mock_forward.call_count, repeats)
+                self.assertTrue(torch.allclose(actual, expected))
 
     def test_configs_keep_model_crop_internal(self) -> None:
         model_config = load_yaml_config("config/model/patchfusion_unet.yaml")
@@ -325,8 +366,10 @@ class DDIMPatchFusionTests(unittest.TestCase):
             framework_config["framework"]["params"]["diffusion"]["sampling_method"],
             "ddim",
         )
-        self.assertEqual(framework_config["framework"]["params"]["recurrent_noising_repeats"], 2)
-        self.assertEqual(framework_config["framework"]["params"]["ddim_eta"], 0.8)
+        self.assertEqual(framework_config["framework"]["params"]["recurrent_noising_repeats"], 1)
+        self.assertEqual(framework_config["framework"]["params"]["ddim_eta"], 0.4)
+        self.assertEqual(framework_config["framework"]["params"]["fusion_recurrent_noising_repeats"], 2)
+        self.assertEqual(framework_config["framework"]["params"]["fusion_ddim_eta"], 0.8)
 
 
 if __name__ == "__main__":

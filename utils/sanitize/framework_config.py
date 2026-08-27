@@ -98,8 +98,10 @@ class DDPMModuleParams(BaseFrameworkParams):
 class DDIMPatchFusionModuleParams(DDPMModuleParams):
     """Params for full-volume training with patch-conditioned DDIM inference."""
 
-    ddim_eta: float = Field(default=0.8, ge=0.0, le=1.0)
-    recurrent_noising_repeats: int = Field(default=2, ge=1)
+    ddim_eta: float = Field(default=0.4, ge=0.0, le=1.0)
+    recurrent_noising_repeats: int = Field(default=1, ge=1)
+    fusion_ddim_eta: float = Field(default=0.8, ge=0.0, le=1.0)
+    fusion_recurrent_noising_repeats: int = Field(default=2, ge=1)
 
 
 class LatentDDPMModuleParams(DDPMModuleParams):
