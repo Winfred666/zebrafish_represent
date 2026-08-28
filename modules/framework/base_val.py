@@ -14,7 +14,9 @@ from utils.dataset.fusion import volume_fuse
 from utils.display import (
     build_clipped_midw_grid,
     build_w_mip_grid,
+    capture_transformer_attention,
     log_image_artifact,
+    log_transformer_diagnostics,
 )
 
 
@@ -949,8 +951,13 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def validation_step(
         self, batch: dict[str, Tensor], batch_idx: int
     ) -> Tensor:
+        log_transformer_images = batch_idx == 0 and self.logger is not None
         with self._fixed_seed_context(self._validation_step_seed(batch_idx)):
-            losses = self.get_data_loss(batch)
+            with capture_transformer_attention(
+                self.model,
+                enabled=log_transformer_images,
+            ):
+                losses = self.get_data_loss(batch)
             for key, value in losses.items():
                 self.log(
                     f"val_{key}",
@@ -968,4 +975,12 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
                 self.log(f"val_{key}", val, on_step=False, on_epoch=True, sync_dist=True)
 
             self._maybe_collect_fusion_crops(batch)
+        if log_transformer_images:
+            log_transformer_diagnostics(
+                self.model,
+                self.logger,
+                step=self.global_step,
+                attention=True,
+                weights=True,
+            )
         return losses["loss"]

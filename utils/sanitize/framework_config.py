@@ -43,6 +43,7 @@ class BaseFrameworkParams(IngestibleParams):
     optimization: OptimizationParams
     diffusion: CommonDiffusionParams
     testing: TestingParams = TestingParams()
+    log_gradient_histograms: bool = False
     stat_metrics_every_n_epochs: int = Field(default=400, ge=0)
     stat_metrics_max_samples: int | None = Field(default=None, ge=1)
     sample_quality_checkpoint_path: str | None = "result/checkpoints/medicalnet_resnet50_vicreg_reliable_mild.ckpt"

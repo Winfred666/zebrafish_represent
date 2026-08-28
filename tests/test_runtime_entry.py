@@ -350,6 +350,7 @@ class RuntimeEntryTest(unittest.TestCase):
         config = load_yaml_config("config/framework/base.yaml")
         self.assertEqual(config["framework"]["class_name"], "RectifiedFlowModule")
         self.assertEqual(config["framework"]["params"]["model"], "runtime.model")
+        self.assertFalse(config["framework"]["params"]["log_gradient_histograms"])
         self.assertGreater(config["framework"]["params"]["stat_metrics_every_n_epochs"], 50)
 
     def test_rectified_flow_total_timesteps_validation(self) -> None:

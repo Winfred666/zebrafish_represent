@@ -93,6 +93,10 @@ class BaseVolumeModel(nn.Module, ABC):
     @abstractmethod
     def get_num_params(self) -> int: ...
 
+    def transformer_blocks(self) -> tuple[nn.Module, ...]:
+        """Return transformer blocks in forward order for diagnostics."""
+        return ()
+
     def visualization(
         self,
         clean_volume: Tensor,

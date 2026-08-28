@@ -255,3 +255,8 @@ class PRDiT(BaseVolumeModel):
 
     def get_num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def transformer_blocks(self) -> tuple[nn.Module, ...]:
+        if self.fine_backbone is None:
+            return ()
+        return tuple(self.fine_backbone.blocks)

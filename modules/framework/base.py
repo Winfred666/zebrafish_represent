@@ -106,6 +106,7 @@ class BaseTrainingFramework(L.LightningModule, ABC):
             if bool(getattr(config, "use_ema", False))
             else None
         )
+        self._last_gradient_histogram_epoch: int | None = None
 
     # ── atom hooks (framework-specific extension surface) ──────
 
@@ -312,6 +313,32 @@ class BaseTrainingFramework(L.LightningModule, ABC):
         optimizer = self.optimizers()
         if optimizer is not None:
             self.log("lr", optimizer.param_groups[0]["lr"], on_epoch=True, sync_dist=True)
+
+    def on_before_optimizer_step(self, optimizer) -> None:
+        """Log valid, unscaled gradients immediately before the optimizer update."""
+        del optimizer
+        if not self.config.log_gradient_histograms:
+            return
+
+        epoch = int(self.current_epoch)
+        if self._last_gradient_histogram_epoch == epoch:
+            return
+
+        from utils.display import (
+            log_transformer_diagnostics,
+            should_log_gradient_histograms,
+        )
+
+        if not should_log_gradient_histograms(epoch):
+            return
+        step = int(self.global_step)
+        log_transformer_diagnostics(
+            self.model,
+            self.logger,
+            step=step,
+            gradients=True,
+        )
+        self._last_gradient_histogram_epoch = epoch
 
     def optimizer_step(self, *args, **kwargs) -> None:
         super().optimizer_step(*args, **kwargs)

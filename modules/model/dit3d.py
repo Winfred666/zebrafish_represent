@@ -242,3 +242,6 @@ class DiT3D(BaseVolumeModel):
 
     def get_num_params(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)
+
+    def transformer_blocks(self) -> tuple[nn.Module, ...]:
+        return tuple(self.backbone.blocks)

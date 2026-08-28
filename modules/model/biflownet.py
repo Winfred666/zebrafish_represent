@@ -477,3 +477,8 @@ class BiFlowNet(BaseVolumeModel):
 
     def get_num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def transformer_blocks(self) -> tuple[nn.Module, ...]:
+        input_blocks = [block_group[0] for block_group in self.intra_patch_input]
+        output_blocks = [block_group[0].dit_block for block_group in self.intra_patch_output]
+        return tuple((*input_blocks, *self.intra_patch_mid, *output_blocks))
