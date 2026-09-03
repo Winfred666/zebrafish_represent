@@ -619,7 +619,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         if every_n_epochs <= 0:
             return False
         current_epoch = int(self.current_epoch)
-        return getattr(trainer, "sanity_checking", False) or ((current_epoch + 1) % every_n_epochs) == 0
+        return getattr(trainer, "sanity_checking", True) or ((current_epoch + 1) % every_n_epochs) == 0
 
     def _validation_stat_sample_count(self, val_dataset) -> int:
         sample_count = len(val_dataset)

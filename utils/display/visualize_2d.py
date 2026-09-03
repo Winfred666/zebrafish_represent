@@ -6,13 +6,16 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, PowerNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PIL import Image, ImageDraw, ImageFont
 
 from utils.dataset.fusion import center_pad_fusion_volume
 
 _PANEL_DPI = 220
+# gamma < 1 spreads the low-intensity signal that dominates the -1-background
+# bin dataset across more of the colormap (histogram-matched on merged caches).
+_HISTOGRAM_MATCHED_GAMMA = 0.4
 
 
 def _coerce_field(field: np.ndarray | torch.Tensor | Sequence[Sequence[float]]) -> np.ndarray:
@@ -51,6 +54,7 @@ def _plot_panel(
     cmap: str,
     ax: plt.Axes,
     colorbar_limits: tuple[float, float] | None,
+    gamma: float,
 ) -> plt.colorbar.Colorbar:
     x_size, y_size = field.shape
     imshow_kwargs: dict[str, object] = {
@@ -59,9 +63,13 @@ def _plot_panel(
         "cmap": cmap,
         "interpolation": "nearest",
     }
-    if colorbar_limits is not None:
-        imshow_kwargs["vmin"] = float(colorbar_limits[0])
-        imshow_kwargs["vmax"] = float(colorbar_limits[1])
+    vmin = float(colorbar_limits[0]) if colorbar_limits is not None else None
+    vmax = float(colorbar_limits[1]) if colorbar_limits is not None else None
+    if float(gamma) != 1.0:
+        imshow_kwargs["norm"] = PowerNorm(gamma=float(gamma), vmin=vmin, vmax=vmax)
+    elif vmin is not None:
+        imshow_kwargs["vmin"] = vmin
+        imshow_kwargs["vmax"] = vmax
     image = ax.imshow(field, **imshow_kwargs)
 
     ax.set_xlim(0.0, float(y_size))
@@ -77,6 +85,7 @@ def _scalar_to_rgb(
     field: np.ndarray,
     cmap: str,
     limits: tuple[float, float] | None,
+    gamma: float,
 ) -> np.ndarray:
     if limits is None:
         finite = field[np.isfinite(field)]
@@ -87,7 +96,10 @@ def _scalar_to_rgb(
     else:
         vmin, vmax = float(limits[0]), float(limits[1])
 
-    norm = Normalize(vmin=vmin, vmax=vmax, clip=True)
+    if float(gamma) != 1.0:
+        norm = PowerNorm(gamma=float(gamma), vmin=vmin, vmax=vmax, clip=True)
+    else:
+        norm = Normalize(vmin=vmin, vmax=vmax, clip=True)
     colormap = plt.get_cmap(str(cmap))
     rgba = colormap(norm(field))
     return np.rint(rgba[..., :3] * 255.0).astype(np.uint8, copy=False)
@@ -101,9 +113,10 @@ def _render_panel_rgb(
     close_fig: bool,
     dpi: int,
     show_colorbar: bool = False,
+    gamma: float = 1.0,
 ) -> np.ndarray:
     if not show_colorbar:
-        return _scalar_to_rgb(field, cmap, colorbar_limits)
+        return _scalar_to_rgb(field, cmap, colorbar_limits, gamma)
 
     fig, ax = plt.subplots(figsize=(6, 6), dpi=int(dpi))
     fig.patch.set_facecolor("white")
@@ -112,6 +125,7 @@ def _render_panel_rgb(
         cmap=cmap,
         ax=ax,
         colorbar_limits=colorbar_limits,
+        gamma=gamma,
     )
     fig.subplots_adjust(left=0.10, right=0.90, bottom=0.10, top=0.90)
     rgb = _extract_rgb(fig)
@@ -124,13 +138,14 @@ def fix_2d_scalar(
     gt,
     pred=None,
     close_fig: bool = True,
-    cmap: str = "plasma",
+    cmap: str = "jet",
     residual_cmap: str = "bwr",
     dpi: int = _PANEL_DPI,
     colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
     residual_limits: tuple[float, float] | None = (-1.0, 1.0),
     show_residual: bool = False,
     show_colorbar: bool = False,
+    gamma: float = 1.0,
 ) -> np.ndarray:
     """Render one or two scalar fields in a single tight RGB row.
 
@@ -148,6 +163,9 @@ def fix_2d_scalar(
         show_residual: If True, also render the residual (gt - pred) panel.
         show_colorbar: If True, render panels through Matplotlib with visible
             colorbars. The default renders direct RGB arrays with no padding.
+        gamma: PowerNorm gamma applied to the gt and pred panels (1.0 = linear;
+            < 1.0 spreads low values across more of the colormap). The residual
+            panel always stays linear.
 
     Returns:
         np.ndarray: RGB image array with gt alone, or gt and pred in one row,
@@ -161,6 +179,7 @@ def fix_2d_scalar(
         close_fig=close_fig,
         dpi=int(dpi),
         show_colorbar=show_colorbar,
+        gamma=gamma,
     )
 
     if pred is None:
@@ -181,6 +200,7 @@ def fix_2d_scalar(
         close_fig=close_fig,
         dpi=int(dpi),
         show_colorbar=show_colorbar,
+        gamma=gamma,
     )
 
     if not show_residual:
@@ -389,6 +409,7 @@ def build_clipped_midw_grid(
                     gt_slice,
                     pred_slice,
                     colorbar_limits=colorbar_limits,
+                    gamma=_HISTOGRAM_MATCHED_GAMMA,
                 )
             )
 
@@ -429,6 +450,7 @@ def build_w_mip_grid(
             fix_2d_scalar(
                 np.max(pred_padded, axis=2), # WARNING: for MIP show the XY projection, along Z axis.
                 colorbar_limits=colorbar_limits,
+                gamma=_HISTOGRAM_MATCHED_GAMMA,
             )
         )
     return np.hstack(projection_row) if projection_row else None
@@ -437,12 +459,18 @@ def build_w_mip_grid(
 def render_slice(
     field,
     close_fig: bool = True,
-    cmap: str = "plasma",
+    cmap: str = "jet",
     dpi: int = _PANEL_DPI,
     colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
     show_colorbar: bool = False,
+    gamma: float = 1.0,
 ) -> np.ndarray:
-    """Render a single 2D scalar field as a tight RGB image."""
+    """Render a single 2D scalar field as a tight RGB image.
+
+    Args:
+        gamma: PowerNorm gamma (1.0 = linear; < 1.0 spreads low values across
+            more of the colormap).
+    """
     field_np = _coerce_field(field)
     return _render_panel_rgb(
         field=field_np,
@@ -451,4 +479,5 @@ def render_slice(
         close_fig=close_fig,
         dpi=int(dpi),
         show_colorbar=show_colorbar,
+        gamma=gamma,
     )
