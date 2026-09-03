@@ -273,6 +273,22 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
     def _gather_object_to_rank0(self, obj):
         import torch.distributed as dist
 
+        def normal_tensor(value):
+            if isinstance(value, Tensor):
+                # Lightning runs validation under inference mode; disable it
+                # while materializing a regular tensor for gather_object.
+                with torch.inference_mode(False):
+                    return value.detach().clone()
+            if isinstance(value, list):
+                return [normal_tensor(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(normal_tensor(item) for item in value)
+            if isinstance(value, dict):
+                return {key: normal_tensor(item) for key, item in value.items()}
+            return value
+
+        obj = normal_tensor(obj)
+
         if not dist.is_initialized():
             return [obj]
 
@@ -544,6 +560,42 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         return (side, side)
 
     @torch.no_grad()
+    def _log_train_reconstruction_preview(self) -> None:
+        if self.logger is None or self.trainer is None:
+            return
+        interval = max(1, int(self.trainer.log_every_n_steps))
+        if self.global_step % interval:
+            return
+        dataset = getattr(self, "_train_preview_dataset", None)
+        if dataset is None:
+            train_loader = getattr(self.trainer, "train_dataloader", None)
+            dataset = getattr(train_loader, "dataset", None)
+        if dataset is None or len(dataset) == 0:
+            return
+        clean = torch.stack([dataset[i]["target"] for i in range(min(4, len(dataset)))]).to(self.device)
+        t_zero = self.get_t_from_sigma(0.0)
+        t_tensor = torch.full((clean.shape[0],), t_zero, device=clean.device)
+        encoded, _ = self._make_noisy_with_seed(
+            clean,
+            t_tensor,
+            seed=self._seed_from_parts("train_preview_noisy"),
+        )
+        reconstructed = self._make_clean(
+            encoded,
+            t_start=0.0,
+            seed=self._seed_from_parts("train_preview_clean"),
+        )
+        image = build_clipped_midw_grid(
+            [reconstructed[i].cpu() for i in range(clean.shape[0])],
+            clean_volumes=[clean[i].cpu() for i in range(clean.shape[0])],
+            slice_count=1,
+            colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+            show_labels=True,
+        )
+        if image is not None:
+            log_image_artifact(self.logger, image, "train_yz_midw_sig50", self.global_step)
+
+    @torch.no_grad()
     def log_sample_mip(self, samples: Tensor, tag: str, *, sample_dim: int = 0) -> None:
         import torch.distributed as dist
 
@@ -619,7 +671,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
         if every_n_epochs <= 0:
             return False
         current_epoch = int(self.current_epoch)
-        return getattr(trainer, "sanity_checking", True) or ((current_epoch + 1) % every_n_epochs) == 0
+        return getattr(trainer, "sanity_checking", False) or ((current_epoch + 1) % every_n_epochs) == 0
 
     def _validation_stat_sample_count(self, val_dataset) -> int:
         sample_count = len(val_dataset)
@@ -862,6 +914,7 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
     def on_validation_epoch_start(self) -> None:
         self._apply_ema_shadow()
+        self._log_train_reconstruction_preview()
         self._val_stat_generated_features = None
         self._val_stat_generated_previews = None
         self._val_stat_generated_foreground_l1 = None

@@ -79,6 +79,7 @@ def train(
         _log_config_params(runtime.logger, config)
 
     framework_module = runtime.objects["framework"]
+    framework_module._train_preview_dataset = runtime.objects.get("train_dataset")
 
     resume_ckpt = config.get("resume_ckpt_path")
     if resume_ckpt:
@@ -93,6 +94,7 @@ def train(
         )
         print("\nValidation complete")
     elif run_mode == "fit":
+        runtime.trainer.validate(framework_module, dataloaders=runtime.val_loader, ckpt_path=resume_ckpt)
         runtime.trainer.fit(
             framework_module,
             train_dataloaders=runtime.train_loader,
