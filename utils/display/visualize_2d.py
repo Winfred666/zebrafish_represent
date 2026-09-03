@@ -15,7 +15,7 @@ from utils.dataset.fusion import center_pad_fusion_volume
 _PANEL_DPI = 220
 # gamma < 1 spreads the low-intensity signal that dominates the -1-background
 # bin dataset across more of the colormap (histogram-matched on merged caches).
-_HISTOGRAM_MATCHED_GAMMA = 0.4
+_HISTOGRAM_MATCHED_GAMMA = 0.7
 
 
 def _coerce_field(field: np.ndarray | torch.Tensor | Sequence[Sequence[float]]) -> np.ndarray:
@@ -113,7 +113,7 @@ def _render_panel_rgb(
     close_fig: bool,
     dpi: int,
     show_colorbar: bool = False,
-    gamma: float = 1.0,
+    gamma: float = _HISTOGRAM_MATCHED_GAMMA,
 ) -> np.ndarray:
     if not show_colorbar:
         return _scalar_to_rgb(field, cmap, colorbar_limits, gamma)
@@ -138,14 +138,14 @@ def fix_2d_scalar(
     gt,
     pred=None,
     close_fig: bool = True,
-    cmap: str = "jet",
+    cmap: str = "turbo",
     residual_cmap: str = "bwr",
     dpi: int = _PANEL_DPI,
     colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
     residual_limits: tuple[float, float] | None = (-1.0, 1.0),
     show_residual: bool = False,
     show_colorbar: bool = False,
-    gamma: float = 1.0,
+    gamma: float = _HISTOGRAM_MATCHED_GAMMA,
 ) -> np.ndarray:
     """Render one or two scalar fields in a single tight RGB row.
 
@@ -431,6 +431,9 @@ def build_clipped_midw_grid(
 def build_w_mip_grid(
     pred_volumes: list[torch.Tensor],
     *,
+    gamma = _HISTOGRAM_MATCHED_GAMMA,
+    cmap = "turbo",
+    absmax_projection: bool = False,
     colorbar_limits: tuple[float, float] | None = None,
 ) -> np.ndarray | None:
     if not pred_volumes:
@@ -446,11 +449,15 @@ def build_w_mip_grid(
     projection_row = []
     for pred_volume_np in pred_np:
         pred_padded = center_pad_fusion_volume(pred_volume_np, max_shape, fill_value=pad_value)
+        i, j = np.meshgrid(np.arange(pred_padded.shape[0]), np.arange(pred_padded.shape[1]), indexing='ij')
+        # WARNING: for MIP show the XY projection, along Z axis.
+        max_indice = np.argmax(np.abs(pred_padded) if absmax_projection else pred_padded, axis=2) # shape (X, Y)
         projection_row.append(
             fix_2d_scalar(
-                np.max(pred_padded, axis=2), # WARNING: for MIP show the XY projection, along Z axis.
+                pred_padded[i, j, max_indice],
                 colorbar_limits=colorbar_limits,
-                gamma=_HISTOGRAM_MATCHED_GAMMA,
+                cmap=cmap,
+                gamma=gamma,
             )
         )
     return np.hstack(projection_row) if projection_row else None
@@ -459,11 +466,11 @@ def build_w_mip_grid(
 def render_slice(
     field,
     close_fig: bool = True,
-    cmap: str = "jet",
+    cmap: str = "turbo",
     dpi: int = _PANEL_DPI,
     colorbar_limits: tuple[float, float] | None = (-1.0, 1.0),
     show_colorbar: bool = False,
-    gamma: float = 1.0,
+    gamma: float = _HISTOGRAM_MATCHED_GAMMA,
 ) -> np.ndarray:
     """Render a single 2D scalar field as a tight RGB image.
 

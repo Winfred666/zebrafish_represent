@@ -1,7 +1,7 @@
 train_dataset: # purely raw dataset
   class_name: CropTifVolumeHotDataset
   params:
-    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_sm/train
+    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_full_picked/train
     crop_size: [64, 64, 64]
     # Fraction of overlap between adjacent grid crops in each spatial dim.
     # 0.0 = adjacent (no overlap), 0.5 = 50% overlap.
@@ -29,7 +29,7 @@ train_dataloader:
 val_dataset:
   class_name: CropTifVolumeHotDataset
   params:
-    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_sm/val
+    data_dir: /data/volume3/share_storage/ym.xiao/dataresult/zebrafish/data/raw/sample_full_picked/val
     crop_size: [64, 64, 64]
     # No overlap for validation — each voxel appears in exactly one crop (to see artifact cleanly)
     overlap: [0.0, 0.0, 0.0]
