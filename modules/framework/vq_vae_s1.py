@@ -246,13 +246,14 @@ class VQVAES1Module(BaseValTrainingFramework):
 
     def configure_optimizers(self):
         lr = float(self.optimization.learning_rate)
+        disc_lr = float(self.config.discriminator_learning_rate or lr)
         opt_ae = torch.optim.Adam(
             [p for p in self.vqvae.parameters() if p.requires_grad],
             lr=lr, betas=(0.5, 0.9),
         )
         opt_disc = torch.optim.Adam(
             list(self.volume_discriminator.parameters()),
-            lr=lr, betas=(0.5, 0.9),
+            lr=disc_lr, betas=(0.5, 0.9),
         )
         scheduler_name = str(self.optimization.lr_scheduler)
         if scheduler_name == "none":

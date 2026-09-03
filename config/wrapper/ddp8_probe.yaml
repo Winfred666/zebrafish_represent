@@ -27,7 +27,7 @@ trainer:
     enable_progress_bar: false
     check_val_every_n_epoch: 100
     enable_checkpointing: false
-    num_sanity_val_steps: -1
+    num_sanity_val_steps: 0
     callbacks:
       - class_name: IntegratedGPUMemoryMonitor
         params:

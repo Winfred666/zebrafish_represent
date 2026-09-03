@@ -7,7 +7,7 @@ trainer:
     strategy: ddp_find_unused_parameters_false
     precision: "bf16-mixed"
     deterministic: false
-    num_sanity_val_steps: -1
+    num_sanity_val_steps: 0
     callbacks:
       - class_name: ModelCheckpoint
         params:

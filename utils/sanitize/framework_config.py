@@ -175,6 +175,7 @@ class VQVAES1ModuleParams(BaseFrameworkParams):
     perceptual_weight: float = Field(default=1.0, ge=0.0)
     volume_gan_weight: float = Field(default=0.1, ge=0.0)
     gan_feat_weight: float = Field(default=1.0, ge=0.0)
+    discriminator_learning_rate: float | None = Field(default=None, gt=0.0)
     discriminator_iter_start: int = Field(default=0, ge=0)
     disc_loss_type: str = "least_squares"
     disc_channels: int = Field(default=64, ge=1)

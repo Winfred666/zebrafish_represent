@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from monai.networks.nets import VQVAE as MONAIVQVAE
 
 from modules.model.base import (
@@ -18,6 +19,51 @@ from modules.model.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ResizeConv3d(nn.Module):
+    def __init__(self, source: nn.ConvTranspose3d):
+        super().__init__()
+        self.scale_factor = tuple(source.stride)
+        self.padding = tuple(source.padding)
+        self.dilation = tuple(source.dilation)
+        self.kernel_size = tuple(source.kernel_size)
+        self.groups = source.groups
+        self.conv = nn.Conv3d(
+            source.in_channels,
+            source.out_channels,
+            kernel_size=source.kernel_size,
+            stride=1,
+            padding=0,
+            dilation=source.dilation,
+            groups=source.groups,
+            bias=source.bias is not None,
+            device=source.weight.device,
+            dtype=source.weight.dtype,
+        )
+        with torch.no_grad():
+            self.conv.weight.copy_(source.weight.transpose(0, 1))
+            if source.bias is not None:
+                self.conv.bias.copy_(source.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.interpolate(x, scale_factor=self.scale_factor, mode="nearest")
+        pads = []
+        for pad, dilation, kernel in zip(
+            reversed(self.padding), reversed(self.dilation), reversed(self.kernel_size)
+        ):
+            total = dilation * (kernel - 1)
+            pads.extend((pad, total - pad))
+        x = F.pad(x, tuple(pads))
+        return self.conv(x)
+
+
+def _replace_decoder_transposed_convs(module: nn.Module) -> None:
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.ConvTranspose3d):
+            setattr(module, name, _ResizeConv3d(child))
+        else:
+            _replace_decoder_transposed_convs(child)
 
 
 @contextmanager
@@ -106,6 +152,7 @@ class MONAIVQGAN(nn.Module):
             use_checkpointing=use_checkpointing,
         )
 
+        # _replace_decoder_transposed_convs(self.network.decoder)
         if load_from_ckpt:
             self.load_ckpt(load_from_ckpt, strict=strict_load)
 
@@ -156,6 +203,16 @@ class MONAIVQGAN(nn.Module):
             state_dict,
             prefixes=("module.", "model.", "vqvae.", "network."),
         )
+        for name, module in self.network.named_modules():
+            if isinstance(module, _ResizeConv3d):
+                for suffix in ("weight", "bias"):
+                    legacy_key = f"{name}.{suffix}"
+                    replacement_key = f"{name}.conv.{suffix}"
+                    if legacy_key in normalized:
+                        value = normalized.pop(legacy_key)
+                        normalized[replacement_key] = (
+                            value.transpose(0, 1) if suffix == "weight" else value
+                        )
         if not strict:
             normalized, skipped = filter_matching_state_dict(normalized, self.network.state_dict())
             if skipped:
