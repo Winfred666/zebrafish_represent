@@ -16,7 +16,7 @@ class OptimizationParams(IngestibleParams):
     weight_decay: float = Field(ge=0.0)
     adam_beta1: float = Field(default=0.9, gt=0.0, lt=1.0)
     adam_beta2: float = Field(default=0.95, gt=0.0, lt=1.0)
-    lr_scheduler: Literal["linear_warmup", "exponential", "none"] = "linear_warmup"
+    lr_scheduler: Literal["linear_warmup", "exponential", "linear_decay_floor", "none"] = "linear_warmup"
     lr_warmup_steps: int = Field(default=500, ge=1)
     lr_decay_gamma: float = Field(default=0.999, gt=0.0, le=1.0)
     loss_type: Literal["mse", "l1", "smooth_l1"] = "mse"

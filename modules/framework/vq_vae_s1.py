@@ -45,6 +45,7 @@ class VQVAES1Module(BaseValTrainingFramework):
     def __init__(self, config: VQVAES1ModuleParams):
         super().__init__(config)
         self.l1_weight = float(config.l1_weight)
+        self.foreground_recon_weight = float(config.foreground_recon_weight)
         self.perceptual_weight = float(config.perceptual_weight)
         self.volume_gan_weight = float(config.volume_gan_weight)
         self.gan_feat_weight = float(config.gan_feat_weight)
@@ -76,10 +77,18 @@ class VQVAES1Module(BaseValTrainingFramework):
         return clean
 
     def _before_make_noisy(self, clean: Tensor) -> Tensor:
-        return self.vqvae.encode_stage_2_inputs(clean)
+        return self.vqvae.encode(clean)
 
     def _after_make_clean(self, denoised: Tensor) -> Tensor:
         return self.vqvae.decode_stage_2_outputs(denoised)
+
+    def on_validation_epoch_start(self) -> None:
+        # The encoder is trainable, so cached fusion latents become stale
+        # after every optimizer update. Rebuild them for each validation pass.
+        self.val_fusions_clean = []
+        self.val_fusions_noised = []
+        self._fusion_collecting = False
+        super().on_validation_epoch_start()
 
     def _make_initial_noise(self, batch_size: int, *, seed: int | None = None) -> Tensor:
         del seed
@@ -126,7 +135,7 @@ class VQVAES1Module(BaseValTrainingFramework):
             return
         if interval == "step" and scheduler_name == "linear_warmup" and optimizer_idx is not None:
             schedulers[optimizer_idx].step()
-        if interval == "epoch" and scheduler_name == "exponential":
+        if interval == "epoch" and scheduler_name in ("exponential", "linear_decay_floor"):
             for scheduler in schedulers:
                 scheduler.step()
 
@@ -141,7 +150,12 @@ class VQVAES1Module(BaseValTrainingFramework):
             ``(recon_loss, vq_output, aeloss, perceptual_loss, gan_feat_loss)``
         """
         x_recon, vq_output = self.vqvae(x)
-        recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
+        if self.foreground_recon_weight > 1.0:
+            weights = torch.where(x > -0.95, self.foreground_recon_weight, 1.0)
+            recon_loss = (weights * (x_recon - x).abs()).mean() / weights.mean()
+            recon_loss = recon_loss * self.l1_weight
+        else:
+            recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
         if self.perceptual_weight > 0:
             if self.perceptual_loss_fn is None:
                 self.perceptual_loss_fn = MONAIPerceptualLoss().to(device=x.device)
@@ -280,6 +294,17 @@ class VQVAES1Module(BaseValTrainingFramework):
             sched_disc = torch.optim.lr_scheduler.ExponentialLR(
                 opt_disc,
                 gamma=self.optimization.lr_decay_gamma,
+            )
+        elif scheduler_name == "linear_decay_floor":
+            def decay_fn(epoch: int, initial_lr: float) -> float:
+                floor = 1.0e-7 / initial_lr
+                return max(floor, 1.0 - (1.0 - floor) * min(epoch, 200) / 200)
+
+            sched_ae = torch.optim.lr_scheduler.LambdaLR(
+                opt_ae, lr_lambda=lambda epoch: decay_fn(epoch, lr)
+            )
+            sched_disc = torch.optim.lr_scheduler.LambdaLR(
+                opt_disc, lr_lambda=lambda epoch: decay_fn(epoch, disc_lr)
             )
         else:
             raise ValueError(f"Unsupported lr_scheduler={scheduler_name!r}")
