@@ -372,13 +372,15 @@ def build_clipped_midw_grid(
     clean_np = [_channel0_volume_np(volume) for volume in clean_volumes] if clean_volumes else None
     pred_np = [_channel0_volume_np(volume) for volume in pred_volumes]
     scaling_source = clean_np if clean_np is not None else pred_np
-    scaling_rates = []
-    for volume_np in scaling_source:
-        volume_unit = np.clip((volume_np + 1.0) * 0.5, 0.0, None)
-        p995 = float(np.quantile(volume_unit, 0.995))
-        scaling_rates.append(1.0 / max(p995, 1.0e-8))
-
-    mean_scaling_rate = float(np.mean(scaling_rates))
+    # Percentile-based visualization scaling is intentionally disabled. The
+    # shared turbo/PowerNorm renderer already applies the gamma mapping with
+    # the requested fixed [-1, 1] colorbar range.
+    # scaling_rates = []
+    # for volume_np in scaling_source:
+    #     volume_unit = np.clip((volume_np + 1.0) * 0.5, 0.0, None)
+    #     p995 = float(np.quantile(volume_unit, 0.995))
+    #     scaling_rates.append(1.0 / max(p995, 1.0e-8))
+    # mean_scaling_rate = float(np.mean(scaling_rates))
     max_shape = tuple(
         max(int(volume_np.shape[axis]) for volume_np in scaling_source)
         for axis in range(3)
@@ -387,11 +389,11 @@ def build_clipped_midw_grid(
     fusion_grid_rows: list[list[np.ndarray]] = [[] for _ in range(len(w_indices))]
 
     for idx, pred_volume_np in enumerate(pred_np):
-        pred_vis = np.clip((pred_volume_np + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
+        pred_vis = pred_volume_np
         pred_padded = center_pad_fusion_volume(pred_vis, max_shape, fill_value=-1.0)
         clean_padded = None
         if clean_np is not None:
-            clean_vis = np.clip((clean_np[idx] + 1.0) * mean_scaling_rate - 1.0, -1.0, 1.0)
+            clean_vis = clean_np[idx]
             clean_padded = center_pad_fusion_volume(clean_vis, max_shape, fill_value=-1.0)
 
         for row_idx, wi in enumerate(w_indices):

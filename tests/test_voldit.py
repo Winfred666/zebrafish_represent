@@ -1391,6 +1391,12 @@ class VolDiTIntegrationTest(unittest.TestCase):
 
         self.assertIsNotNone(image)
         self.assertEqual(mock_build.call_count, 16)
+        self.assertTrue(
+            all(
+                call.kwargs["colorbar_limits"] == module.DATA_DEFAULT_COLORBAR_LIMIT
+                for call in mock_build.call_args_list
+            )
+        )
         self.assertEqual(tuple(image.shape), (32, 3, 3))
         self.assertTrue(np.all(image[:2] == 0))
         self.assertTrue(np.all(image[-2:] == 15))

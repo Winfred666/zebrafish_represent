@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import matplotlib
 import numpy as np
+import torch
 
 matplotlib.use("Agg", force=True)
 
-from utils.display.visualize_2d import fix_2d_scalar, render_slice
+from utils.display.visualize_2d import build_clipped_midw_grid, fix_2d_scalar, render_slice
 
 
 class Visualize2DTest(unittest.TestCase):
@@ -61,6 +63,32 @@ class Visualize2DTest(unittest.TestCase):
         self.assertEqual(image.shape[2], 3)
         self.assertGreater(image.shape[0], 0)
         self.assertGreater(image.shape[1], 0)
+
+    def test_midw_grid_preserves_values_without_percentile_scaling(self) -> None:
+        clean = torch.tensor(
+            [[[[0.0, 0.5], [0.75, 1.0]], [[-1.0, -0.5], [-0.25, 0.0]]]]
+        )
+        pred = torch.tensor(
+            [[[[0.25, 0.5], [0.75, 1.0]], [[-0.75, -0.5], [-0.25, 0.0]]]]
+        )
+        captured: list[tuple[np.ndarray, np.ndarray | None]] = []
+
+        def capture(gt, pred=None, **kwargs):
+            del kwargs
+            captured.append((gt.copy(), None if pred is None else pred.copy()))
+            return np.zeros((*gt.shape, 3), dtype=np.uint8)
+
+        with patch("utils.display.visualize_2d.fix_2d_scalar", side_effect=capture):
+            image = build_clipped_midw_grid(
+                [pred],
+                clean_volumes=[clean],
+                slice_count=1,
+            )
+
+        self.assertIsNotNone(image)
+        self.assertEqual(len(captured), 1)
+        np.testing.assert_array_equal(captured[0][0], clean[0, :, :, 0].numpy())
+        np.testing.assert_array_equal(captured[0][1], pred[0, :, :, 0].numpy())
 
 
 if __name__ == "__main__":

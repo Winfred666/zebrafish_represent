@@ -621,7 +621,10 @@ class BaseValTrainingFramework(BaseTrainingFramework, ABC):
 
         rows = []
         for volume in sample_volumes:
-            row = build_w_mip_grid([volume.permute(0, 3, 2, 1)])
+            row = build_w_mip_grid(
+                [volume.permute(0, 3, 2, 1)],
+                colorbar_limits=self.DATA_DEFAULT_COLORBAR_LIMIT,
+            )
             if row is not None:
                 rows.append(row)
         return np.vstack(rows) if rows else None
